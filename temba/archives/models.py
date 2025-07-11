@@ -112,6 +112,10 @@ class Archive(models.Model):
 
     def get_download_link(self):
         if self.url:
+            if not getattr(settings, 'AWS_QUERYSTRING_AUTH', True):
+                bucket, key = self.get_storage_location()
+                return f"https://{bucket}.s3.amazonaws.com/{key}"
+            
             s3_client = s3.client()
             bucket, key = self.get_storage_location()
             s3_params = {
