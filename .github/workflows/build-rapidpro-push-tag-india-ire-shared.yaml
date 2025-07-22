@@ -37,6 +37,7 @@ jobs:
             echo "MANIFESTS_REPOSITORY=weni-ai/kubernetes-manifests-platform" | tee -a "${GITHUB_ENV}"
             echo "MANIFESTS_APPLICATION=rapidpro/backend" | tee -a "${GITHUB_ENV}"
             echo "MANIFESTS_PATCH_TARGET=deployment.json" | tee -a "${GITHUB_ENV}"
+            echo "MANIFESTS_PATCH_TARGET1=deployment-image-varnish.json" | tee -a "${GITHUB_ENV}"
             
       - name: Check out the repo
         uses: actions/checkout@v3
@@ -117,6 +118,13 @@ jobs:
                   )
                   echo "${new_configuration}"
                   echo "${new_configuration}" > "${e}/${{ env.MANIFESTS_PATCH_TARGET }}"
+                  echo 'New configurations for image varnish:'
+                  new_configuration=$(
+                    cat "${e}/${{ env.MANIFESTS_PATCH_TARGET1 }}" \
+                      | jq '(..|select(.path == "/spec/template/spec/containers/1/image")?) += {value: "'"${{env.IMAGE_TAG}}"'-varnish"}'
+                  )
+                  echo "${new_configuration}"
+                  echo "${new_configuration}" > "${e}/${{ env.MANIFESTS_PATCH_TARGET1 }}"
                 else
                   echo "Version in file is greater than build, skipping update yaml"
                 fi
