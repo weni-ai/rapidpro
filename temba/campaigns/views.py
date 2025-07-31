@@ -1,11 +1,12 @@
 from smartmin.views import SmartCreateView, SmartCRUDL, SmartDeleteView, SmartReadView, SmartUpdateView
 
 from django import forms
-from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db.models.functions import Lower
 from django.http import Http404, HttpResponseRedirect
+from django.shortcuts import get_object_or_404
 from django.urls import reverse
+from django.utils.functional import cached_property
 from django.utils.translation import gettext_lazy as _
 
 from temba.contacts.models import ContactField, ContactGroup
@@ -103,8 +104,8 @@ class CampaignCRUDL(SmartCRUDL):
 
             # if our group changed, create our new fires
             if new_group != previous_group:
-                self.object.recreate_events()
-                self.object.schedule_events_async()
+                for event in self.object.get_events():
+                    event.schedule_async()
 
             return self.render_modal_response(form)
 
@@ -129,7 +130,7 @@ class CampaignCRUDL(SmartCRUDL):
                     menu.add_modax(
                         _("New Event"),
                         "event-add",
-                        f"{reverse('campaigns.campaignevent_create')}?campaign={obj.id}",
+                        reverse("campaigns.campaignevent_create", args=[obj.id]),
                         as_button=True,
                     )
 
@@ -146,6 +147,11 @@ class CampaignCRUDL(SmartCRUDL):
 
                 if self.has_org_perm("campaigns.campaign_archive"):
                     menu.add_url_post(_("Archive"), reverse("campaigns.campaign_archive", args=[obj.id]))
+
+        def get_context_data(self, **kwargs):
+            context = super().get_context_data(**kwargs)
+            context["events"] = self.object.get_sorted_events()
+            return context
 
     class Create(ModalFormMixin, OrgPermsMixin, SmartCreateView):
         fields = ("name", "group")
@@ -324,10 +330,9 @@ class CampaignEventForm(forms.ModelForm):
 
         # if its a message flow, set that accordingly
         if self.cleaned_data["event_type"] == CampaignEvent.TYPE_MESSAGE:
-            if self.instance.id:
-                base_language = self.instance.flow.base_language
-            else:
-                base_language = org.flow_languages[0]
+            base_language = org.flow_languages[0]
+            if self.instance.id and self.instance.base_language:
+                base_language = self.instance.base_language
 
             translations = {}
             for language in self.languages:
@@ -335,13 +340,8 @@ class CampaignEventForm(forms.ModelForm):
                 if iso_code in self.cleaned_data and self.cleaned_data.get(iso_code, "").strip():
                     translations[iso_code] = self.cleaned_data.get(iso_code, "").strip()
 
-            if not obj.flow_id or not obj.flow.is_active or not obj.flow.is_system:
-                obj.flow = Flow.create_single_message(org, request.user, translations, base_language=base_language)
-            else:
-                # set our single message on our flow
-                obj.flow.update_single_message_flow(request.user, translations, base_language)
-
-            obj.message = translations
+            obj.translations = {lang: {"text": text} for lang, text in translations.items()}
+            obj.base_language = base_language
             obj.full_clean()
             obj.start_mode = self.cleaned_data["message_start_mode"]
 
@@ -372,13 +372,12 @@ class CampaignEventForm(forms.ModelForm):
 
         if (
             self.instance.id
-            and self.instance.flow
+            and self.instance.event_type == CampaignEvent.TYPE_FLOW
             and self.instance.flow.flow_type == Flow.TYPE_BACKGROUND
-            and not self.instance.message
         ):
             flow.widget.attrs["info_text"] = CampaignEventCRUDL.BACKGROUND_WARNING
 
-        message = self.instance.message or {}
+        message = {lang: t["text"] for lang, t in (self.instance.translations or {}).items()}
         self.languages = []
 
         # add in all of our languages for message forms
@@ -426,9 +425,9 @@ class CampaignEventForm(forms.ModelForm):
         # determine our base language if necessary
         base_language = org.flow_languages[0]
 
-        # if we are editing, always include the flow base language
+        # if we are editing, always include the base language
         if self.instance.id:
-            base_language = self.instance.flow.base_language
+            base_language = self.instance.base_language
 
         # add our default language, we'll insert it at the front of the list
         if base_language and base_language not in self.fields:
@@ -452,7 +451,17 @@ class CampaignEventForm(forms.ModelForm):
 
     class Meta:
         model = CampaignEvent
-        fields = "__all__"
+        fields = (
+            "event_type",
+            "relative_to",
+            "offset",
+            "unit",
+            "delivery_hour",
+            "direction",
+            "flow_to_start",
+            "flow_start_mode",
+            "message_start_mode",
+        )
         widgets = {"offset": InputWidget(attrs={"widget_only": True})}
 
 
@@ -465,52 +474,40 @@ class CampaignEventCRUDL(SmartCRUDL):
     )
 
     class Read(SpaMixin, OrgObjPermsMixin, ContextMenuMixin, SmartReadView):
+        title = _("Event History")
+
         @classmethod
         def derive_url_pattern(cls, path, action):
             return r"^%s/%s/(?P<campaign_uuid>[0-9a-f-]+)/(?P<pk>\d+)/$" % (path, action)
 
-        def derive_title(self):
-            return _("Event History")
-
         def derive_menu_path(self):
             return f"/campaign/{'archived' if self.get_object().campaign.is_archived else 'active'}/"
 
-        def pre_process(self, request, *args, **kwargs):
-            event = self.get_object()
-            if not event.is_active:
-                messages.error(self.request, "Campaign event no longer exists")
-                return HttpResponseRedirect(reverse("campaigns.campaign_read", args=[event.campaign.uuid]))
-            return super().pre_process(request, *args, **kwargs)
+        def get_queryset(self):
+            return super().get_queryset().filter(is_active=True)
 
         def get_object_org(self):
             return self.get_object().campaign.org
 
         def get_context_data(self, **kwargs):
             context = super().get_context_data(**kwargs)
-            event_fires = self.get_object().fires.all()
-
-            fired_event_fires = event_fires.exclude(fired=None).order_by("-fired", "pk")
-            scheduled_event_fires = event_fires.filter(fired=None).order_by("scheduled", "pk")
-
-            fired = fired_event_fires[:25]
-            context["fired_event_fires"] = fired
-            context["fired_event_fires_count"] = fired_event_fires.count() - len(fired)
-
-            scheduled = scheduled_event_fires[:25]
-            context["scheduled_event_fires"] = scheduled
-            context["scheduled_event_fires_count"] = scheduled_event_fires.count() - len(scheduled)
-
+            context["recent_fires"] = self.object.get_recent_fires()
             return context
 
         def build_context_menu(self, menu):
             obj = self.get_object()
 
-            if self.has_org_perm("campaigns.campaignevent_update") and not obj.campaign.is_archived:
+            if (
+                self.has_org_perm("campaigns.campaignevent_update")
+                and obj.status != obj.STATUS_SCHEDULING
+                and not obj.campaign.is_archived
+            ):
                 menu.add_modax(
                     _("Edit"),
                     "event-update",
                     reverse("campaigns.campaignevent_update", args=[obj.id]),
                     title=_("Edit Event"),
+                    as_button=True,
                 )
 
             if self.has_org_perm("campaigns.campaignevent_delete"):
@@ -556,15 +553,17 @@ class CampaignEventCRUDL(SmartCRUDL):
             "flow_start_mode",
         ]
 
-        def pre_process(self, request, *args, **kwargs):
-            event = self.get_object()
-            if not event.is_active or not event.campaign.is_active or event.campaign.is_archived:
-                raise Http404("Event not found")
-
         def get_form_kwargs(self):
             kwargs = super().get_form_kwargs()
             kwargs["org"] = self.request.org
             return kwargs
+
+        def get_queryset(self):
+            return (
+                super()
+                .get_queryset()
+                .filter(is_active=True, status=CampaignEvent.STATUS_READY, campaign__is_archived=False)
+            )
 
         def get_object_org(self):
             return self.get_object().campaign.org
@@ -583,10 +582,8 @@ class CampaignEventCRUDL(SmartCRUDL):
             org = self.request.org
             fields += org.flow_languages
 
-            flow_language = self.object.flow.base_language
-
-            if flow_language not in fields:
-                fields.append(flow_language)
+            if self.object.base_language not in fields:
+                fields.append(self.object.base_language)
 
             return fields
 
@@ -607,39 +604,33 @@ class CampaignEventCRUDL(SmartCRUDL):
 
             return initial
 
-        def post_save(self, obj):
-            obj = super().post_save(obj)
-            obj.update_flow_name()
-            return obj
-
         def pre_save(self, obj):
             obj = super().pre_save(obj)
             self.form.pre_save(self.request, obj)
 
-            prev = CampaignEvent.objects.get(pk=obj.pk)
-            if prev.event_type == "M" and (obj.event_type == "F" and prev.flow):  # pragma: needs cover
+            prev = CampaignEvent.objects.get(id=obj.id)
+            if prev.event_type == CampaignEvent.TYPE_MESSAGE and (
+                obj.event_type == CampaignEvent.TYPE_FLOW and prev.flow
+            ):  # pragma: needs cover
                 flow = prev.flow
                 flow.is_active = False
-                flow.save()
-                obj.message = None
+                flow.save(update_fields=("is_active",))
+                obj.translations = None
+                obj.base_language = None
 
-            # if we changed anything, update our event fires
+            # if we changed scheduling, update the fire version to invalidate existing fires
             if (
                 prev.unit != obj.unit
                 or prev.offset != obj.offset
                 or prev.relative_to != obj.relative_to
                 or prev.delivery_hour != obj.delivery_hour
-                or prev.message != obj.message
-                or prev.flow != obj.flow
-                or prev.start_mode != obj.start_mode
             ):
-                obj = obj.recreate()
                 obj.schedule_async()
 
             return obj
 
         def get_success_url(self):
-            return reverse("campaigns.campaignevent_read", args=[self.object.campaign.uuid, self.object.pk])
+            return reverse("campaigns.campaignevent_read", args=[self.object.campaign.uuid, self.object.id])
 
     class Create(ModalFormMixin, OrgPermsMixin, SmartCreateView):
         default_fields = [
@@ -661,13 +652,15 @@ class CampaignEventCRUDL(SmartCRUDL):
             context["background_warning"] = CampaignEventCRUDL.BACKGROUND_WARNING
             return context
 
-        def pre_process(self, request, *args, **kwargs):
-            campaign_id = request.GET.get("campaign", None)
-            if campaign_id:
-                campaign = Campaign.objects.filter(id=campaign_id, is_active=True, is_archived=False)
+        @classmethod
+        def derive_url_pattern(cls, path, action):
+            return r"^%s/%s/(?P<campaign_id>\d+)/$" % (path, action)
 
-                if not campaign.exists():
-                    raise Http404("Campaign not found")
+        @cached_property
+        def campaign(self):
+            return get_object_or_404(
+                Campaign, id=self.kwargs["campaign_id"], org=self.request.org, is_active=True, is_archived=False
+            )
 
         def derive_fields(self):
             from copy import deepcopy
@@ -705,15 +698,11 @@ class CampaignEventCRUDL(SmartCRUDL):
 
         def post_save(self, obj):
             obj = super().post_save(obj)
-            obj.update_flow_name()
             obj.schedule_async()
             return obj
 
         def pre_save(self, obj):
             obj = super().pre_save(obj)
-            obj.campaign = Campaign.objects.get(org=self.request.org, id=self.request.GET.get("campaign"))
+            obj.campaign = self.campaign
             self.form.pre_save(self.request, obj)
             return obj
-
-        def form_invalid(self, form):
-            return super().form_invalid(form)

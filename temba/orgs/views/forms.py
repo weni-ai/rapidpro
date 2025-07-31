@@ -2,15 +2,15 @@ import smtplib
 from email.utils import parseaddr
 
 from django import forms
-from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
 from django.utils.translation import gettext_lazy as _
 
-from temba.utils.email import EmailSender, is_valid_address, make_smtp_url, parse_smtp_url
+from temba.utils.email import EmailSender, make_smtp_url, parse_smtp_url
 from temba.utils.fields import InputWidget
 from temba.utils.timezones import TimeZoneFormField
 
-from ..models import Org, User
+from ..models import Org
 
 
 class SignupForm(forms.ModelForm):
@@ -18,44 +18,17 @@ class SignupForm(forms.ModelForm):
     Signup for new organizations
     """
 
-    first_name = forms.CharField(
-        max_length=User._meta.get_field("first_name").max_length,
-        widget=InputWidget(attrs={"widget_only": True, "placeholder": _("First name")}),
-    )
-    last_name = forms.CharField(
-        max_length=User._meta.get_field("last_name").max_length,
-        widget=InputWidget(attrs={"widget_only": True, "placeholder": _("Last name")}),
-    )
-    email = forms.EmailField(
-        max_length=User._meta.get_field("username").max_length,
-        widget=InputWidget(attrs={"widget_only": True, "placeholder": _("name@domain.com")}),
-    )
-
     timezone = TimeZoneFormField(help_text=_("The timezone for your workspace"), widget=forms.widgets.HiddenInput())
-
-    password = forms.CharField(
-        widget=InputWidget(attrs={"hide_label": True, "password": True, "placeholder": _("Password")}),
-        validators=[validate_password],
-        help_text=_("At least eight characters or more"),
-    )
 
     name = forms.CharField(
         label=_("Workspace"),
         help_text=_("A workspace is usually the name of a company or project"),
-        widget=InputWidget(attrs={"widget_only": False, "placeholder": _("My Company, Inc.")}),
+        widget=InputWidget(attrs={"widget_only": True, "placeholder": _("My Company, Inc.")}),
     )
-
-    def clean_email(self):
-        email = self.cleaned_data["email"]
-        if email:
-            if User.objects.filter(username__iexact=email):
-                raise forms.ValidationError(_("That email address is already used"))
-
-        return email.lower()
 
     class Meta:
         model = Org
-        fields = ("first_name", "last_name", "email", "timezone", "password", "name")
+        fields = ("timezone", "name")
 
 
 class SMTPForm(forms.Form):
@@ -87,9 +60,13 @@ class SMTPForm(forms.Form):
         self.fields["password"].initial = password
 
     def clean_from_email(self):
+        # clean the from email, that can contain a name, e.g. Jane Doe <jane@example.org>
         data = self.cleaned_data["from_email"]
-        if data and not is_valid_address(parseaddr(data)[1]):
-            raise forms.ValidationError(_("Not a valid email address."))
+        if data:
+            try:
+                validate_email(parseaddr(data)[1])
+            except ValidationError:
+                raise forms.ValidationError(_("Not a valid email address."))
         return data
 
     def clean(self):
@@ -108,7 +85,7 @@ class SMTPForm(forms.Form):
             recipients = [admin.email for admin in self.org.get_admins().order_by("email")]
             subject = _("%(name)s SMTP settings test") % self.org.branding
             try:
-                sender.send(recipients, subject, "orgs/email/smtp_test", {})
+                sender.send(recipients, "orgs/email/smtp_test", {}, subject)
             except smtplib.SMTPException as e:
                 raise ValidationError(_("SMTP settings test failed with error: %s") % str(e))
             except Exception:

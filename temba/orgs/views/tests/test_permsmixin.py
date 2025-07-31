@@ -68,7 +68,7 @@ class OrgPermsMixinTest(TembaTest):
         # admin belongs to both orgs
         self.login(self.admin, choose_org=self.org)
         self.assertEqual(200, self.client.get(contact1_url).status_code)
-        self.assertRedirect(self.client.get(contact2_url), reverse("orgs.org_choose"))
+        self.assertRedirect(self.client.get(contact2_url), reverse("orgs.org_switch"))
 
         # staff can't access without org
         self.login(self.customer_support)

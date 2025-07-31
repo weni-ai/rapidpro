@@ -1,6 +1,7 @@
 import logging
 from abc import abstractmethod
 
+from django.conf import settings
 from django.db import models
 from django.db.models import Q
 from django.urls import reverse
@@ -8,7 +9,8 @@ from django.utils import timezone
 
 from temba.channels.models import Channel
 from temba.contacts.models import ContactImport
-from temba.orgs.models import Export, Org, User
+from temba.orgs.models import Export, Org
+from temba.users.models import User
 from temba.utils.email import EmailSender
 
 logger = logging.getLogger(__name__)
@@ -130,16 +132,17 @@ class NotificationType:
         return ""
 
     def get_email_context(self, notification, branding: dict):
+        read_url = reverse("notifications.notification_read", args=[notification.id])
         return {
             "notification": notification,
-            "target_url": f"https://{branding['domain']}{self.get_target_url(notification)}",
+            "read_url": f"https://{branding['domain']}{read_url}",
         }
 
     def as_json(self, notification) -> dict:
         return {
             "type": notification.type.slug,
             "created_on": notification.created_on.isoformat(),
-            "target_url": self.get_target_url(notification),
+            "url": reverse("notifications.notification_read", args=[notification.id]),
             "is_seen": notification.is_seen,
         }
 
@@ -155,10 +158,12 @@ class Notification(models.Model):
     EMAIL_STATUS_PENDING = "P"
     EMAIL_STATUS_SENT = "S"
     EMAIL_STATUS_NONE = "N"
+    EMAIL_STATUS_UNVERIFIED = "U"
     EMAIL_STATUS_CHOICES = (
         (EMAIL_STATUS_PENDING, "Pending"),
         (EMAIL_STATUS_SENT, "Sent"),
         (EMAIL_STATUS_NONE, "None"),
+        (EMAIL_STATUS_UNVERIFIED, "Unverified"),
     )
 
     id = models.BigAutoField(primary_key=True)
@@ -171,7 +176,7 @@ class Notification(models.Model):
     # types like channel alerts, it will be the UUID of an object.
     scope = models.CharField(max_length=36)
 
-    user = models.ForeignKey(User, on_delete=models.PROTECT, related_name="notifications")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="notifications")
     is_seen = models.BooleanField(default=False)
     email_address = models.EmailField(null=True)  # only used when dest email != current user email
     email_status = models.CharField(choices=EMAIL_STATUS_CHOICES, max_length=1, default=EMAIL_STATUS_NONE)
@@ -183,8 +188,22 @@ class Notification(models.Model):
     data = models.JSONField(null=True, default=dict)
 
     @classmethod
-    def create_all(cls, org, notification_type: str, *, scope: str, users, medium: str = MEDIUM_UI, **kwargs):
+    def create_all(
+        cls,
+        org,
+        notification_type: str,
+        *,
+        scope: str,
+        users,
+        medium: str = MEDIUM_UI,
+        **kwargs,
+    ):
         for user in users:
+            # send email if notification type supports it and user's email is verified
+            email_status = cls.EMAIL_STATUS_NONE
+            if cls.MEDIUM_EMAIL in medium:
+                email_status = cls.EMAIL_STATUS_PENDING if user.is_verified() else cls.EMAIL_STATUS_UNVERIFIED
+
             cls.objects.get_or_create(
                 org=org,
                 notification_type=notification_type,
@@ -192,6 +211,7 @@ class Notification(models.Model):
                 user=user,
                 is_seen=cls.MEDIUM_UI not in medium,
                 medium=medium,
+                email_status=email_status,
                 defaults=kwargs,
             )
 
@@ -202,12 +222,19 @@ class Notification(models.Model):
 
         if subject and template:
             sender = EmailSender.from_email_type(self.org.branding, "notifications")
-            sender.send([self.email_address or self.user.email], f"[{self.org.name}] {subject}", template, context)
+            sender.send([self.email_address or self.user.email], template, context, f"[{self.org.name}] {subject}")
         else:  # pragma: no cover
             logger.error(f"pending emails for notification type {self.type.slug} not configured for email")
 
         self.email_status = Notification.EMAIL_STATUS_SENT
         self.save(update_fields=("email_status",))
+
+    def get_target_url(self) -> str:
+        return self.type.get_target_url(self)
+
+    def clear(self):
+        self.is_seen = True
+        self.save(update_fields=("is_seen",))
 
     @classmethod
     def mark_seen(cls, org, user, notification_type: str = None, *, scope: str = None):

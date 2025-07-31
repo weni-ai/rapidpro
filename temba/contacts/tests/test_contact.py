@@ -5,20 +5,21 @@ from uuid import UUID
 
 from django.db.models import Value as DbValue
 from django.db.models.functions import Concat, Substr
+from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 
 from temba import mailroom
-from temba.campaigns.models import Campaign, CampaignEvent, EventFire
+from temba.campaigns.models import Campaign, CampaignEvent
 from temba.channels.models import ChannelEvent
-from temba.contacts.models import URN, Contact, ContactField, ContactGroup, ContactURN
+from temba.contacts.models import URN, Contact, ContactField, ContactFire, ContactGroup, ContactURN
 from temba.flows.models import Flow
 from temba.locations.models import AdminBoundary
 from temba.mailroom import modifiers
-from temba.msgs.models import Msg, SystemLabel
+from temba.msgs.models import Msg, MsgFolder
 from temba.orgs.models import Org
 from temba.schedules.models import Schedule
-from temba.tests import TembaTest, mock_mailroom
+from temba.tests import MockJsonResponse, TembaTest, mock_mailroom
 from temba.tests.engine import MockSessionWriter
 from temba.tickets.models import Ticket
 
@@ -41,7 +42,7 @@ class ContactTest(TembaTest):
 
         # create an deleted contact
         self.jim = self.create_contact(name="Jim")
-        self.jim.release(self.user, deindex=False)
+        self.jim.release(self.admin, deindex=False)
 
         # create contact in other org
         self.other_org_contact = self.create_contact(name="Fred", phone="+250768111222", org=self.org2)
@@ -51,7 +52,7 @@ class ContactTest(TembaTest):
 
         # create 10 notes
         for i in range(10):
-            self.joe.set_note(self.user, f"{note_text} {i+1}")
+            self.joe.set_note(self.admin, f"{note_text} {i+1}")
 
         notes = self.joe.notes.all().order_by("id")
 
@@ -76,16 +77,30 @@ class ContactTest(TembaTest):
             mr_mocks.calls["contact_modify"],
         )
 
-    @mock_mailroom
-    def test_open_ticket(self, mock_contact_modify):
-        mock_contact_modify.return_value = {self.joe.id: {"contact": {}, "events": []}}
+    @override_settings(MAILROOM_URL="http://mailroom:8090")
+    @patch("requests.post")
+    def test_open_ticket(self, mock_post):
+        mock_post.return_value = MockJsonResponse(200, {"modified": {self.joe.id: {"contact": {}, "events": []}}})
 
-        ticket = self.joe.open_ticket(
-            self.admin, topic=self.org.default_ticket_topic, assignee=self.agent, note="Looks sus"
+        self.joe.open_ticket(self.admin, topic=self.org.default_ticket_topic, assignee=self.agent, note="Looks sus")
+
+        mock_post.assert_called_once_with(
+            "http://mailroom:8090/mr/contact/modify",
+            headers={"User-Agent": "Temba"},
+            json={
+                "org_id": self.org.id,
+                "user_id": self.admin.id,
+                "contact_ids": [self.joe.id],
+                "modifiers": [
+                    {
+                        "type": "ticket",
+                        "topic": {"uuid": str(self.org.default_ticket_topic.uuid), "name": "General"},
+                        "assignee": {"uuid": str(self.agent.uuid), "name": "Agnes"},
+                        "note": "Looks sus",
+                    }
+                ],
+            },
         )
-
-        self.assertEqual(self.org.default_ticket_topic, ticket.topic)
-        self.assertEqual("Looks sus", ticket.events.get(event_type="O").note)
 
     @mock_mailroom
     def test_interrupt(self, mr_mocks):
@@ -156,8 +171,23 @@ class ContactTest(TembaTest):
 
         campaign = Campaign.create(self.org, self.admin, "Reminders", group)
         joined = self.create_field("joined", "Joined On", value_type=ContactField.TYPE_DATETIME)
-        event = CampaignEvent.create_message_event(self.org, self.admin, campaign, joined, 2, unit="D", message="Hi")
-        EventFire.objects.create(event=event, contact=contact, scheduled=timezone.now() + timedelta(days=2))
+        event = CampaignEvent.create_message_event(
+            self.org,
+            self.admin,
+            campaign,
+            joined,
+            2,
+            unit="D",
+            translations={"eng": {"text": "Hi"}},
+            base_language="eng",
+        )
+        ContactFire.objects.create(
+            org=self.org,
+            contact=contact,
+            fire_type="C",
+            scope=str(event.id),
+            fire_on=timezone.now() + timedelta(days=2),
+        )
 
         self.create_incoming_call(msg_flow, contact)
 
@@ -172,7 +202,7 @@ class ContactTest(TembaTest):
         self.assertEqual(2, contact.runs.all().count())
         self.assertEqual(7, contact.msgs.all().count())
         self.assertEqual(2, len(contact.fields))
-        self.assertEqual(1, contact.campaign_fires.count())
+        self.assertEqual(1, contact.fires.count())
 
         self.assertEqual(2, Ticket.get_status_count(self.org, self.org.topics.all(), Ticket.STATUS_OPEN))
         self.assertEqual(1, Ticket.get_status_count(self.org, self.org.topics.all(), Ticket.STATUS_CLOSED))
@@ -207,16 +237,16 @@ class ContactTest(TembaTest):
         self.assertEqual(0, contact.urns.all().count())
         self.assertEqual(0, contact.runs.all().count())
         self.assertEqual(0, contact.msgs.all().count())
-        self.assertEqual(0, contact.campaign_fires.count())
+        self.assertEqual(0, contact.fires.count())
 
         # tickets deleted (only for this contact)
         self.assertEqual(0, contact.tickets.count())
         self.assertEqual(1, Ticket.get_status_count(self.org, self.org.topics.all(), Ticket.STATUS_OPEN))
         self.assertEqual(0, Ticket.get_status_count(self.org, self.org.topics.all(), Ticket.STATUS_CLOSED))
 
-        # contact who used to own our urn had theirs released too
-        self.assertEqual(0, old_contact.calls.all().count())
-        self.assertEqual(0, old_contact.msgs.all().count())
+        # contact who used to own our urn still has their content
+        self.assertEqual(1, old_contact.calls.all().count())
+        self.assertEqual(2, old_contact.msgs.all().count())
 
         self.assertIsNone(contact.fields)
         self.assertIsNone(contact.name)
@@ -237,10 +267,10 @@ class ContactTest(TembaTest):
         label.toggle_label([msg1, msg2, msg3], add=True)
         static_group = self.create_group("Just Joe", [self.joe])
 
-        msg_counts = SystemLabel.get_counts(self.org)
-        self.assertEqual(1, msg_counts[SystemLabel.TYPE_INBOX])
-        self.assertEqual(1, msg_counts[SystemLabel.TYPE_FLOWS])
-        self.assertEqual(1, msg_counts[SystemLabel.TYPE_ARCHIVED])
+        msg_counts = MsgFolder.get_counts(self.org)
+        self.assertEqual(1, msg_counts[MsgFolder.INBOX])
+        self.assertEqual(1, msg_counts[MsgFolder.HANDLED])
+        self.assertEqual(1, msg_counts[MsgFolder.ARCHIVED])
 
         self.assertEqual(
             Contact.get_status_counts(self.org),
@@ -255,7 +285,7 @@ class ContactTest(TembaTest):
         self.assertEqual(set(label.msgs.all()), {msg1, msg2, msg3})
         self.assertEqual(set(static_group.contacts.all()), {self.joe})
 
-        self.joe.stop(self.user)
+        self.joe.stop(self.admin)
 
         # check that joe is now stopped
         self.joe = Contact.objects.get(pk=self.joe.pk)
@@ -274,7 +304,7 @@ class ContactTest(TembaTest):
         )
         self.assertEqual(set(static_group.contacts.all()), set())
 
-        self.joe.block(self.user)
+        self.joe.block(self.admin)
 
         # check that joe is now blocked instead of stopped
         self.joe.refresh_from_db()
@@ -297,10 +327,10 @@ class ContactTest(TembaTest):
 
         # but his messages are unchanged
         self.assertEqual(2, Msg.objects.filter(contact=self.joe, visibility="V").count())
-        msg_counts = SystemLabel.get_counts(self.org)
-        self.assertEqual(1, msg_counts[SystemLabel.TYPE_INBOX])
-        self.assertEqual(1, msg_counts[SystemLabel.TYPE_FLOWS])
-        self.assertEqual(1, msg_counts[SystemLabel.TYPE_ARCHIVED])
+        msg_counts = MsgFolder.get_counts(self.org)
+        self.assertEqual(1, msg_counts[MsgFolder.INBOX])
+        self.assertEqual(1, msg_counts[MsgFolder.HANDLED])
+        self.assertEqual(1, msg_counts[MsgFolder.ARCHIVED])
 
         self.joe.archive(self.admin)
 
@@ -337,7 +367,7 @@ class ContactTest(TembaTest):
             },
         )
 
-        self.joe.release(self.user)
+        self.joe.release(self.admin)
 
         # check that joe has been released (doesn't change his status)
         self.joe = Contact.objects.get(pk=self.joe.pk)
@@ -359,10 +389,10 @@ class ContactTest(TembaTest):
         self.assertEqual(0, Msg.objects.filter(contact=self.joe).exclude(text="").count())
         self.assertEqual(0, label.msgs.count())
 
-        msg_counts = SystemLabel.get_counts(self.org)
-        self.assertEqual(0, msg_counts[SystemLabel.TYPE_INBOX])
-        self.assertEqual(0, msg_counts[SystemLabel.TYPE_FLOWS])
-        self.assertEqual(0, msg_counts[SystemLabel.TYPE_ARCHIVED])
+        msg_counts = MsgFolder.get_counts(self.org)
+        self.assertEqual(0, msg_counts[MsgFolder.INBOX])
+        self.assertEqual(0, msg_counts[MsgFolder.HANDLED])
+        self.assertEqual(0, msg_counts[MsgFolder.ARCHIVED])
 
         # and he shouldn't be in any groups
         self.assertEqual(set(static_group.contacts.all()), set())
@@ -371,8 +401,8 @@ class ContactTest(TembaTest):
         self.assertEqual(0, ContactURN.objects.filter(contact=self.joe).count())
 
         # blocking and failing an inactive contact won't change groups
-        self.joe.block(self.user)
-        self.joe.stop(self.user)
+        self.joe.block(self.admin)
+        self.joe.stop(self.admin)
 
         self.assertEqual(
             Contact.get_status_counts(self.org),
@@ -527,7 +557,7 @@ class ContactTest(TembaTest):
         )
 
         # empty query just returns up to 25 groups A-Z
-        with self.assertNumQueries(10):
+        with self.assertNumQueries(9):
             self.assertEqual(
                 [
                     {"id": str(joe_and_frank.uuid), "name": "Joe and Frank", "type": "group", "count": 2},
@@ -538,7 +568,7 @@ class ContactTest(TembaTest):
                 omnibox_request(""),
             )
 
-        with self.assertNumQueries(13):
+        with self.assertNumQueries(12):
             mr_mocks.contact_search(query='name ~ "250" OR urn ~ "250"', total=2, contacts=[self.billy, self.frank])
 
             self.assertEqual(
@@ -549,7 +579,7 @@ class ContactTest(TembaTest):
                 omnibox_request("?search=250"),
             )
 
-        with self.assertNumQueries(14):
+        with self.assertNumQueries(13):
             mr_mocks.contact_search(query='name ~ "FRA" OR urn ~ "FRA"', total=1, contacts=[self.frank])
 
             self.assertEqual(
@@ -607,34 +637,47 @@ class ContactTest(TembaTest):
         # lookup by contact uuids
         self.assertEqual(omnibox_request("?c=%s,%s" % (self.joe.uuid, self.frank.uuid)), [])
 
-    def test_get_scheduled_messages(self):
-        just_joe = self.create_group("Just Joe", [self.joe])
+    def test_get_scheduled_broadcasts(self):
+        just_joe1 = self.create_group("Just Joe 1", [self.joe])
+        just_joe2 = self.create_group("Just Joe 2", [self.joe])
 
-        self.assertEqual(0, self.joe.get_scheduled_broadcasts().count())
+        # scheduled via contact
+        broadcast1 = self.create_broadcast(
+            self.admin,
+            {"eng": {"text": "Hello"}},
+            contacts=[self.joe],
+            schedule=Schedule.create(self.org, timezone.now() + timedelta(days=2), Schedule.REPEAT_NEVER),
+        )
 
-        broadcast = self.create_broadcast(self.admin, {"eng": {"text": "Hello"}}, contacts=[self.frank])
-        self.assertEqual(0, self.joe.get_scheduled_broadcasts().count())
+        # scheduled via group (two to check we don't return duplicates)
+        broadcast2 = self.create_broadcast(
+            self.admin,
+            {"eng": {"text": "Hello"}},
+            groups=[just_joe1, just_joe2],
+            schedule=Schedule.create(self.org, timezone.now() + timedelta(days=2), Schedule.REPEAT_NEVER),
+        )
 
-        broadcast.contacts.add(self.joe)
+        # scheduled via contact and group
+        broadcast3 = self.create_broadcast(
+            self.admin,
+            {"eng": {"text": "Hello"}},
+            contacts=[self.joe],
+            groups=[just_joe1],
+            schedule=Schedule.create(self.org, timezone.now() + timedelta(days=2), Schedule.REPEAT_NEVER),
+        )
 
-        self.assertEqual(0, self.joe.get_scheduled_broadcasts().count())
+        # scheduled in past
+        self.create_broadcast(
+            self.admin,
+            {"eng": {"text": "Hello"}},
+            groups=[just_joe1],
+            schedule=Schedule.create(self.org, timezone.now() - timedelta(days=2), Schedule.REPEAT_NEVER),
+        )
 
-        schedule_time = timezone.now() + timedelta(days=2)
-        broadcast.schedule = Schedule.create(self.org, schedule_time, Schedule.REPEAT_NEVER)
-        broadcast.save(update_fields=("schedule",))
+        # non-scheduled broadcast
+        self.create_broadcast(self.admin, {"eng": {"text": "Hello"}}, contacts=[self.joe])
 
-        self.assertEqual(self.joe.get_scheduled_broadcasts().count(), 1)
-        self.assertIn(broadcast, self.joe.get_scheduled_broadcasts())
-
-        broadcast.contacts.remove(self.joe)
-        self.assertEqual(0, self.joe.get_scheduled_broadcasts().count())
-
-        broadcast.groups.add(just_joe)
-        self.assertEqual(self.joe.get_scheduled_broadcasts().count(), 1)
-        self.assertIn(broadcast, self.joe.get_scheduled_broadcasts())
-
-        broadcast.groups.remove(just_joe)
-        self.assertEqual(0, self.joe.get_scheduled_broadcasts().count())
+        self.assertEqual(list(self.joe.get_scheduled_broadcasts().order_by("id")), [broadcast1, broadcast2, broadcast3])
 
     @mock_mailroom
     def test_contacts_search(self, mr_mocks):
@@ -783,7 +826,7 @@ class ContactTest(TembaTest):
 
         contact5 = self.create_contact(name="Jimmy", phone="+250788333555")
         mods = contact5.update_urns(["twitter:jimmy_woot", "tel:0788333666"])
-        contact5.modify(self.user, mods)
+        contact5.modify(self.editor, mods)
 
         # check old phone URN still existing but was detached
         self.assertIsNone(ContactURN.objects.get(identity="tel:+250788333555").contact)

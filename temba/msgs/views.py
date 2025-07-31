@@ -21,13 +21,14 @@ from temba.archives.models import Archive
 from temba.mailroom.client.types import Exclusions
 from temba.orgs.models import Org
 from temba.orgs.views.base import (
+    BaseCreateModal,
     BaseDependencyDeleteModal,
     BaseExportModal,
     BaseListView,
     BaseMenuView,
     BaseUsagesModal,
 )
-from temba.orgs.views.mixins import BulkActionMixin, OrgObjPermsMixin, OrgPermsMixin
+from temba.orgs.views.mixins import BulkActionMixin, OrgObjPermsMixin, OrgPermsMixin, UniqueNameMixin
 from temba.templates.models import Template
 from temba.utils import json
 from temba.utils.compose import compose_deserialize, compose_serialize
@@ -44,45 +45,10 @@ from temba.utils.views.mixins import (
 from temba.utils.views.wizard import SmartWizardUpdateView, SmartWizardView
 
 from .forms import ComposeForm, ScheduleForm, TargetForm
-from .models import Broadcast, Label, LabelCount, Media, MessageExport, Msg, OptIn, SystemLabel
+from .models import Broadcast, Label, LabelCount, Media, MessageExport, Msg, MsgFolder, OptIn
 
 
-class SystemLabelView(SpaMixin, BaseListView):
-    """
-    Base class for views backed by a system label or message label queryset
-    """
-
-    system_label = None
-    paginate_by = 100
-
-    def pre_process(self, request, *args, **kwargs):
-        if self.system_label:
-            self.queryset = SystemLabel.get_queryset(request.org, self.system_label)
-
-    def derive_label(self):
-        return self.system_label
-
-    def get_context_data(self, **kwargs):
-        org = self.request.org
-        counts = SystemLabel.get_counts(org)
-        label = self.derive_label()
-
-        # if there isn't a search filtering the queryset, we can replace the count function with a pre-calculated value
-        if "search" not in self.request.GET:
-            if isinstance(label, Label):
-                patch_queryset_count(self.object_list, label.get_visible_count)
-            elif isinstance(label, str):
-                patch_queryset_count(self.object_list, lambda: max(0, counts[label]))
-
-        context = super().get_context_data(**kwargs)
-        context["has_messages"] = (
-            any(counts.values()) or Archive.objects.filter(org=org, archive_type=Archive.TYPE_MSG).exists()
-        )
-
-        return context
-
-
-class MsgListView(ContextMenuMixin, BulkActionMixin, SystemLabelView):
+class MsgListView(ContextMenuMixin, BulkActionMixin, SpaMixin, BaseListView):
     """
     Base class for message list views with message folders and labels listed by the side
     """
@@ -93,11 +59,23 @@ class MsgListView(ContextMenuMixin, BulkActionMixin, SystemLabelView):
     allow_export = False
     bulk_actions = ()
     bulk_action_permissions = {"resend": "msgs.msg_create", "delete": "msgs.msg_update"}
+    template_name = "msgs/msg_list.html"
+    folder = None
+    paginate_by = 100
+
+    def pre_process(self, request, *args, **kwargs):
+        if self.folder:
+            self.queryset = self.folder.get_queryset(request.org)
+
+        return super().pre_process(request, *args, **kwargs)
+
+    def derive_folder(self):
+        return self.folder
 
     def derive_export_url(self):
         redirect = quote_plus(self.request.get_full_path())
-        label = self.derive_label()
-        label_id = label.uuid if isinstance(label, Label) else label
+        folder = self.derive_folder()
+        label_id = folder.uuid if isinstance(folder, Label) else folder.code
         return "%s?l=%s&redirect=%s" % (reverse("msgs.msg_export"), label_id, redirect)
 
     def get_queryset(self, **kwargs):
@@ -114,21 +92,27 @@ class MsgListView(ContextMenuMixin, BulkActionMixin, SystemLabelView):
 
         return qs
 
-    def get_bulk_action_labels(self):
-        return self.request.org.msgs_labels.filter(is_active=True).order_by(Lower("name"))
-
     def get_context_data(self, **kwargs):
         org = self.request.org
+        counts = MsgFolder.get_counts(org)
+        folder = self.derive_folder()
+
+        # if there isn't a search filtering the queryset, we can replace the count function with a pre-calculated value
+        if "search" not in self.request.GET:
+            if isinstance(folder, Label):
+                patch_queryset_count(self.object_list, folder.get_visible_count)
+            elif isinstance(folder, MsgFolder):
+                patch_queryset_count(self.object_list, lambda: counts[folder])
 
         context = super().get_context_data(**kwargs)
-        context["org"] = org
-
-        # if refresh was passed in, increase it by our normal refresh time
-        previous_refresh = self.request.GET.get("refresh")
-        if previous_refresh:
-            context["refresh"] = int(previous_refresh) + self.derive_refresh()
+        context["has_messages"] = (
+            any(counts.values()) or Archive.objects.filter(org=org, archive_type=Archive.TYPE_MSG).exists()
+        )
 
         return context
+
+    def get_bulk_action_labels(self):
+        return self.request.org.msgs_labels.filter(is_active=True).order_by(Lower("name"))
 
     def build_context_menu(self, menu):
         if self.has_org_perm("msgs.broadcast_create"):
@@ -156,10 +140,11 @@ class BroadcastCRUDL(SmartCRUDL):
     )
     model = Broadcast
 
-    class List(MsgListView):
+    class List(SpaMixin, ContextMenuMixin, BulkActionMixin, BaseListView):
         title = _("Broadcasts")
         menu_path = "/msg/broadcasts"
         paginate_by = 25
+        default_order = ("-created_on", "-id")
 
         def get_queryset(self, **kwargs):
             return (
@@ -180,16 +165,21 @@ class BroadcastCRUDL(SmartCRUDL):
                     as_button=True,
                 )
 
-    class Scheduled(MsgListView):
+    class Scheduled(SpaMixin, ContextMenuMixin, BulkActionMixin, BaseListView):
         title = _("Scheduled Broadcasts")
         menu_path = "/msg/scheduled"
-        fields = ("contacts", "msgs", "sent", "status")
-        system_label = SystemLabel.TYPE_SCHEDULED
         paginate_by = 25
-        default_order = (
-            "schedule__next_fire",
-            "-created_on",
-        )
+        default_order = ("schedule__next_fire", "-created_on")
+
+        def get_queryset(self, **kwargs):
+            return (
+                super()
+                .get_queryset(**kwargs)
+                .filter(is_active=True)
+                .exclude(schedule=None)
+                .select_related("org", "schedule")
+                .prefetch_related("groups", "contacts")
+            )
 
         def build_context_menu(self, menu):
             if self.has_org_perm("msgs.broadcast_create"):
@@ -200,15 +190,6 @@ class BroadcastCRUDL(SmartCRUDL):
                     title=_("New Broadcast"),
                     as_button=True,
                 )
-
-        def get_queryset(self, **kwargs):
-            return (
-                super()
-                .get_queryset(**kwargs)
-                .filter(is_active=True)
-                .select_related("org", "schedule")
-                .prefetch_related("groups", "contacts")
-            )
 
     class Create(OrgPermsMixin, SmartWizardView):
         form_list = [("target", TargetForm), ("compose", ComposeForm), ("schedule", ScheduleForm)]
@@ -574,28 +555,28 @@ class MsgCRUDL(SmartCRUDL):
     class Menu(BaseMenuView):
         def derive_menu(self):
             org = self.request.org
-            counts = SystemLabel.get_counts(org)
+            counts = MsgFolder.get_counts(org)
 
             menu = [
                 self.create_menu_item(
                     menu_id="inbox",
                     name=_("Inbox"),
                     href=reverse("msgs.msg_inbox"),
-                    count=counts[SystemLabel.TYPE_INBOX],
+                    count=counts[MsgFolder.INBOX],
                     icon="inbox",
                 ),
                 self.create_menu_item(
                     menu_id="handled",
                     name=_("Handled"),
                     href=reverse("msgs.msg_flow"),
-                    count=counts[SystemLabel.TYPE_FLOWS],
+                    count=counts[MsgFolder.HANDLED],
                     icon="flow",
                 ),
                 self.create_menu_item(
                     menu_id="archived",
                     name=_("Archived"),
                     href=reverse("msgs.msg_archived"),
-                    count=counts[SystemLabel.TYPE_ARCHIVED],
+                    count=counts[MsgFolder.ARCHIVED],
                     icon="archive",
                 ),
                 self.create_divider(),
@@ -603,26 +584,26 @@ class MsgCRUDL(SmartCRUDL):
                     menu_id="outbox",
                     name=_("Outbox"),
                     href=reverse("msgs.msg_outbox"),
-                    count=counts[SystemLabel.TYPE_OUTBOX],
+                    count=counts[MsgFolder.OUTBOX],
                 ),
                 self.create_menu_item(
                     menu_id="sent",
                     name=_("Sent"),
                     href=reverse("msgs.msg_sent"),
-                    count=counts[SystemLabel.TYPE_SENT],
+                    count=counts[MsgFolder.SENT],
                 ),
                 self.create_menu_item(
                     menu_id="failed",
                     name=_("Failed"),
                     href=reverse("msgs.msg_failed"),
-                    count=counts[SystemLabel.TYPE_FAILED],
+                    count=counts[MsgFolder.FAILED],
                 ),
                 self.create_divider(),
                 self.create_menu_item(
                     menu_id="scheduled",
                     name=_("Scheduled"),
                     href=reverse("msgs.broadcast_scheduled"),
-                    count=counts[SystemLabel.TYPE_SCHEDULED],
+                    count=counts["scheduled"],
                 ),
                 self.create_menu_item(
                     menu_id="broadcasts",
@@ -639,7 +620,7 @@ class MsgCRUDL(SmartCRUDL):
                     menu_id="calls",
                     name=_("Calls"),
                     href=reverse("ivr.call_list"),
-                    count=counts[SystemLabel.TYPE_CALLS],
+                    count=counts["calls"],
                 ),
             ]
 
@@ -665,7 +646,7 @@ class MsgCRUDL(SmartCRUDL):
     class Export(BaseExportModal):
         class Form(BaseExportModal.Form):
             LABEL_CHOICES = ((0, _("Just this label")), (1, _("All messages")))
-            SYSTEM_LABEL_CHOICES = ((0, _("Just this folder")), (1, _("All messages")))
+            FOLDER_CHOICES = ((0, _("Just this folder")), (1, _("All messages")))
 
             export_all = forms.ChoiceField(
                 choices=(), label=_("Selection"), initial=0, widget=SelectWidget(attrs={"widget_only": True})
@@ -674,7 +655,7 @@ class MsgCRUDL(SmartCRUDL):
             def __init__(self, org, label, *args, **kwargs):
                 super().__init__(org, *args, **kwargs)
 
-                self.fields["export_all"].choices = self.LABEL_CHOICES if label else self.SYSTEM_LABEL_CHOICES
+                self.fields["export_all"].choices = self.LABEL_CHOICES if label else self.FOLDER_CHOICES
 
         form_class = Form
         export_type = MessageExport
@@ -682,14 +663,14 @@ class MsgCRUDL(SmartCRUDL):
 
         def get_form_kwargs(self):
             kwargs = super().get_form_kwargs()
-            kwargs["label"] = self.derive_label()[1]
+            kwargs["label"] = self.derive_folder()[1]
             return kwargs
 
-        def derive_label(self):
-            # label is either a UUID of a Label instance (36 chars) or a system label type code (1 char)
+        def derive_folder(self) -> tuple:
+            # is either a UUID of a Label instance (36 chars) or a folder code (1 char)
             label_id = self.request.GET["l"]
             if len(label_id) == 1:
-                return label_id, None
+                return MsgFolder.from_code(label_id), None
             else:
                 return None, Label.get_active_for_org(self.request.org).get(uuid=label_id)
 
@@ -700,14 +681,14 @@ class MsgCRUDL(SmartCRUDL):
             with_fields = form.cleaned_data["with_fields"]
             with_groups = form.cleaned_data["with_groups"]
 
-            system_label, label = (None, None) if export_all else self.derive_label()
+            folder, label = (None, None) if export_all else self.derive_folder()
 
             return MessageExport.create(
                 org,
                 user,
                 start_date=start_date,
                 end_date=end_date,
-                system_label=system_label,
+                folder=folder,
                 label=label,
                 with_fields=with_fields,
                 with_groups=with_groups,
@@ -722,8 +703,7 @@ class MsgCRUDL(SmartCRUDL):
 
     class Inbox(MsgListView):
         title = _("Inbox")
-        template_name = "msgs/message_box.html"
-        system_label = SystemLabel.TYPE_INBOX
+        folder = MsgFolder.INBOX
         bulk_actions = ("archive", "label")
         allow_export = True
         menu_path = "/msg/inbox"
@@ -738,8 +718,7 @@ class MsgCRUDL(SmartCRUDL):
 
     class Flow(MsgListView):
         title = _("Handled")
-        template_name = "msgs/message_box.html"
-        system_label = SystemLabel.TYPE_FLOWS
+        folder = MsgFolder.HANDLED
         bulk_actions = ("archive", "label")
         allow_export = True
         menu_path = "/msg/handled"
@@ -750,8 +729,7 @@ class MsgCRUDL(SmartCRUDL):
 
     class Archived(MsgListView):
         title = _("Archived")
-        template_name = "msgs/msg_archived.html"
-        system_label = SystemLabel.TYPE_ARCHIVED
+        folder = MsgFolder.ARCHIVED
         bulk_actions = ("restore", "label", "delete")
         allow_export = True
 
@@ -761,8 +739,7 @@ class MsgCRUDL(SmartCRUDL):
 
     class Outbox(MsgListView):
         title = _("Outbox")
-        template_name = "msgs/msg_outbox.html"
-        system_label = SystemLabel.TYPE_OUTBOX
+        folder = MsgFolder.OUTBOX
         bulk_actions = ()
         allow_export = True
 
@@ -772,7 +749,7 @@ class MsgCRUDL(SmartCRUDL):
     class Sent(MsgListView):
         title = _("Sent")
         template_name = "msgs/msg_sent.html"
-        system_label = SystemLabel.TYPE_SENT
+        folder = MsgFolder.SENT
         bulk_actions = ()
         allow_export = True
         default_order = ("-sent_on", "-id")
@@ -782,8 +759,7 @@ class MsgCRUDL(SmartCRUDL):
 
     class Failed(MsgListView):
         title = _("Failed")
-        template_name = "msgs/msg_failed.html"
-        system_label = SystemLabel.TYPE_FAILED
+        folder = MsgFolder.FAILED
         allow_export = True
 
         def get_bulk_actions(self):
@@ -793,7 +769,6 @@ class MsgCRUDL(SmartCRUDL):
             return super().get_queryset(**kwargs).select_related("contact", "channel", "flow")
 
     class Filter(MsgListView):
-        template_name = "msgs/msg_filter.html"
         bulk_actions = ("label",)
 
         def derive_menu_path(self):
@@ -834,7 +809,7 @@ class MsgCRUDL(SmartCRUDL):
         def label(self):
             return self.request.org.msgs_labels.get(uuid=self.kwargs["label_uuid"])
 
-        def derive_label(self):
+        def derive_folder(self):
             return self.label
 
         def get_queryset(self, **kwargs):
@@ -846,30 +821,11 @@ class MsgCRUDL(SmartCRUDL):
             )
 
 
-class BaseLabelForm(forms.ModelForm):
+class BaseLabelForm(UniqueNameMixin, forms.ModelForm):
     def __init__(self, org, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
         self.org = org
-
-    def clean_name(self):
-        name = self.cleaned_data["name"]
-
-        existing_id = self.instance.id if self.instance else None
-        if Label.get_active_for_org(self.org).filter(name__iexact=name).exclude(pk=existing_id).exists():
-            raise forms.ValidationError(_("Must be unique."))
-
-        count, limit = Label.get_org_limit_progress(self.org)
-        if limit is not None and count >= limit:
-            raise forms.ValidationError(
-                _(
-                    "This workspace has reached its limit of %(limit)d labels. "
-                    "You must delete existing ones before you can create new ones."
-                ),
-                params={"limit": limit},
-            )
-
-        return name
 
     class Meta:
         model = Label
@@ -892,16 +848,11 @@ class LabelCRUDL(SmartCRUDL):
     model = Label
     actions = ("create", "update", "usages", "delete")
 
-    class Create(ModalFormMixin, OrgPermsMixin, SmartCreateView):
+    class Create(BaseCreateModal):
         fields = ("name", "messages")
         success_url = "uuid@msgs.msg_filter"
         form_class = LabelForm
         submit_button_name = _("Create")
-
-        def get_form_kwargs(self):
-            kwargs = super().get_form_kwargs()
-            kwargs["org"] = self.request.org
-            return kwargs
 
         def save(self, obj):
             self.object = Label.create(self.request.org, self.request.user, obj.name)

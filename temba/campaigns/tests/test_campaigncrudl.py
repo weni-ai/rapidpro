@@ -1,7 +1,9 @@
+from unittest.mock import call
+
 from django.urls import reverse
 
 from temba.campaigns.models import Campaign, CampaignEvent
-from temba.tests import CRUDLTestMixin, TembaTest, matchers, mock_mailroom
+from temba.tests import CRUDLTestMixin, TembaTest, mock_mailroom
 
 
 class CampaignCRUDLTest(TembaTest, CRUDLTestMixin):
@@ -35,7 +37,7 @@ class CampaignCRUDLTest(TembaTest, CRUDLTestMixin):
 
         create_url = reverse("campaigns.campaign_create")
 
-        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
         self.assertCreateFetch(create_url, [self.editor, self.admin], form_fields=["name", "group"])
 
         # try to submit with no data
@@ -57,12 +59,22 @@ class CampaignCRUDLTest(TembaTest, CRUDLTestMixin):
     def test_read(self):
         group = self.create_group("Reporters", contacts=[])
         campaign = self.create_campaign(self.org, "Welcomes", group)
+        registered = self.org.fields.get(key="registered")
+        CampaignEvent.create_flow_event(
+            self.org, self.admin, campaign, registered, offset=0, unit="D", flow=self.create_flow("Event2Flow")
+        )
+        CampaignEvent.create_flow_event(
+            self.org, self.admin, campaign, registered, offset=1, unit="H", flow=self.create_flow("Event3Flow")
+        )
+
         read_url = reverse("campaigns.campaign_read", args=[campaign.uuid])
 
         self.assertRequestDisallowed(read_url, [None, self.agent, self.admin2])
-        response = self.assertReadFetch(read_url, [self.user, self.editor, self.admin], context_object=campaign)
+        response = self.assertReadFetch(read_url, [self.editor, self.admin], context_object=campaign)
         self.assertContains(response, "Welcomes")
         self.assertContains(response, "Registered")
+        self.assertContains(response, "Event2Flow")
+        self.assertContains(response, "Event3Flow")
 
         self.assertContentMenu(read_url, self.admin, ["New Event", "Edit", "Export", "Archive"])
 
@@ -70,7 +82,92 @@ class CampaignCRUDLTest(TembaTest, CRUDLTestMixin):
 
         self.assertContentMenu(read_url, self.admin, ["Activate", "Export"])
 
-    def test_archive_and_activate(self):
+    @mock_mailroom
+    def test_update(self, mr_mocks):
+        group1 = self.create_group("Reporters", contacts=[])
+        group2 = self.create_group("Testers", query="tester=1")
+
+        campaign = self.create_campaign(self.org, "Welcomes", group1)
+
+        update_url = reverse("campaigns.campaign_update", args=[campaign.id])
+
+        self.assertRequestDisallowed(update_url, [None, self.agent, self.admin2])
+        self.assertUpdateFetch(
+            update_url, [self.editor, self.admin], form_fields={"name": "Welcomes", "group": group1.id}
+        )
+
+        # try to submit with empty name
+        self.assertUpdateSubmit(
+            update_url,
+            self.admin,
+            {"name": "", "group": group1.id},
+            form_errors={"name": "This field is required."},
+            object_unchanged=campaign,
+        )
+
+        # submit with valid name
+        self.assertUpdateSubmit(update_url, self.admin, {"name": "Greetings", "group": group1.id}, success_status=200)
+
+        campaign.refresh_from_db()
+        self.assertEqual("Greetings", campaign.name)
+        self.assertEqual(group1, campaign.group)
+
+        # won't have rescheduled the campaign's event for just a name change
+        self.assertEqual([], mr_mocks.calls["campaign_schedule"])
+
+        # submit with group change
+        self.assertUpdateSubmit(update_url, self.admin, {"name": "Greetings", "group": group2.id}, success_status=200)
+
+        campaign.refresh_from_db()
+        self.assertEqual("Greetings", campaign.name)
+        self.assertEqual(group2, campaign.group)
+
+        # should have called mailroom reschedule the campaign's event
+        self.assertEqual(
+            [call(self.org, campaign.events.filter(is_active=True).get())], mr_mocks.calls["campaign_schedule"]
+        )
+
+        # can't update archived campaign
+        campaign.archive(self.admin)
+
+        self.assertRequestDisallowed(update_url, [self.admin])
+
+    def test_list(self):
+        list_url = reverse("campaigns.campaign_list")
+
+        group = self.create_group("Reporters", contacts=[])
+        campaign1 = self.create_campaign(self.org, "Welcomes", group)
+        campaign2 = self.create_campaign(self.org, "Follow Ups", group)
+        campaign3 = self.create_campaign(self.org, "Reminders", group)
+        campaign3.archive(self.admin)
+
+        other_org_group = self.create_group("Reporters", contacts=[], org=self.org2)
+        self.create_campaign(self.org2, "Welcomes", other_org_group)
+
+        self.assertRequestDisallowed(list_url, [None, self.agent])
+        self.assertListFetch(list_url, [self.editor, self.admin], context_objects=[campaign2, campaign1])
+        self.assertContentMenu(list_url, self.admin, ["New Campaign"])
+
+    def test_archived(self):
+        archived_url = reverse("campaigns.campaign_archived")
+
+        group = self.create_group("Reporters", contacts=[])
+        campaign1 = self.create_campaign(self.org, "Welcomes", group)
+        campaign2 = self.create_campaign(self.org, "Follow Ups", group)
+        self.create_campaign(self.org, "Reminders", group)
+
+        other_org_group = self.create_group("Reporters", contacts=[], org=self.org2)
+        self.create_campaign(self.org2, "Welcomes", other_org_group)
+
+        campaign1.archive(self.admin)
+        campaign2.archive(self.admin)
+
+        self.assertRequestDisallowed(archived_url, [None, self.agent])
+        self.assertListFetch(archived_url, [self.editor, self.admin], context_objects=[campaign2, campaign1])
+        self.assertContentMenu(archived_url, self.admin, [])
+
+    @mock_mailroom
+    def test_archive_and_activate(self, mr_mocks):
         group = self.create_group("Reporters", contacts=[])
         campaign = self.create_campaign(self.org, "Welcomes", group)
         other_org_group = self.create_group("Reporters", contacts=[], org=self.org2)
@@ -104,70 +201,3 @@ class CampaignCRUDLTest(TembaTest, CRUDLTestMixin):
         # check object is unchanged
         other_org_campaign.refresh_from_db()
         self.assertFalse(other_org_campaign.is_archived)
-
-    @mock_mailroom
-    def test_update(self, mr_mocks):
-        group1 = self.create_group("Reporters", contacts=[])
-        group2 = self.create_group("Testers", query="tester=1")
-
-        campaign = self.create_campaign(self.org, "Welcomes", group1)
-
-        update_url = reverse("campaigns.campaign_update", args=[campaign.id])
-
-        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
-        self.assertUpdateFetch(
-            update_url, [self.editor, self.admin], form_fields={"name": "Welcomes", "group": group1.id}
-        )
-
-        # try to submit with empty name
-        self.assertUpdateSubmit(
-            update_url,
-            self.admin,
-            {"name": "", "group": group1.id},
-            form_errors={"name": "This field is required."},
-            object_unchanged=campaign,
-        )
-
-        # submit with valid name
-        self.assertUpdateSubmit(update_url, self.admin, {"name": "Greetings", "group": group1.id}, success_status=200)
-
-        campaign.refresh_from_db()
-        self.assertEqual("Greetings", campaign.name)
-        self.assertEqual(group1, campaign.group)
-
-        # group didn't change so should only have dynamic group creation queued
-        self.assertEqual(1, len(mr_mocks.queued_batch_tasks))
-
-        # submit with group change
-        self.assertUpdateSubmit(update_url, self.admin, {"name": "Greetings", "group": group2.id}, success_status=200)
-
-        campaign.refresh_from_db()
-        self.assertEqual("Greetings", campaign.name)
-        self.assertEqual(group2, campaign.group)
-
-        # should have a task queued to reschedule the campaign's event
-        self.assertEqual(2, len(mr_mocks.queued_batch_tasks))
-        self.assertEqual(
-            {
-                "type": "schedule_campaign_event",
-                "org_id": self.org.id,
-                "task": {"campaign_event_id": campaign.events.filter(is_active=True).get().id, "org_id": self.org.id},
-                "queued_on": matchers.Datetime(),
-            },
-            mr_mocks.queued_batch_tasks[1],
-        )
-
-    def test_list(self):
-        group = self.create_group("Reporters", contacts=[])
-        campaign1 = self.create_campaign(self.org, "Welcomes", group)
-        campaign2 = self.create_campaign(self.org, "Follow Ups", group)
-
-        other_org_group = self.create_group("Reporters", contacts=[], org=self.org2)
-        self.create_campaign(self.org2, "Welcomes", other_org_group)
-
-        list_url = reverse("campaigns.campaign_list")
-
-        self.assertRequestDisallowed(list_url, [None, self.agent])
-        self.assertListFetch(list_url, [self.user, self.editor, self.admin], context_objects=[campaign2, campaign1])
-        self.assertContentMenu(list_url, self.user, [])
-        self.assertContentMenu(list_url, self.admin, ["New Campaign"])

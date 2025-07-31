@@ -20,8 +20,8 @@ class ArchiveCRUDLTest(TembaTest, CRUDLTestMixin):
         runs_url = reverse("archives.archive_run")
         msgs_url = reverse("archives.archive_message")
 
-        self.assertRequestDisallowed(runs_url, [None, self.user, self.agent])
-        self.assertRequestDisallowed(msgs_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(runs_url, [None, self.agent])
+        self.assertRequestDisallowed(msgs_url, [None, self.agent])
 
         response = self.assertListFetch(runs_url, [self.editor, self.admin], context_objects=[d3])
         self.assertContains(response, f"/archive/read/{d3.id}/")
@@ -38,7 +38,7 @@ class ArchiveCRUDLTest(TembaTest, CRUDLTestMixin):
             f"tent-disposition=attachment%3B&response-content-type=application%2Foctet&response-content-encoding=none"
         )
 
-        self.assertRequestDisallowed(download_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(download_url, [None, self.agent, self.admin2])
         response = self.assertReadFetch(
             reverse("archives.archive_read", args=[archive.id]), [self.editor, self.admin], status=302
         )

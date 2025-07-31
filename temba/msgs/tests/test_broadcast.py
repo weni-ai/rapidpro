@@ -2,8 +2,7 @@ from django.conf import settings
 from django.utils import timezone
 
 from temba import mailroom
-from temba.channels.models import ChannelCount
-from temba.msgs.models import Broadcast, LabelCount, Media, Msg, SystemLabel
+from temba.msgs.models import Broadcast, LabelCount, Media, Msg, MsgFolder
 from temba.schedules.models import Schedule
 from temba.tests import TembaTest, mock_mailroom
 from temba.utils.compose import compose_deserialize_attachments
@@ -35,11 +34,11 @@ class BroadcastTest(TembaTest):
         self.create_incoming_msg(self.frank, "Bonjour")
 
         # create a broadcast which is a response to an incoming message
-        self.create_broadcast(self.user, {"eng": {"text": "Noted"}}, contacts=[self.joe])
+        self.create_broadcast(self.admin, {"eng": {"text": "Noted"}}, contacts=[self.joe])
 
         # create a broadcast which is to several contacts
         broadcast2 = self.create_broadcast(
-            self.user,
+            self.admin,
             {"eng": {"text": "Very old broadcast"}},
             groups=[self.joe_and_frank],
             contacts=[self.kevin, self.lucy],
@@ -58,16 +57,16 @@ class BroadcastTest(TembaTest):
         msg_in1.labels.add(label)
         self.assertEqual(LabelCount.get_totals([label])[label], 1)
 
-        self.assertEqual(SystemLabel.get_counts(self.org)[SystemLabel.TYPE_INBOX], 2)
-        self.assertEqual(SystemLabel.get_counts(self.org)[SystemLabel.TYPE_FLOWS], 1)
-        self.assertEqual(SystemLabel.get_counts(self.org)[SystemLabel.TYPE_SENT], 6)
-        self.assertEqual(SystemLabel.get_counts(self.org)[SystemLabel.TYPE_FAILED], 1)
+        msg_counts = MsgFolder.get_counts(self.org)
+        self.assertEqual(msg_counts[MsgFolder.INBOX], 2)
+        self.assertEqual(msg_counts[MsgFolder.HANDLED], 1)
+        self.assertEqual(msg_counts[MsgFolder.SENT], 6)
+        self.assertEqual(msg_counts[MsgFolder.FAILED], 1)
 
         today = timezone.now().date()
-        self.assertEqual(ChannelCount.get_day_count(self.channel, ChannelCount.INCOMING_MSG_TYPE, today), 3)
-        self.assertEqual(ChannelCount.get_day_count(self.channel, ChannelCount.OUTGOING_MSG_TYPE, today), 6)
-        self.assertEqual(ChannelCount.get_day_count(self.facebook_channel, ChannelCount.INCOMING_MSG_TYPE, today), 0)
-        self.assertEqual(ChannelCount.get_day_count(self.facebook_channel, ChannelCount.OUTGOING_MSG_TYPE, today), 1)
+
+        self.assertEqual({(today, "text:in"): 3, (today, "text:out"): 6}, self.channel.counts.day_totals(scoped=True))
+        self.assertEqual({(today, "text:out"): 1}, self.facebook_channel.counts.day_totals(scoped=True))
 
         # delete all our messages save for our flow incoming message
         for m in Msg.objects.exclude(id=msg_in3.id):
@@ -76,20 +75,19 @@ class BroadcastTest(TembaTest):
         # broadcasts should be unaffected
         self.assertEqual(2, Broadcast.objects.count())
 
-        # check system label counts have been updated
-        self.assertEqual(0, SystemLabel.get_counts(self.org)[SystemLabel.TYPE_INBOX])
-        self.assertEqual(1, SystemLabel.get_counts(self.org)[SystemLabel.TYPE_FLOWS])
-        self.assertEqual(0, SystemLabel.get_counts(self.org)[SystemLabel.TYPE_SENT])
-        self.assertEqual(0, SystemLabel.get_counts(self.org)[SystemLabel.TYPE_FAILED])
+        # check msg folder counts have been updated
+        msg_counts = MsgFolder.get_counts(self.org)
+        self.assertEqual(0, msg_counts[MsgFolder.INBOX])
+        self.assertEqual(1, msg_counts[MsgFolder.HANDLED])
+        self.assertEqual(0, msg_counts[MsgFolder.SENT])
+        self.assertEqual(0, msg_counts[MsgFolder.FAILED])
 
         # check user label
         self.assertEqual(0, LabelCount.get_totals([label])[label])
 
         # but daily channel counts should be unchanged
-        self.assertEqual(3, ChannelCount.get_day_count(self.channel, ChannelCount.INCOMING_MSG_TYPE, today))
-        self.assertEqual(6, ChannelCount.get_day_count(self.channel, ChannelCount.OUTGOING_MSG_TYPE, today))
-        self.assertEqual(0, ChannelCount.get_day_count(self.facebook_channel, ChannelCount.INCOMING_MSG_TYPE, today))
-        self.assertEqual(1, ChannelCount.get_day_count(self.facebook_channel, ChannelCount.OUTGOING_MSG_TYPE, today))
+        self.assertEqual({(today, "text:in"): 3, (today, "text:out"): 6}, self.channel.counts.day_totals(scoped=True))
+        self.assertEqual({(today, "text:out"): 1}, self.facebook_channel.counts.day_totals(scoped=True))
 
     @mock_mailroom
     def test_model(self, mr_mocks):
@@ -97,7 +95,7 @@ class BroadcastTest(TembaTest):
 
         bcast2 = Broadcast.create(
             self.org,
-            self.user,
+            self.admin,
             {"eng": {"text": "Hello everyone"}, "spa": {"text": "Hola a todos"}, "fra": {"text": "Salut à tous"}},
             base_language="eng",
             groups=[self.joe_and_frank],
@@ -140,7 +138,7 @@ class BroadcastTest(TembaTest):
 
         # can't create broadcast with no recipients
         with self.assertRaises(AssertionError):
-            Broadcast.create(self.org, self.user, {"und": {"text": "no recipients"}}, base_language="und")
+            Broadcast.create(self.org, self.admin, {"und": {"text": "no recipients"}}, base_language="und")
 
     @mock_mailroom
     def test_preview(self, mr_mocks):
@@ -181,7 +179,7 @@ class BroadcastTest(TembaTest):
         fra_attachments = [attachments[2]]
 
         broadcast = self.create_broadcast(
-            self.user,
+            self.admin,
             translations={
                 "eng": {"text": eng_text, "attachments": eng_attachments},
                 "spa": {"text": spa_text, "attachments": spa_attachments},

@@ -1,6 +1,7 @@
 import itertools
 import logging
 from abc import ABCMeta
+from collections import defaultdict
 from datetime import date
 
 import openpyxl
@@ -14,12 +15,12 @@ from django.utils.translation import gettext_lazy as _
 
 from temba import mailroom
 from temba.contacts.models import Contact
-from temba.orgs.models import DependencyMixin, Export, ExportType, Org, OrgMembership, User
+from temba.orgs.models import DependencyMixin, Export, ExportType, Org, OrgMembership
+from temba.users.models import User
 from temba.utils.dates import date_range
 from temba.utils.db.functions import SplitPart
 from temba.utils.export import MultiSheetExporter
 from temba.utils.models import TembaModel
-from temba.utils.models.counts import DailyCountModel, DailyTimingModel
 from temba.utils.uuid import is_uuid, uuid4
 
 logger = logging.getLogger(__name__)
@@ -115,6 +116,9 @@ class Topic(TembaModel, DependencyMixin):
         self.modified_by = user
         self.save(update_fields=("name", "is_active", "modified_by", "modified_on"))
 
+    def as_engine_ref(self) -> dict:
+        return {"uuid": str(self.uuid), "name": self.name}
+
     class Meta:
         constraints = [models.UniqueConstraint("org", Lower("name"), name="unique_topic_names")]
 
@@ -182,9 +186,6 @@ class Ticket(models.Model):
     STATUS_CLOSED = "C"
     STATUS_CHOICES = ((STATUS_OPEN, _("Open")), (STATUS_CLOSED, _("Closed")))
 
-    # permission that users need to have a ticket assigned to them
-    ASSIGNEE_PERMISSION = "tickets.ticket_assignee"
-
     MAX_NOTE_LENGTH = 10_000
 
     uuid = models.UUIDField(unique=True, default=uuid4)
@@ -194,11 +195,15 @@ class Ticket(models.Model):
 
     # the status of this ticket and who it's currently assigned to
     status = models.CharField(max_length=1, choices=STATUS_CHOICES)
-    assignee = models.ForeignKey(User, on_delete=models.PROTECT, null=True, related_name="assigned_tickets")
+    assignee = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, related_name="assigned_tickets"
+    )
 
     opened_on = models.DateTimeField(default=timezone.now)
     opened_in = models.ForeignKey("flows.Flow", null=True, on_delete=models.PROTECT, related_name="opened_tickets")
-    opened_by = models.ForeignKey(User, null=True, on_delete=models.PROTECT, related_name="opened_tickets")
+    opened_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, on_delete=models.PROTECT, related_name="opened_tickets"
+    )
 
     # when this ticket was first replied to, closed, modified
     replied_on = models.DateTimeField(null=True)
@@ -216,27 +221,27 @@ class Ticket(models.Model):
 
     @classmethod
     def bulk_assign(cls, org, user: User, tickets: list, assignee: User):
-        return mailroom.get_client().ticket_assign(org, user, tickets, assignee)
+        return cls._bulk_response(mailroom.get_client().ticket_assign(org, user, tickets, assignee), tickets)
 
     @classmethod
     def bulk_add_note(cls, org, user: User, tickets: list, note: str):
-        return mailroom.get_client().ticket_add_note(org, user, tickets, note)
+        return cls._bulk_response(mailroom.get_client().ticket_add_note(org, user, tickets, note), tickets)
 
     @classmethod
     def bulk_change_topic(cls, org, user: User, tickets: list, topic: Topic):
-        return mailroom.get_client().ticket_change_topic(org, user, tickets, topic)
+        return cls._bulk_response(mailroom.get_client().ticket_change_topic(org, user, tickets, topic), tickets)
 
     @classmethod
-    def bulk_close(cls, org, user, tickets, *, force: bool = False):
-        return mailroom.get_client().ticket_close(org, user, tickets, force=force)
+    def bulk_close(cls, org, user, tickets):
+        return cls._bulk_response(mailroom.get_client().ticket_close(org, user, tickets), tickets)
 
     @classmethod
     def bulk_reopen(cls, org, user, tickets):
-        return mailroom.get_client().ticket_reopen(org, user, tickets)
+        return cls._bulk_response(mailroom.get_client().ticket_reopen(org, user, tickets), tickets)
 
     @classmethod
-    def get_allowed_assignees(cls, org):
-        return org.get_users(with_perm=cls.ASSIGNEE_PERMISSION)
+    def _bulk_response(self, resp: dict, tickets: list) -> list:
+        return [t for t in tickets if t.id in resp["changed_ids"]]
 
     @classmethod
     def get_assignee_count(cls, org, user, topics, status: str) -> int:
@@ -320,7 +325,9 @@ class TicketEvent(models.Model):
     event_type = models.CharField(max_length=1, choices=TYPE_CHOICES)
     note = models.TextField(null=True, max_length=Ticket.MAX_NOTE_LENGTH)
     topic = models.ForeignKey(Topic, on_delete=models.PROTECT, null=True, related_name="ticket_events")
-    assignee = models.ForeignKey(User, on_delete=models.PROTECT, null=True, related_name="ticket_assignee_events")
+    assignee = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, related_name="ticket_assignee_events"
+    )
 
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, related_name="ticket_events"
@@ -428,61 +435,6 @@ class TopicFolder(TicketFolder):
         return super().get_queryset(org, user, ordered=ordered).filter(topic=self.topic)
 
 
-class TicketDailyCount(DailyCountModel):
-    """
-    Ticket activity daily counts by who did it and when. Mailroom writes these.
-    """
-
-    TYPE_OPENING = "O"
-    TYPE_ASSIGNMENT = "A"  # includes tickets opened with assignment but excludes re-assignments
-    TYPE_REPLY = "R"
-
-    @classmethod
-    def get_by_org(cls, org, count_type: str, since=None, until=None):
-        return cls._get_count_set(count_type, {f"o:{org.id}": org}, since, until)
-
-    @classmethod
-    def get_by_teams(cls, teams, count_type: str, since=None, until=None):
-        return cls._get_count_set(count_type, {f"t:{t.id}": t for t in teams}, since, until)
-
-    @classmethod
-    def get_by_users(cls, org, users, count_type: str, since=None, until=None):
-        return cls._get_count_set(count_type, {f"o:{org.id}:u:{u.id}": u for u in users}, since, until)
-
-    class Meta:
-        indexes = [
-            models.Index(name="tickets_dailycount_type_scope", fields=("count_type", "scope", "day")),
-            models.Index(
-                name="tickets_dailycount_unsquashed",
-                fields=("count_type", "scope", "day"),
-                condition=Q(is_squashed=False),
-            ),
-        ]
-
-
-class TicketDailyTiming(DailyTimingModel):
-    """
-    Ticket activity daily timings. Mailroom writes these.
-    """
-
-    TYPE_FIRST_REPLY = "R"
-    TYPE_LAST_CLOSE = "C"
-
-    @classmethod
-    def get_by_org(cls, org, count_type: str, since=None, until=None):
-        return cls._get_count_set(count_type, {f"o:{org.id}": org}, since, until)
-
-    class Meta:
-        indexes = [
-            models.Index(name="tickets_dailytiming_type_scope", fields=("count_type", "scope", "day")),
-            models.Index(
-                name="tickets_dailytiming_unsquashed",
-                fields=("count_type", "scope", "day"),
-                condition=Q(is_squashed=False),
-            ),
-        ]
-
-
 def export_ticket_stats(org: Org, since: date, until: date) -> openpyxl.Workbook:
     workbook = openpyxl.Workbook()
     sheet = workbook.active
@@ -507,36 +459,45 @@ def export_ticket_stats(org: Org, since: date, until: date) -> openpyxl.Workbook
         sheet.cell(row=2, column=user_col + 1, value="Replies")
         user_col += 2
 
-    def by_day(cs: list) -> dict:
-        return {c[0]: c[1] for c in cs}
+    org_openings = org.daily_counts.period(since, until).prefix("tickets:opened:").day_totals(scoped=False)
+    all_replies = org.daily_counts.period(since, until).prefix("msgs:ticketreplies:").day_totals(scoped=True)
+    all_assignments = org.daily_counts.period(since, until).prefix("tickets:assigned:").day_totals(scoped=True)
+    all_resptimes = org.daily_counts.period(since, until).prefix("ticketresptime:").day_totals(scoped=True)
 
-    org_openings = by_day(TicketDailyCount.get_by_org(org, TicketDailyCount.TYPE_OPENING, since, until).day_totals())
-    org_replies = by_day(TicketDailyCount.get_by_org(org, TicketDailyCount.TYPE_REPLY, since, until).day_totals())
-    org_avg_reply_time = by_day(
-        TicketDailyTiming.get_by_org(org, TicketDailyTiming.TYPE_FIRST_REPLY, since, until).day_averages(rounded=True)
-    )
+    user_assignments = defaultdict(dict)
+    for (day, scope), count in all_assignments.items():
+        user_id = int(scope.split(":")[-1])
+        user_assignments[user_id][day] = count
 
-    user_assignments = {}
-    user_replies = {}
-    for user in users:
-        user_assignments[user] = by_day(
-            TicketDailyCount.get_by_users(org, [user], TicketDailyCount.TYPE_ASSIGNMENT, since, until).day_totals()
-        )
-        user_replies[user] = by_day(
-            TicketDailyCount.get_by_users(org, [user], TicketDailyCount.TYPE_REPLY, since, until).day_totals()
-        )
+    org_replies = defaultdict(int)
+    user_replies = defaultdict(dict)
+    for (day, scope), count in all_replies.items():
+        user_id = int(scope.split(":")[-1])
+        user_replies[user_id][day] = count
+        org_replies[day] += count
+
+    org_resptimes, org_respcounts = defaultdict(int), defaultdict(int)
+    for (day, scope), count in all_resptimes.items():
+        if scope.endswith(":total"):
+            org_resptimes[day] += count
+        elif scope.endswith(":count"):
+            org_respcounts[day] += count
+
+    org_respavgs = {}
+    for day, total in org_resptimes.items():
+        org_respavgs[day] = total // org_respcounts[day]
 
     day_row = 3
     for day in date_range(since, until):
         sheet.cell(row=day_row, column=1, value=day)
         sheet.cell(row=day_row, column=2, value=org_openings.get(day, 0))
         sheet.cell(row=day_row, column=3, value=org_replies.get(day, 0))
-        sheet.cell(row=day_row, column=4, value=org_avg_reply_time.get(day, ""))
+        sheet.cell(row=day_row, column=4, value=org_respavgs.get(day, ""))
 
         user_col = 5
         for user in users:
-            sheet.cell(row=day_row, column=user_col, value=user_assignments[user].get(day, 0))
-            sheet.cell(row=day_row, column=user_col + 1, value=user_replies[user].get(day, 0))
+            sheet.cell(row=day_row, column=user_col, value=user_assignments[user.id].get(day, 0))
+            sheet.cell(row=day_row, column=user_col + 1, value=user_replies[user.id].get(day, 0))
             user_col += 2
 
         day_row += 1

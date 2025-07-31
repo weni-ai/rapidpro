@@ -26,7 +26,7 @@ class IncidentCRUDLTest(TembaTest, CRUDLTestMixin):
         incident4 = Incident.objects.create(org=self.org, incident_type="webhooks:unhealthy", scope="")
 
         # main list items are the ended incidents
-        self.assertRequestDisallowed(list_url, [None, self.user, self.editor, self.agent])
+        self.assertRequestDisallowed(list_url, [None, self.editor, self.agent])
         response = self.assertListFetch(list_url, [self.admin], context_objects=[incident3, incident1])
 
         # with ongoing ones in separate list

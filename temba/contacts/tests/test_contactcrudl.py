@@ -10,9 +10,9 @@ from django.utils import timezone
 
 from temba import mailroom
 from temba.airtime.models import AirtimeTransfer
-from temba.campaigns.models import Campaign, CampaignEvent, EventFire
+from temba.campaigns.models import Campaign, CampaignEvent
 from temba.channels.models import ChannelEvent
-from temba.contacts.models import URN, Contact, ContactExport, ContactField
+from temba.contacts.models import URN, Contact, ContactExport, ContactField, ContactFire
 from temba.flows.models import FlowSession, FlowStart
 from temba.ivr.models import Call
 from temba.locations.models import AdminBoundary
@@ -68,7 +68,8 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
             relative_to=self.planting_date,
             offset=7,
             unit="D",
-            message="Sent 7 days after planting date",
+            translations={"eng": {"text": "Sent 7 days after planting date"}},
+            base_language="eng",
         )
 
     def test_menu(self):
@@ -93,7 +94,7 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
     def test_create(self, mr_mocks):
         create_url = reverse("contacts.contact_create")
 
-        self.assertRequestDisallowed(create_url, [None, self.agent, self.user])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
         self.assertCreateFetch(create_url, [self.editor, self.admin], form_fields=("name", "phone"))
 
         # simulate validation failing because phone number taken
@@ -137,8 +138,9 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
 
     @mock_mailroom
     def test_list(self, mr_mocks):
-        self.login(self.user)
         list_url = reverse("contacts.contact_list")
+
+        self.assertRequestDisallowed(list_url, [None, self.agent])
 
         joe = self.create_contact("Joe", phone="123", fields={"age": "20", "home": "Kigali"})
         frank = self.create_contact("Frank", phone="124", fields={"age": "18"})
@@ -146,24 +148,22 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         mr_mocks.contact_search('name != ""', contacts=[])
         self.create_group("No Name", query='name = ""')
 
-        with self.assertNumQueries(16):
+        self.login(self.editor)
+
+        with self.assertNumQueries(15):
             response = self.client.get(list_url)
 
         self.assertEqual([frank, joe], list(response.context["object_list"]))
         self.assertIsNone(response.context["search_error"])
-        self.assertEqual([], list(response.context["actions"]))
-        self.assertContentMenu(list_url, self.user, ["Export"])
+        self.assertEqual(["block", "archive", "send", "start-flow"], list(response.context["actions"]))
+        self.assertContentMenu(list_url, self.editor, ["New Contact", "New Group", "Export"])
 
         active_contacts = self.org.active_contacts_group
 
-        # fetch with spa flag
-        response = self.client.get(list_url, content_type="application/json", HTTP_X_TEMBA_SPA="1")
-        self.assertEqual(response.context["base_template"], "spa.html")
-
+        # test with search query
         mr_mocks.contact_search("age = 18", contacts=[frank])
 
-        response = self.client.get(list_url + "?search=age+%3D+18")
-        self.assertEqual(list(response.context["object_list"]), [frank])
+        response = self.assertListFetch(list_url + "?search=age+%3D+18", [self.editor], context_objects=[frank])
         self.assertEqual(response.context["search"], "age = 18")
         self.assertEqual(response.context["save_dynamic_search"], True)
         self.assertIsNone(response.context["search_error"])
@@ -174,29 +174,21 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         mr_mocks.contact_search("age = 18", contacts=[frank], total=10020)
 
         # we return up to 10000 contacts when searching with ES, so last page is 200
-        url = f'{reverse("contacts.contact_list")}?{"search=age+%3D+18&page=200"}'
-        response = self.client.get(url)
-
-        self.assertEqual(response.status_code, 200)
-
-        # when user requests page 201, we return a 404, page not found
-        url = f'{reverse("contacts.contact_list")}?{"search=age+%3D+18&page=201"}'
-        response = self.client.get(url)
-
-        self.assertEqual(response.status_code, 404)
+        self.assertListFetch(list_url + "?search=age+%3D+18&page=200", [self.editor], status=200)
+        self.assertListFetch(list_url + "?search=age+%3D+18&page=201", [self.editor], status=404)
 
         mr_mocks.contact_search('age > 18 and home = "Kigali"', cleaned='age > 18 AND home = "Kigali"', contacts=[joe])
 
-        response = self.client.get(list_url + '?search=age+>+18+and+home+%3D+"Kigali"')
-        self.assertEqual(list(response.context["object_list"]), [joe])
+        response = self.assertListFetch(
+            list_url + '?search=age+>+18+and+home+%3D+"Kigali"', [self.editor], context_objects=[joe]
+        )
         self.assertEqual(response.context["search"], 'age > 18 AND home = "Kigali"')
         self.assertEqual(response.context["save_dynamic_search"], True)
         self.assertIsNone(response.context["search_error"])
 
         mr_mocks.contact_search("Joe", cleaned='name ~ "Joe"', contacts=[joe])
 
-        response = self.client.get(list_url + "?search=Joe")
-        self.assertEqual(list(response.context["object_list"]), [joe])
+        response = self.assertListFetch(list_url + "?search=Joe", [self.editor], context_objects=[joe])
         self.assertEqual(response.context["search"], 'name ~ "Joe"')
         self.assertEqual(response.context["save_dynamic_search"], True)
         self.assertIsNone(response.context["search_error"])
@@ -217,6 +209,10 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         self.assertEqual(list(response.context["object_list"]), [])
         self.assertEqual(response.context["search_error"], "Invalid query syntax.")
         self.assertContains(response, "Invalid query syntax.")
+
+        # error response if query too long
+        response = self.client.get(list_url + "?search=" + "x" * 10001)
+        self.assertEqual(413, response.status_code)
 
         self.login(self.admin)
 
@@ -276,8 +272,6 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         frank.block(self.admin)
         billy.block(self.admin)
 
-        self.login(self.user)
-
         blocked_url = reverse("contacts.contact_blocked")
 
         self.assertRequestDisallowed(blocked_url, [None, self.agent])
@@ -314,14 +308,10 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         frank.stop(self.admin)
         billy.stop(self.admin)
 
-        self.login(self.user)
-
         stopped_url = reverse("contacts.contact_stopped")
 
         self.assertRequestDisallowed(stopped_url, [None, self.agent])
-        response = self.assertListFetch(
-            stopped_url, [self.user, self.editor, self.admin], context_objects=[billy, frank, joe]
-        )
+        response = self.assertListFetch(stopped_url, [self.editor, self.admin], context_objects=[billy, frank, joe])
         self.assertEqual(["restore", "archive"], list(response.context["actions"]))
         self.assertContentMenu(stopped_url, self.admin, ["Export"])
 
@@ -355,14 +345,10 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         frank.archive(self.admin)
         billy.archive(self.admin)
 
-        self.login(self.user)
-
         archived_url = reverse("contacts.contact_archived")
 
         self.assertRequestDisallowed(archived_url, [None, self.agent])
-        response = self.assertListFetch(
-            archived_url, [self.user, self.editor, self.admin], context_objects=[billy, frank, joe]
-        )
+        response = self.assertListFetch(archived_url, [self.editor, self.admin], context_objects=[billy, frank, joe])
         self.assertEqual(["restore", "delete"], list(response.context["actions"]))
         self.assertContentMenu(archived_url, self.admin, ["Export", "Delete All"])
 
@@ -397,7 +383,7 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         # for larger numbers of contacts, a background task is used
         for c in range(6):
             contact = self.create_contact(f"Bob{c}", urns=[f"twitter:bob{c}"])
-            contact.archive(self.user)
+            contact.archive(self.admin)
 
         response = self.client.get(archived_url)
         self.assertEqual(6, len(response.context["object_list"]))
@@ -427,7 +413,7 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         open_tickets_url = reverse("contacts.contact_group", args=[open_tickets.uuid])
 
         self.assertRequestDisallowed(group1_url, [None, self.agent, self.admin2])
-        response = self.assertReadFetch(group1_url, [self.user, self.editor, self.admin])
+        response = self.assertReadFetch(group1_url, [self.editor, self.admin])
 
         self.assertEqual([frank, joe], list(response.context["object_list"]))
         self.assertEqual(["block", "unlabel", "send", "start-flow"], list(response.context["actions"]))
@@ -447,6 +433,11 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         self.assertEqual(["block", "archive", "send", "start-flow"], list(response.context["actions"]))
         self.assertContains(response, "age &gt; 40")
 
+        # try unlabel bulk action
+        self.client.post(group1_url, {"action": "unlabel", "objects": frank.id, "label": group1.id})
+        response = self.client.get(group1_url)
+        self.assertEqual([joe], list(response.context["object_list"]))
+
         # can access system group like any other except no options to edit or delete
         response = self.assertReadFetch(open_tickets_url, [self.editor])
         self.assertEqual([], list(response.context["object_list"]))
@@ -462,10 +453,10 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         response = self.requestView(group3_url, self.admin)
         self.assertLoginRedirect(response)
 
-        # if the user has access to that org, we redirect to the org choose page
+        # if the user has access to that org, we redirect to the switch page
         self.org2.add_user(self.admin, OrgRole.ADMINISTRATOR)
-        response = self.requestView(group3_url, self.admin)
-        self.assertRedirect(response, "/org/choose/")
+        response = self.requestView(group3_url, self.admin, choose_org=self.org)
+        self.assertRedirect(response, "/org/switch/")
 
     @mock_mailroom
     def test_read(self, mr_mocks):
@@ -475,19 +466,12 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
 
         self.assertRequestDisallowed(read_url, [None, self.agent])
 
-        self.assertContentMenu(read_url, self.user, [])
         self.assertContentMenu(read_url, self.editor, ["Edit", "Start Flow", "Open Ticket"])
         self.assertContentMenu(read_url, self.admin, ["Edit", "Start Flow", "Open Ticket"])
 
         # if there's an open ticket already, don't show open ticket option
         self.create_ticket(joe)
         self.assertContentMenu(read_url, self.editor, ["Edit", "Start Flow"])
-
-        # login as viewer
-        self.login(self.user)
-
-        response = self.client.get(read_url)
-        self.assertContains(response, "Joe")
 
         # login as admin
         self.login(self.admin)
@@ -534,7 +518,7 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
 
         history_url = reverse("contacts.contact_history", args=[joe.uuid])
 
-        self.create_broadcast(self.user, {"eng": {"text": "A beautiful broadcast"}}, contacts=[joe])
+        self.create_broadcast(self.editor, {"eng": {"text": "A beautiful broadcast"}}, contacts=[joe])
         self.create_campaign(joe)
 
         # add a message with some attachments
@@ -550,7 +534,7 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         )
 
         # create some messages
-        for i in range(94):
+        for i in range(95):
             self.create_incoming_msg(
                 joe, "Inbound message %d" % i, created_on=timezone.now() - timedelta(days=(100 - i))
             )
@@ -597,10 +581,6 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
             desired_amount=Decimal("100"),
             actual_amount=Decimal("100"),
         )
-
-        # create an event from the past
-        scheduled = timezone.now() - timedelta(days=5)
-        EventFire.objects.create(event=self.planting_reminder, contact=joe, scheduled=scheduled, fired=scheduled)
 
         # two tickets for joe
         sales = Topic.create(self.org, self.admin, "Sales")
@@ -658,7 +638,7 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
 
         # fetch our contact history
         self.login(self.admin)
-        with self.assertNumQueries(25):
+        with self.assertNumQueries(22):
             response = self.client.get(history_url + "?limit=100")
 
         # history should include all messages in the last 90 days, the channel event, the call, and the flow run
@@ -685,9 +665,8 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         assertHistoryEvent(history, 9, "flow_entered", flow__name="Colors")
         assertHistoryEvent(history, 10, "msg_received", msg__text="Message caption")
         assertHistoryEvent(
-            history, 11, "msg_created", msg__text="A beautiful broadcast", created_by__email="viewer@textit.com"
+            history, 11, "msg_created", msg__text="A beautiful broadcast", created_by__email="editor@textit.com"
         )
-        assertHistoryEvent(history, 12, "campaign_fired", campaign__name="Planting Reminders")
         assertHistoryEvent(history, -1, "msg_received", msg__text="Inbound message 11")
 
         # revert back to reading only from DB
@@ -773,20 +752,6 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         assertHistoryEvent(history, 12, "msg_created", msg__text="What is your favorite color?")
         assertHistoryEvent(history, 13, "flow_entered")
 
-        # make our message event older than our planting reminder
-        self.message_event.created_on = self.planting_reminder.created_on - timedelta(days=1)
-        self.message_event.save()
-
-        # but fire it immediately
-        scheduled = timezone.now()
-        EventFire.objects.create(event=self.message_event, contact=joe, scheduled=scheduled, fired=scheduled)
-
-        # when fetched with limit of 1, it should be the only event we see
-        response = self.requestView(
-            history_url + "?limit=1&before=%d" % datetime_to_timestamp(scheduled + timedelta(minutes=5)), self.admin
-        )
-        assertHistoryEvent(response.json()["events"], 0, "campaign_fired", campaign_event__id=self.message_event.id)
-
         # now try the proper max history to test truncation
         response = self.requestView(history_url + "?before=%d" % datetime_to_timestamp(timezone.now()), self.admin)
 
@@ -835,7 +800,7 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
             .save()
         )
 
-        self.login(self.user)
+        self.login(self.editor)
 
         response = self.client.get(history_url)
         self.assertEqual(200, response.status_code)
@@ -874,7 +839,7 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
 
         update_url = reverse("contacts.contact_update", args=[contact.id])
 
-        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(update_url, [None, self.agent, self.admin2])
         self.assertUpdateFetch(
             update_url,
             [self.editor, self.admin],
@@ -1135,17 +1100,49 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         schedule_url = reverse("contacts.contact_scheduled", args=[contact1.uuid])
 
         self.assertRequestDisallowed(schedule_url, [None, self.agent, self.admin2])
-        response = self.assertReadFetch(schedule_url, [self.user, self.editor, self.admin])
+        response = self.assertReadFetch(schedule_url, [self.editor, self.admin])
         self.assertEqual({"results": []}, response.json())
 
         # create a campaign and event fires for this contact
         campaign = Campaign.create(self.org, self.admin, "Reminders", farmers)
         joined = self.create_field("joined", "Joined On", value_type=ContactField.TYPE_DATETIME)
         event2_flow = self.create_flow("Reminder Flow")
-        event1 = CampaignEvent.create_message_event(self.org, self.admin, campaign, joined, 2, unit="D", message="Hi")
+        event1 = CampaignEvent.create_message_event(
+            self.org,
+            self.admin,
+            campaign,
+            joined,
+            2,
+            unit="D",
+            translations={"eng": {"text": "Hi"}},
+            base_language="eng",
+        )
         event2 = CampaignEvent.create_flow_event(self.org, self.admin, campaign, joined, 2, unit="D", flow=event2_flow)
-        fire1 = EventFire.objects.create(event=event1, contact=contact1, scheduled=timezone.now() + timedelta(days=2))
-        fire2 = EventFire.objects.create(event=event2, contact=contact1, scheduled=timezone.now() + timedelta(days=5))
+        # old fire version should not be displayed
+        ContactFire.objects.create(
+            org=self.org,
+            contact=contact1,
+            fire_type=ContactFire.TYPE_CAMPAIGN_EVENT,
+            scope=f"{event1.id}:{event1.fire_version}",  # old version
+            fire_on=timezone.now() + timedelta(days=2),
+        )
+        # update event
+        event1.fire_version += 1
+        event1.save()
+        fire1 = ContactFire.objects.create(
+            org=self.org,
+            contact=contact1,
+            fire_type=ContactFire.TYPE_CAMPAIGN_EVENT,
+            scope=f"{event1.id}:{event1.fire_version}",  # latest version
+            fire_on=timezone.now() + timedelta(days=2),
+        )
+        fire2 = ContactFire.objects.create(
+            org=self.org,
+            contact=contact1,
+            fire_type=ContactFire.TYPE_CAMPAIGN_EVENT,
+            scope=f"{event2.id}:{event2.fire_version}",
+            fire_on=timezone.now() + timedelta(days=5),
+        )
 
         # create scheduled and regular broadcasts which send to both groups
         bcast1 = self.create_broadcast(
@@ -1195,7 +1192,7 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
                 "results": [
                     {
                         "type": "campaign_event",
-                        "scheduled": fire1.scheduled.isoformat(),
+                        "scheduled": fire1.fire_on.isoformat(),
                         "repeat_period": None,
                         "campaign": {"uuid": str(campaign.uuid), "name": "Reminders"},
                         "message": "Hi",
@@ -1214,7 +1211,7 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
                     },
                     {
                         "type": "campaign_event",
-                        "scheduled": fire2.scheduled.isoformat(),
+                        "scheduled": fire2.fire_on.isoformat(),
                         "repeat_period": None,
                         "campaign": {"uuid": str(campaign.uuid), "name": "Reminders"},
                         "flow": {"uuid": str(event2_flow.uuid), "name": "Reminder Flow"},
@@ -1242,7 +1239,7 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         general = self.org.default_ticket_topic
         open_url = reverse("contacts.contact_open_ticket", args=[contact.id])
 
-        self.assertRequestDisallowed(open_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(open_url, [None, self.agent, self.admin2])
         self.assertUpdateFetch(open_url, [self.editor, self.admin], form_fields=("topic", "assignee", "note"))
 
         # can submit with no assignee
@@ -1281,14 +1278,9 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         response = self.client.post(interrupt_url)
         self.assertLoginRedirect(response)
 
-        self.login(self.user)
+        self.login(self.agent)
 
-        # can't interrupt if just regular user
-        response = self.client.post(interrupt_url)
-        self.assertLoginRedirect(response)
-
-        self.login(self.admin)
-
+        # can interrupt if agent
         response = self.client.post(interrupt_url)
         self.assertEqual(302, response.status_code)
 
@@ -1315,9 +1307,9 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         response = self.client.post(delete_url, {"id": contact.id})
         self.assertLoginRedirect(response)
 
-        self.login(self.user)
+        self.login(self.agent)
 
-        # can't delete if just regular user
+        # can't delete if just agent
         response = self.client.post(delete_url, {"id": contact.id})
         self.assertLoginRedirect(response)
 
@@ -1350,7 +1342,7 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         contact = self.create_contact("Joe", phone="+593979000111")
         start_url = f"{reverse('flows.flow_start', args=[])}?flow={sample_flows[0].id}&c={contact.uuid}"
 
-        self.assertRequestDisallowed(start_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(start_url, [None, self.agent])
         response = self.assertUpdateFetch(start_url, [self.editor, self.admin], form_fields=["flow", "contact_search"])
 
         self.assertEqual([background_flow] + sample_flows, list(response.context["form"].fields["flow"].queryset))

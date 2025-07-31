@@ -25,12 +25,13 @@ class ChannelEndpointTest(APITest):
         # no filtering
         self.assertGet(
             endpoint_url,
-            [self.user, self.editor, self.admin],
+            [self.editor, self.admin],
             results=[
                 {
                     "uuid": str(facebook.uuid),
                     "name": "Facebook Channel",
                     "address": "billy_bob",
+                    "type": "facebook",
                     "country": None,
                     "device": None,
                     "last_seen": None,
@@ -40,6 +41,7 @@ class ChannelEndpointTest(APITest):
                     "uuid": str(self.channel.uuid),
                     "name": "Test Channel",
                     "address": "+250785551212",
+                    "type": "android",
                     "country": "RW",
                     "device": {
                         "name": "Nexus 5X",

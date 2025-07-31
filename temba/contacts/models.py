@@ -9,7 +9,7 @@ from typing import Any
 import iso8601
 import phonenumbers
 import regex
-from django_redis import get_redis_connection
+from django_valkey import get_valkey_connection
 from openpyxl import load_workbook
 from smartmin.models import SmartModel
 
@@ -26,7 +26,7 @@ from temba import mailroom
 from temba.channels.models import Channel
 from temba.locations.models import AdminBoundary
 from temba.mailroom import ContactSpec, modifiers, queue_populate_dynamic_group
-from temba.orgs.models import DependencyMixin, Export, ExportType, Org, OrgRole, User
+from temba.orgs.models import DependencyMixin, Export, ExportType, Org, OrgRole
 from temba.utils import format_number, on_transaction_commit
 from temba.utils.export import MultiSheetExporter
 from temba.utils.models import JSONField, LegacyUUIDMixin, TembaModel, delete_in_batches
@@ -582,20 +582,17 @@ class Contact(LegacyUUIDMixin, SmartModel):
     }
 
     org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="contacts")
-
     name = models.CharField(verbose_name=_("Name"), max_length=128, blank=True, null=True)
-
     language = models.CharField(
         max_length=3,
         verbose_name=_("Language"),
         null=True,
         blank=True,
     )
-
-    # custom field values for this contact, keyed by field UUID
-    fields = JSONField(null=True)
-
+    fields = JSONField(null=True)  # custom field values for this contact, keyed by field UUID
     status = models.CharField(max_length=1, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+
+    current_session_uuid = models.UUIDField(null=True)  # waiting session if any
     current_flow = models.ForeignKey("flows.Flow", on_delete=models.PROTECT, null=True, db_index=False)
     ticket_count = models.IntegerField(default=0)
     last_seen_on = models.DateTimeField(null=True)
@@ -651,12 +648,11 @@ class Contact(LegacyUUIDMixin, SmartModel):
         return {g.group_type: count for g, count in ContactGroup.get_member_counts(groups).items()}
 
     def get_scheduled_broadcasts(self):
-        from temba.msgs.models import SystemLabel
-
         return (
-            SystemLabel.get_queryset(self.org, SystemLabel.TYPE_SCHEDULED)
-            .filter(schedule__next_fire__gte=timezone.now())
+            self.org.broadcasts.filter(schedule__next_fire__gte=timezone.now(), is_active=True)
+            .exclude(schedule=None)
             .filter(Q(contacts__in=[self]) | Q(groups__in=self.groups.all()))
+            .distinct()
             .select_related("org", "schedule")
         )
 
@@ -669,33 +665,43 @@ class Contact(LegacyUUIDMixin, SmartModel):
             )
             .filter(Q(contacts__in=[self]) | Q(groups__in=self.groups.all()))
             .exclude(exclude_groups__in=self.groups.all())
+            .distinct()
             .select_related("schedule")
         )
 
-    def get_scheduled(self, *, reverse: bool = False) -> list:
+    def get_scheduled(self) -> list:
         """
-        Gets this contact's upcoming scheduled events
+        Gets this contact's upcoming activity
         """
         from temba.campaigns.models import CampaignEvent
 
-        fires = self.campaign_fires.filter(
-            event__is_active=True, event__campaign__is_archived=False, scheduled__gte=timezone.now()
-        ).select_related("event", "event__flow", "event__campaign")
+        def scope_to_event_id(scope: str) -> int:
+            # scope is "<eventid>:<fire_version>"
+            return int(scope.split(":")[0])
+
+        fires = self.fires.filter(fire_type=ContactFire.TYPE_CAMPAIGN_EVENT)
+        event_ids = {scope_to_event_id(f.scope) for f in fires}
+        events = CampaignEvent.objects.filter(
+            campaign__org=self.org, campaign__is_archived=False, id__in=event_ids, is_active=True
+        )
+        events_by_id = {e.id: e for e in events}
 
         merged = []
         for fire in fires:
-            obj = {
-                "type": "campaign_event",
-                "scheduled": fire.scheduled.isoformat(),
-                "repeat_period": None,
-                "campaign": fire.event.campaign.as_export_ref(),
-            }
-            if fire.event.event_type == CampaignEvent.TYPE_FLOW:
-                obj["flow"] = fire.event.flow.as_export_ref()
-            else:
-                obj["message"] = fire.event.get_message(contact=self)
+            event = events_by_id.get(scope_to_event_id(fire.scope))
+            if event and fire.scope == f"{event.id}:{event.fire_version}":
+                obj = {
+                    "type": "campaign_event",
+                    "scheduled": fire.fire_on.isoformat(),
+                    "repeat_period": None,
+                    "campaign": event.campaign.as_export_ref(),
+                }
+                if event.event_type == CampaignEvent.TYPE_FLOW:
+                    obj["flow"] = event.flow.as_export_ref()
+                else:
+                    obj["message"] = event.get_message(contact=self)["text"]
 
-            merged.append(obj)
+                merged.append(obj)
 
         for broadcast in self.get_scheduled_broadcasts():
             merged.append(
@@ -717,7 +723,7 @@ class Contact(LegacyUUIDMixin, SmartModel):
                 }
             )
 
-        return sorted(merged, key=lambda k: k["scheduled"], reverse=reverse)
+        return sorted(merged, key=lambda k: k["scheduled"])
 
     def get_history(self, after: datetime, before: datetime, include_event_types: set, ticket, limit: int) -> list:
         """
@@ -753,13 +759,6 @@ class Contact(LegacyUUIDMixin, SmartModel):
             self.channel_events.filter(created_on__gte=after, created_on__lt=before)
             .order_by("-created_on")
             .select_related("channel", "optin")[:limit]
-        )
-
-        campaign_events = (
-            self.campaign_fires.filter(fired__gte=after, fired__lt=before)
-            .exclude(fired=None)
-            .order_by("-fired")
-            .select_related("event__campaign", "event__relative_to")[:limit]
         )
 
         calls = (
@@ -799,7 +798,6 @@ class Contact(LegacyUUIDMixin, SmartModel):
             exited_runs,
             ticket_events,
             channel_events,
-            campaign_events,
             calls,
             transfers,
             session_events,
@@ -1019,7 +1017,7 @@ class Contact(LegacyUUIDMixin, SmartModel):
         """
         mod = modifiers.Ticket(
             topic=modifiers.TopicRef(uuid=str(topic.uuid), name=topic.name),
-            assignee=modifiers.UserRef(email=assignee.email, name=assignee.name) if assignee else None,
+            assignee=(modifiers.UserRef(uuid=str(assignee.uuid), name=assignee.name) if assignee else None),
             note=note,
         )
         self.modify(user, [mod], refresh=False)
@@ -1091,8 +1089,8 @@ class Contact(LegacyUUIDMixin, SmartModel):
             for group in self.get_groups():
                 group.contacts.remove(self)
 
-            # delete any unfired campaign event fires
-            self.campaign_fires.filter(fired=None).delete()
+            # delete any upcoming fires
+            self.fires.all().delete()
 
             # remove from scheduled broadcasts
             for bc in self.addressed_broadcasts.exclude(schedule=None):
@@ -1132,33 +1130,20 @@ class Contact(LegacyUUIDMixin, SmartModel):
                     break
                 Msg.bulk_delete(msg_batch)
 
-            # any urns currently owned by us
-            for urn in self.urns.all():
-                # release any messages attached with each urn, these could include messages that began life
-                # on a different contact
-                for msg in urn.msgs.all():
-                    msg.delete()
-
-                # same thing goes for calls
-                for call in urn.calls.all():
-                    call.release()
-
-                urn.release()
-
-            # release our channel events
+            delete_in_batches(self.runs.all())
+            delete_in_batches(self.sessions.all())
             delete_in_batches(self.channel_events.all())
+            delete_in_batches(self.calls.all())
+            delete_in_batches(self.fires.all())
 
-            for run in self.runs.all():
-                run.delete(interrupt=False)  # don't try interrupting sessions that are about to be deleted
-
-            for session in self.sessions.all():
-                session.delete()
-
-            for call in self.calls.all():  # pragma: needs cover
-                call.release()
-
-            # and any event fire history
-            self.campaign_fires.all().delete()
+            for urn in self.urns.all():
+                # delete the urn if it has no associated content.. which should be the case if it wasn't
+                # stolen from another contact
+                if not urn.msgs.all() and not urn.channel_events.all() and not urn.calls.all():
+                    urn.delete()
+                else:
+                    urn.contact = None
+                    urn.save(update_fields=("contact",))
 
             # take us out of broadcast addressed contacts
             for broadcast in self.addressed_broadcasts.all():
@@ -1333,11 +1318,6 @@ class ContactURN(models.Model):
     # auth tokens - usage is channel specific, e.g. every FCM URN has its own token, FB channels have per opt-in tokens
     auth_tokens = models.JSONField(null=True)
 
-    def release(self):
-        delete_in_batches(self.channel_events.all())
-
-        self.delete()
-
     def ensure_number_normalization(self, country_code):
         """
         Tries to normalize our phone number from a possible 10 digit (0788 383 383) to a 12 digit number
@@ -1418,13 +1398,15 @@ class ContactGroup(LegacyUUIDMixin, TembaModel, DependencyMixin):
         (STATUS_READY, _("Ready")),
     )
 
+    MAX_QUERY_LEN = 10_000
+
     org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="groups")
     group_type = models.CharField(max_length=1, choices=TYPE_CHOICES, default=TYPE_MANUAL)
     status = models.CharField(max_length=1, choices=STATUS_CHOICES, default=STATUS_INITIALIZING)
     contacts = models.ManyToManyField(Contact, related_name="groups")
 
     # fields used by smart groups
-    query = models.TextField(null=True)
+    query = models.TextField(max_length=MAX_QUERY_LEN, null=True)
     query_fields = models.ManyToManyField(ContactField, related_name="dependent_groups")
 
     org_limit_key = Org.LIMIT_GROUPS
@@ -1719,7 +1701,7 @@ class ContactNote(models.Model):
     contact = models.ForeignKey(Contact, on_delete=models.PROTECT, related_name="notes")
     text = models.TextField(max_length=MAX_LENGTH, blank=True)
     created_on = models.DateTimeField(default=timezone.now)
-    created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="contact_notes")
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="contact_notes")
 
 
 class ContactGroupCount(BaseSquashableCount):
@@ -1735,6 +1717,43 @@ class ContactGroupCount(BaseSquashableCount):
     class Meta:
         indexes = [
             models.Index(fields=("group",), condition=Q(is_squashed=False), name="contactgroupcounts_unsquashed")
+        ]
+
+
+class ContactFire(models.Model):
+    """
+    Something to happen to a contact in the future - processed by mailroom.
+    """
+
+    TYPE_WAIT_EXPIRATION = "E"
+    TYPE_WAIT_TIMEOUT = "T"
+    TYPE_SESSION_EXPIRATION = "S"
+    TYPE_CAMPAIGN_EVENT = "C"
+    TYPE_CHOICES = (
+        (TYPE_WAIT_EXPIRATION, "Wait Expiration"),
+        (TYPE_WAIT_TIMEOUT, "Wait Timeout"),
+        (TYPE_SESSION_EXPIRATION, "Session Expiration"),
+        (TYPE_CAMPAIGN_EVENT, "Campaign Event"),
+    )
+
+    id = models.BigAutoField(auto_created=True, primary_key=True)
+    org = models.ForeignKey(Org, on_delete=models.PROTECT, db_index=False)
+    contact = models.ForeignKey(Contact, on_delete=models.PROTECT, related_name="fires", db_index=False)  # index below
+    fire_type = models.CharField(max_length=1, choices=TYPE_CHOICES)
+    scope = models.CharField(max_length=64)  # e.g. campaign event id
+    fire_on = models.DateTimeField(db_index=True)
+
+    # used to ensure wait events don't act on a session that's already changed
+    session_uuid = models.UUIDField(null=True)
+    sprint_uuid = models.UUIDField(null=True)
+
+    def __repr__(self):  # pragma: no cover
+        return f'<ContactFire: id={self.id} type="{self.fire_type}" fire_on="{self.fire_on.isoformat()}">'
+
+    class Meta:
+        constraints = [
+            # used to prevent adding duplicate fires for the same contact and scope
+            models.UniqueConstraint(name="fire_contact_type_scope_unique", fields=("contact", "fire_type", "scope"))
         ]
 
 
@@ -2206,8 +2225,8 @@ class ContactImport(SmartModel):
             for spec in batch_specs:
                 urns.extend(spec.get("urns", []))
 
-        # set redis key which mailroom batch tasks can decrement to know when import has completed
-        r = get_redis_connection()
+        # set valkey key which mailroom batch tasks can decrement to know when import has completed
+        r = get_valkey_connection()
         r.set(f"contact_import_batches_remaining:{self.id}", len(batches), ex=24 * 60 * 60)
 
         # start each batch...

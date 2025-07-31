@@ -2,21 +2,9 @@ import geojson
 from mptt.models import MPTTModel, TreeForeignKey
 from smartmin.models import SmartModel
 
-from django.contrib.gis.db import models
+from django.db import models
 from django.db.models import F, Value
 from django.db.models.functions import Concat, Upper
-
-
-# default manager for AdminBoundary, doesn't load geometries
-class NoGeometryManager(models.Manager):
-    def get_queryset(self):
-        return super().get_queryset().defer("simplified_geometry")
-
-
-# optional 'geometries' manager for AdminBoundary, loads everything
-class GeometryManager(models.Manager):
-    def get_queryset(self):
-        return super().get_queryset()
 
 
 class AdminBoundary(MPTTModel, models.Model):
@@ -41,10 +29,7 @@ class AdminBoundary(MPTTModel, models.Model):
     level = models.IntegerField()
     parent = TreeForeignKey("self", null=True, on_delete=models.PROTECT, related_name="children", db_index=True)
     path = models.CharField(max_length=768)  # e.g. Rwanda > Kigali
-    simplified_geometry = models.MultiPolygonField(null=True)
-
-    objects = NoGeometryManager()
-    geometries = GeometryManager()
+    geometry = models.JSONField(null=True)
 
     @staticmethod
     def get_geojson_dump(name, features):
@@ -66,7 +51,7 @@ class AdminBoundary(MPTTModel, models.Model):
         return geojson.Feature(
             properties=dict(name=self.name, osm_id=self.osm_id, id=self.pk, level=self.level),
             zoomable=True if self.children.all() else False,
-            geometry=None if not self.simplified_geometry else geojson.loads(self.simplified_geometry.geojson),
+            geometry=self.geometry,
         )
 
     def get_geojson(self):

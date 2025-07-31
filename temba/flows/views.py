@@ -31,8 +31,7 @@ from django.views.generic import FormView
 from temba import mailroom
 from temba.channels.models import Channel
 from temba.contacts.models import URN
-from temba.flows.models import Flow, FlowRun, FlowSession, FlowStart
-from temba.flows.tasks import update_session_wait_expires
+from temba.flows.models import Flow, FlowSession, FlowStart
 from temba.ivr.models import Call
 from temba.orgs.models import IntegrationType, Org
 from temba.orgs.views.base import (
@@ -43,9 +42,9 @@ from temba.orgs.views.base import (
     BaseReadView,
     BaseUpdateModal,
 )
-from temba.orgs.views.mixins import BulkActionMixin, OrgObjPermsMixin, OrgPermsMixin
+from temba.orgs.views.mixins import BulkActionMixin, OrgObjPermsMixin, OrgPermsMixin, UniqueNameMixin
 from temba.triggers.models import Trigger
-from temba.utils import analytics, gettext, json, languages, on_transaction_commit
+from temba.utils import gettext, json, languages
 from temba.utils.fields import (
     CheckboxWidget,
     ContactSearchWidget,
@@ -57,30 +56,24 @@ from temba.utils.fields import (
 from temba.utils.text import slugify_with
 from temba.utils.views.mixins import ContextMenuMixin, ModalFormMixin, SpaMixin, StaffOnlyMixin
 
-from .models import FlowLabel, FlowStartCount, FlowUserConflictException, FlowVersionConflictException, ResultsExport
+from .models import (
+    FlowLabel,
+    FlowRun,
+    FlowStartCount,
+    FlowUserConflictException,
+    FlowVersionConflictException,
+    ResultsExport,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class BaseFlowForm(forms.ModelForm):
+class BaseFlowForm(UniqueNameMixin, forms.ModelForm):
     def __init__(self, org, branding, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
         self.org = org
         self.branding = branding
-
-    def clean_name(self):
-        name = self.cleaned_data["name"]
-
-        # make sure the name isn't already taken
-        existing = self.org.flows.filter(is_active=True, name__iexact=name).first()
-        if existing and self.instance != existing:
-            # TODO include link to flow, requires https://github.com/nyaruka/temba-components/issues/159
-            # existing_url = reverse("flows.flow_editor", args=[existing.uuid])
-            # mark_safe(_('Already used by <a href="%(url)s">another flow</a>.') % {"url": existing_url})
-            raise forms.ValidationError(_("Already used by another flow."))
-
-        return name
 
     def clean_keyword_triggers(self):
         value = self.data.getlist("keyword_triggers", [])
@@ -143,24 +136,11 @@ class FlowSessionCRUDL(SmartCRUDL):
             output = session.output_json
             output["_metadata"] = dict(
                 session_id=session.id,
-                org=session.org.name,
-                org_id=session.org_id,
-                site=f"https://{session.org.get_brand_domain()}",
+                org=session.contact.org.name,
+                org_id=session.contact.org_id,
+                site=f"https://{session.contact.org.get_brand_domain()}",
             )
             return JsonResponse(output, json_dumps_params=dict(indent=2))
-
-
-class FlowRunCRUDL(SmartCRUDL):
-    actions = ("delete",)
-    model = FlowRun
-
-    class Delete(ModalFormMixin, OrgObjPermsMixin, SmartDeleteView):
-        fields = ("id",)
-        success_message = None
-
-        def post(self, request, *args, **kwargs):
-            self.get_object().delete()
-            return HttpResponse()
 
 
 class FlowCRUDL(SmartCRUDL):
@@ -180,12 +160,16 @@ class FlowCRUDL(SmartCRUDL):
         "import_translation",
         "export_results",
         "editor",
+        "next",
         "results",
-        "category_counts",
+        "result_chart",
         "preview_start",
         "start",
         "activity",
-        "engagement",
+        "engagement_timeline",
+        "engagement_progress",
+        "engagement_dow",
+        "engagement_hod",
         "filter",
         "revisions",
         "recent_contacts",
@@ -270,12 +254,12 @@ class FlowCRUDL(SmartCRUDL):
         Used by the editor for fetching and saving flow definitions
         """
 
-        permission = "flows.flow_editor"  # POSTs explicitly check for flows.flow_update
+        permission = "flows.flow_editor"
         slug_url_kwarg = "uuid"
 
         @classmethod
         def derive_url_pattern(cls, path, action):
-            return r"^%s/%s/(?P<uuid>[0-9a-f-]+)/((?P<revision_id>\d+)/)?$" % (path, action)
+            return r"^%s/%s/(?P<uuid>[0-9a-f-]+)/((?P<revision_id>\d+|latest)/)?$" % (path, action)
 
         def get(self, request, *args, **kwargs):
             flow = self.get_object()
@@ -287,16 +271,21 @@ class FlowCRUDL(SmartCRUDL):
 
             # we are looking for a specific revision, fetch it and migrate it forward
             if revision_id:
-                revision = get_object_or_404(flow.revisions.filter(id=revision_id))
+                if revision_id == "latest":
+                    revision = flow.revisions.all().order_by("-revision").first()
+                else:
+                    revision = get_object_or_404(flow.revisions.filter(id=revision_id))
+
                 definition = revision.get_migrated_definition(to_version=requested_version)
 
-                # get our metadata
-                flow_info = mailroom.get_client().flow_inspect(flow.org, definition)
+                # inspect to get up to date info about the flow
+                info = mailroom.get_client().flow_inspect(flow.org, definition)
                 return JsonResponse(
                     {
                         "definition": definition,
-                        "issues": flow_info[Flow.INSPECT_ISSUES],
-                        "metadata": Flow.get_metadata(flow_info),
+                        "info": flow.info,
+                        "issues": info["issues"],  # deprecated
+                        "metadata": info,  # deprecated
                     }
                 )
 
@@ -306,11 +295,6 @@ class FlowCRUDL(SmartCRUDL):
             )
 
         def post(self, request, *args, **kwargs):
-            if not self.has_org_perm("flows.flow_update"):
-                return JsonResponse(
-                    {"status": "failure", "description": _("You don't have permission to edit this flow")}, status=403
-                )
-
             # try to parse our body
             definition = json.loads(force_str(request.body))
             try:
@@ -321,8 +305,9 @@ class FlowCRUDL(SmartCRUDL):
                         "status": "success",
                         "saved_on": json.encode_datetime(flow.saved_on, micros=True),
                         "revision": revision.as_json(),
-                        "issues": issues,
-                        "metadata": flow.metadata,
+                        "info": flow.info,
+                        "issues": issues,  # deprecated
+                        "metadata": flow.info,  # deprecated
                     }
                 )
 
@@ -468,23 +453,12 @@ class FlowCRUDL(SmartCRUDL):
                 widgets = {"name": InputWidget()}
 
         class SurveyForm(BaseForm):
-            contact_creation = forms.ChoiceField(
-                label=_("Create a contact "),
-                help_text=_("Whether surveyor logins should be used as the contact for each run"),
-                choices=((Flow.CONTACT_PER_RUN, _("For each run")), (Flow.CONTACT_PER_LOGIN, _("For each login"))),
-                widget=SelectWidget(attrs={"widget_only": False}),
-            )
-
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
 
-                self.fields["contact_creation"].initial = self.instance.metadata.get(
-                    Flow.CONTACT_CREATION, Flow.CONTACT_PER_RUN
-                )
-
             class Meta:
                 model = Flow
-                fields = ("name", "contact_creation")
+                fields = ("name",)
                 widgets = {"name": InputWidget()}
 
         class BaseOnlineForm(BaseFlowForm):
@@ -533,7 +507,9 @@ class FlowCRUDL(SmartCRUDL):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
 
-                self.fields["ivr_retry"].initial = self.instance.metadata.get("ivr_retry", 60)
+                self.fields["ivr_retry"].initial = (
+                    self.instance.ivr_retry if self.instance.ivr_retry is not None else 60
+                )
 
             class Meta:
                 model = Flow
@@ -573,15 +549,10 @@ class FlowCRUDL(SmartCRUDL):
 
         def pre_save(self, obj):
             obj = super().pre_save(obj)
-            metadata = obj.metadata
-
-            if Flow.CONTACT_CREATION in self.form.cleaned_data:
-                metadata[Flow.CONTACT_CREATION] = self.form.cleaned_data[Flow.CONTACT_CREATION]
 
             if "ivr_retry" in self.form.cleaned_data:
-                metadata[Flow.METADATA_IVR_RETRY] = int(self.form.cleaned_data["ivr_retry"])
+                obj.ivr_retry = int(self.form.cleaned_data["ivr_retry"])
 
-            obj.metadata = metadata
             return obj
 
         def post_save(self, obj):
@@ -589,8 +560,6 @@ class FlowCRUDL(SmartCRUDL):
 
             if keyword_triggers is not None:
                 self.update_triggers(obj, self.request.user, keyword_triggers)
-
-            on_transaction_commit(lambda: update_session_wait_expires.delay(obj.id))
 
             return obj
 
@@ -642,16 +611,17 @@ class FlowCRUDL(SmartCRUDL):
         def get_context_data(self, **kwargs):
             context = super().get_context_data(**kwargs)
 
-            Flow.prefetch_run_stats(context["object_list"])
+            Flow.prefetch_run_counts(context["object_list"])
 
             # decorate flow objects with their run activity stats
             for flow in context["object_list"]:
-                flow.run_stats = flow.get_run_stats()
+                counts = flow.get_run_counts()
+                total = sum(counts.values())
+                flow.num_runs_ongoing = counts[FlowRun.STATUS_ACTIVE] + counts[FlowRun.STATUS_WAITING]
+                flow.num_runs_total = total
+                flow.completion_pct = 100 * counts[FlowRun.STATUS_COMPLETED] // total if total else 0
 
             return context
-
-        def derive_queryset(self, *args, **kwargs):
-            return super().derive_queryset(*args, **kwargs).exclude(is_system=True)
 
         def apply_bulk_action(self, user, action, objects, label):
             super().apply_bulk_action(user, action, objects, label)
@@ -782,12 +752,14 @@ class FlowCRUDL(SmartCRUDL):
                 context["can_start"] = False
                 context["can_simulate"] = False
             else:
-                context["mutable"] = self.has_org_perm("flows.flow_update")
+                context["mutable"] = True
                 context["can_start"] = flow.flow_type != Flow.TYPE_VOICE or flow.org.supports_ivr()
                 context["can_simulate"] = True
 
             context["active_start"] = flow.get_active_start()
             context["feature_filters"] = json.dumps(self.get_features(flow.org))
+            context["default_topic"] = json.dumps(flow.org.default_ticket_topic.as_engine_ref())
+
             return context
 
         def get_features(self, org) -> list:
@@ -797,7 +769,6 @@ class FlowCRUDL(SmartCRUDL):
             whatsapp_channel = org.get_channel(Channel.ROLE_SEND, scheme=URN.WHATSAPP_SCHEME)
 
             if facebook_channel:
-                features.append("facebook")
                 features.append("optins")
             if whatsapp_channel:
                 features.append("whatsapp")
@@ -826,7 +797,7 @@ class FlowCRUDL(SmartCRUDL):
                 )
 
             if self.has_org_perm("flows.flow_results"):
-                menu.add_link(_("Results"), reverse("flows.flow_results", args=[obj.id]))
+                menu.add_link(_("Results"), reverse("flows.flow_results", args=[obj.uuid]))
 
             menu.new_group()
 
@@ -864,6 +835,9 @@ class FlowCRUDL(SmartCRUDL):
 
                 if self.has_org_perm("flows.flow_update"):
                     menu.add_link(_("Import Translation"), reverse("flows.flow_import_translation", args=[obj.id]))
+
+    class Next(StaffOnlyMixin, Editor, SpaMixin):
+        template_name = "flows/flow_next.html"
 
     class ChangeLanguage(OrgObjPermsMixin, SmartUpdateView):
         class Form(forms.Form):
@@ -1038,8 +1012,6 @@ class FlowCRUDL(SmartCRUDL):
                 updated_defs = Flow.import_translation(self.object.org, [self.object], language, po_data)
                 self.object.save_revision(self.request.user, updated_defs[str(self.object.uuid)])
 
-                analytics.track(self.request.user, "temba.flow_po_imported")
-
             return HttpResponseRedirect(self.get_success_url())
 
         @cached_property
@@ -1120,117 +1092,138 @@ class FlowCRUDL(SmartCRUDL):
                 extra_urns=form.cleaned_data.get("extra_urns", []),
             )
 
-    class Engagement(BaseReadView):
+    class BaseResultsView(BaseReadView):
+        permission = "flows.flow_results"
+        slug_url_kwarg = "uuid"
+
+    class EngagementTimeline(BaseResultsView):
+        def render_to_response(self, context, **response_kwargs):
+            start_date = self.object.get_engagement_start()
+            end_date = timezone.now().date()
+
+            if not start_date:
+                start_date = end_date - timedelta(days=29)
+
+            timeline_data = self.object.get_engagement_timeline(start_date, end_date)
+            chart_data = {
+                "labels": timeline_data["dates"],
+                "datasets": [{"label": _("Messages"), "data": timeline_data["counts"]}],
+            }
+
+            return JsonResponse({"data": chart_data, "rollup_by": timeline_data["rollup_by"]})
+
+    class EngagementProgress(BaseResultsView):
+        def render_to_response(self, context, **response_kwargs):
+            runs = self.object.get_run_counts()
+
+            # convert to temba-chart format
+            labels = [
+                _("Ongoing"),
+                _("Completed"),
+                _("Expired"),
+                _("Interrupted"),
+            ]
+
+            data = [
+                runs[FlowRun.STATUS_ACTIVE] + runs[FlowRun.STATUS_WAITING],
+                runs[FlowRun.STATUS_COMPLETED],
+                runs[FlowRun.STATUS_EXPIRED],
+                runs.get(FlowRun.STATUS_INTERRUPTED, 0) + runs.get(FlowRun.STATUS_FAILED, 0),
+            ]
+
+            chart_data = {
+                "labels": labels,
+                "datasets": [{"label": _("Progress"), "data": data}],
+            }
+
+            return JsonResponse({"data": chart_data})
+
+    class EngagementDow(BaseResultsView):
+        def render_to_response(self, context, **response_kwargs):
+            dow_counts = self.object.get_engagement_by_weekday()
+
+            # convert to chart.js format
+            labels = []
+            data = []
+
+            for day_index in range(0, 7):
+                base_date = datetime(2023, 1, 1)  # Sunday
+                count = dow_counts.get(day_index, 0)
+                day_date = base_date + timedelta(days=day_index)
+                labels.append(day_date)
+                data.append(count)
+
+            chart_data = {
+                "labels": labels,
+                "datasets": [{"label": _("Messages"), "data": data}],
+            }
+
+            return JsonResponse({"data": chart_data})
+
+    class EngagementHod(BaseResultsView):
+        def render_to_response(self, context, **response_kwargs):
+            hod_counts = self.object.get_engagement_by_hour(self.request.org.timezone)
+
+            # convert to chart.js format
+            labels = []
+            data = []
+
+            for x in range(0, 24):
+                labels.append(f"{x:02d}:00")
+                data.append(hod_counts.get(x, 0))
+
+            chart_data = {
+                "labels": labels,
+                "datasets": [{"label": _("Messages"), "data": data}],
+            }
+
+            return JsonResponse({"data": chart_data})
+
+    class ResultChart(BaseResultsView):
         """
-        Data for charts on engagement tab of results page.
+        Individual chart data for analytics tab of results page.
         """
 
-        permission = "flows.flow_results"
+        @classmethod
+        def derive_url_pattern(cls, path, action):
+            return r"^%s/%s/(?P<uuid>[^/]+)/(?P<result_key>[\w\-]+)/$" % (path, action)
 
         permission = "flows.flow_results"
 
         def render_to_response(self, context, **response_kwargs):
-            # if this isn't a request for the chart data, return the normal template view
-            if self.request.headers.get("Accept") != "application/json":
-                return super().render_to_response(context, **response_kwargs)
+            result_key = self.kwargs["result_key"]
+            flow = self.object
 
-            today = timezone.now().date()
-            hod_counts = self.object.get_engagement_by_hour(self.request.org.timezone)
-            hod_data = []
-            for x in range(0, 24):
-                hod_data.append([x, hod_counts.get(x, 0)])
+            # get category counts for this specific result
+            counts = flow.get_category_counts(result_key)
+            result_data = None
 
-            dow_counts = self.object.get_engagement_by_weekday()
-            msgsin_total = sum(dow_counts.values())
+            for count_data in counts:
+                if count_data["key"] == result_key:
+                    result_data = count_data
+                    break
 
-            dow_data = []
-            for d in range(0, 7):
-                day_count = dow_counts.get(d, 0)
-                dow_data.append(
-                    {"msgs": day_count, "y": 100 * float(day_count) / float(msgsin_total) if msgsin_total else 0.0}
-                )
+            if not result_data:
+                return JsonResponse({"data": {"labels": [], "datasets": []}})
 
-            timeline_min = self.object.get_engagement_start()
+            # convert to chart.js format
+            labels = []
+            data = []
 
-            # if we have no data or it's all from the last 30 days, use that as the min date
-            if not timeline_min or timeline_min > today - timedelta(days=30):
-                timeline_min = today - timedelta(days=30)
-
-            # bucket dates into months or weeks depending on the range
-            if timeline_min < today - timedelta(days=365 * 3):
-                truncate = "month"
-            elif timeline_min < today - timedelta(days=365):
-                truncate = "week"
-            else:
-                truncate = "day"
-
-            timeline_data = self.object.get_engagement_by_date(truncate)
-            run_status = self.object.get_run_stats()["status"]
-
-            return JsonResponse(
-                {
-                    "timeline": {
-                        "data": timeline_data,
-                        "xmin": timeline_min,
-                        "xmax": today,
-                        "ymax": max([d[1] for d in timeline_data] or [0]),
-                    },
-                    "dow": {
-                        "data": dow_data,
-                    },
-                    "hod": {
-                        "data": hod_data,
-                    },
-                    "completion": {
-                        "summary": [
-                            {
-                                "name": _("Active"),
-                                "y": run_status["active"] + run_status["waiting"],
-                                "drilldown": None,
-                                "color": "#2387CA",
-                            },
-                            {
-                                "name": _("Completed"),
-                                "y": run_status["completed"],
-                                "drilldown": None,
-                                "color": "#8FC93A",
-                            },
-                            {
-                                "name": _("Interrupted, Expired and Failed"),
-                                "y": run_status["interrupted"] + run_status["expired"] + run_status["failed"],
-                                "drilldown": "incomplete",
-                                "color": "#CCC",
-                            },
-                        ],
-                        "drilldown": [
-                            {
-                                "name": "Interrupted, Expired and Failed",
-                                "id": "incomplete",
-                                "innerSize": "50%",
-                                "data": [
-                                    {"name": _("Expired"), "y": run_status["expired"], "color": "#CCC"},
-                                    {"name": _("Interrupted"), "y": run_status["interrupted"], "color": "#EEE"},
-                                    {"name": _("Failed"), "y": run_status["failed"], "color": "#FEE"},
-                                ],
-                            }
-                        ],
-                    },
-                },
-                json_dumps_params={"indent": 2},
-                encoder=json.EpochEncoder,
+            # sort categories by count (descending), but put "Other" last
+            categories = sorted(
+                result_data["categories"], key=lambda c: (c["name"] == "No Response", c["name"] == "Other", -c["count"])
             )
 
-    class CategoryCounts(BaseReadView):
-        """
-        Data for charts on analytics tab of results page.
-        """
+            for category in categories:
+                labels.append(category["name"])
+                data.append(category["count"])
 
-        permission = "flows.flow_results"
+            chart_data = {"labels": labels, "datasets": [{"label": result_data["name"], "data": data}]}
 
-        def render_to_response(self, context, **response_kwargs):
-            return JsonResponse({"counts": self.object.get_category_counts()})
+            return JsonResponse({"data": chart_data})
 
-    class Results(SpaMixin, ContextMenuMixin, BaseReadView):
+    class Results(SpaMixin, ContextMenuMixin, BaseResultsView):
         def build_context_menu(self, menu):
             obj = self.get_object()
 
@@ -1247,6 +1240,8 @@ class FlowCRUDL(SmartCRUDL):
         def get_context_data(self, *args, **kwargs):
             context = super().get_context_data(*args, **kwargs)
             context["utcoffset"] = int(datetime.now(self.request.org.timezone).utcoffset().total_seconds() // 60)
+            context["category_counts"] = self.object.get_category_counts()
+            context["results"] = [r for r in self.object.info.get("results") if len(r.get("categories", [])) > 1]
             return context
 
     class Activity(BaseReadView):
@@ -1273,73 +1268,69 @@ class FlowCRUDL(SmartCRUDL):
             return HttpResponseRedirect(reverse("flows.flow_editor", args=[self.get_object().uuid]))
 
         def post(self, request, *args, **kwargs):
-            try:
-                json_dict = json.loads(request.body)
-            except Exception as e:  # pragma: needs cover
-                return JsonResponse(dict(status="error", description="Error parsing JSON: %s" % str(e)), status=400)
-
             if not settings.MAILROOM_URL:  # pragma: no cover
                 return JsonResponse(
                     dict(status="error", description="mailroom not configured, cannot simulate"), status=500
                 )
 
+            try:
+                json_dict = json.loads(request.body)
+            except Exception as e:  # pragma: needs cover
+                return JsonResponse(dict(status="error", description="Error parsing JSON: %s" % str(e)), status=400)
+
+            try:
+                return JsonResponse(self._simulate(json_dict))
+            except mailroom.RequestException:
+                logger.error("Mailroom request failed", exc_info=True)
+
+                return JsonResponse(dict(status="error", description="mailroom error"), status=500)
+
+        def _simulate(self, req_json: dict) -> dict:
             flow = self.get_object()
             client = mailroom.get_client()
 
-            analytics.track(request.user, "temba.flow_simulated", dict(flow=flow.name, uuid=flow.uuid))
-
-            channel_uuid = "440099cf-200c-4d45-a8e7-4a564f4a0e8b"
-            channel_name = "Test Channel"
+            test_channel = {
+                "uuid": "440099cf-200c-4d45-a8e7-4a564f4a0e8b",
+                "name": "Test Channel",
+                "address": "+18005551212",
+                "schemes": ["tel"],
+                "roles": ["send", "receive", "call"],
+                "country": "US",
+            }
+            test_call = "01979e0b-3072-7345-ae19-879750caaaf6"
+            test_urn = "tel:+12065551212"
 
             # build our request body, which includes any assets that mailroom should fake
             payload = {
                 "org_id": flow.org_id,
-                "assets": {
-                    "channels": [
-                        {
-                            "uuid": channel_uuid,
-                            "name": channel_name,
-                            "address": "+18005551212",
-                            "schemes": ["tel"],
-                            "roles": ["send", "receive", "call"],
-                            "country": "US",
-                        }
-                    ]
-                },
+                "contact": req_json["contact"],
+                "assets": {"channels": [test_channel]},
             }
 
-            if "flow" in json_dict:
-                payload["flows"] = [{"uuid": flow.uuid, "definition": json_dict["flow"]}]
+            # ivr flows need a call
+            if flow.flow_type == Flow.TYPE_VOICE:
+                payload["call"] = {
+                    "uuid": test_call,
+                    "channel": {"uuid": test_channel["uuid"], "name": test_channel["name"]},
+                    "urn": test_urn,
+                }
+
+            if "flow" in req_json:
+                payload["flows"] = [{"uuid": flow.uuid, "definition": req_json["flow"]}]
 
             # check if we are triggering a new session
-            if "trigger" in json_dict:
-                payload["trigger"] = json_dict["trigger"]
-
-                # ivr flows need a call in their trigger
-                if flow.flow_type == Flow.TYPE_VOICE:
-                    payload["trigger"]["call"] = {
-                        "channel": {"uuid": channel_uuid, "name": channel_name},
-                        "urn": "tel:+12065551212",
-                    }
-
-                payload["trigger"]["environment"] = flow.org.as_environment_def()
+            if "trigger" in req_json:
+                payload["trigger"] = req_json["trigger"]
                 payload["trigger"]["user"] = self.request.user.as_engine_ref()
 
-                try:
-                    return JsonResponse(client.sim_start(payload))
-                except mailroom.RequestException:
-                    return JsonResponse(dict(status="error", description="mailroom error"), status=500)
+                return client.sim_start(payload)
 
             # otherwise we are resuming
-            elif "resume" in json_dict:
-                payload["resume"] = json_dict["resume"]
-                payload["resume"]["environment"] = flow.org.as_environment_def()
-                payload["session"] = json_dict["session"]
+            elif "resume" in req_json:
+                payload["resume"] = req_json["resume"]
+                payload["session"] = req_json["session"]
 
-                try:
-                    return JsonResponse(client.sim_resume(payload))
-                except mailroom.RequestException:
-                    return JsonResponse(dict(status="error", description="mailroom error"), status=500)
+                return client.sim_resume(payload)
 
     class PreviewStart(BaseReadView):
         permission = "flows.flow_start"
@@ -1483,7 +1474,6 @@ class FlowCRUDL(SmartCRUDL):
                 self.fields["flow"].queryset = org.flows.filter(
                     flow_type__in=(Flow.TYPE_MESSAGE, Flow.TYPE_VOICE, Flow.TYPE_BACKGROUND),
                     is_archived=False,
-                    is_system=False,
                     is_active=True,
                 ).order_by(Lower("name"))
 
@@ -1569,7 +1559,6 @@ class FlowCRUDL(SmartCRUDL):
         def form_valid(self, form):
             contact_search = form.cleaned_data["contact_search"]
             flow = form.cleaned_data["flow"]
-            analytics.track(self.request.user, "temba.flow_start", contact_search)
 
             recipients = contact_search.get("recipients", [])
             groups, contacts = ContactSearchWidget.parse_recipients(self.request.org, recipients)
@@ -1618,7 +1607,7 @@ class PreprocessTest(FormView):  # pragma: no cover
         )
 
 
-class FlowLabelForm(forms.ModelForm):
+class FlowLabelForm(UniqueNameMixin, forms.ModelForm):
     name = forms.CharField(required=True, widget=InputWidget(), label=_("Name"))
     flows = forms.CharField(required=False, widget=forms.HiddenInput)
 
@@ -1626,12 +1615,6 @@ class FlowLabelForm(forms.ModelForm):
         self.org = org
 
         super().__init__(*args, **kwargs)
-
-    def clean_name(self):
-        name = self.cleaned_data["name"].strip()
-        if self.org.flow_labels.filter(name=name).exclude(id=self.instance.id).exists():
-            raise ValidationError(_("Must be unique."))
-        return name
 
     class Meta:
         model = FlowLabel

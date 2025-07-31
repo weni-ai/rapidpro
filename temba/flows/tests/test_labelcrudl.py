@@ -8,7 +8,7 @@ class FlowLabelCRUDLTest(TembaTest, CRUDLTestMixin):
     def test_create(self):
         create_url = reverse("flows.flowlabel_create")
 
-        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
         self.assertCreateFetch(create_url, [self.editor, self.admin], form_fields=("name", "flows"))
 
         # try to submit without a name
@@ -35,7 +35,7 @@ class FlowLabelCRUDLTest(TembaTest, CRUDLTestMixin):
 
         update_url = reverse("flows.flowlabel_update", args=[label.id])
 
-        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(update_url, [None, self.agent, self.admin2])
         self.assertUpdateFetch(update_url, [self.editor, self.admin], form_fields=("name", "flows"))
 
         # try to update to an invalid name
@@ -66,7 +66,7 @@ class FlowLabelCRUDLTest(TembaTest, CRUDLTestMixin):
 
         delete_url = reverse("flows.flowlabel_delete", args=[label.id])
 
-        self.assertRequestDisallowed(delete_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(delete_url, [None, self.agent, self.admin2])
 
         self.assertDeleteFetch(delete_url, [self.editor, self.admin])
         self.assertDeleteSubmit(delete_url, self.admin, object_deleted=label, success_status=200)

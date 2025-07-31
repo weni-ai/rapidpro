@@ -13,14 +13,14 @@ class LabelTest(TembaTest):
         self.frank = self.create_contact("Frank", phone="073835002")
 
     def test_create(self):
-        label1 = Label.create(self.org, self.user, "Spam")
+        label1 = Label.create(self.org, self.editor, "Spam")
         self.assertEqual("Spam", label1.name)
 
         # don't allow invalid name
-        self.assertRaises(AssertionError, Label.create, self.org, self.user, '"Hi"')
+        self.assertRaises(AssertionError, Label.create, self.org, self.editor, '"Hi"')
 
         # don't allow duplicate name
-        self.assertRaises(AssertionError, Label.create, self.org, self.user, "Spam")
+        self.assertRaises(AssertionError, Label.create, self.org, self.editor, "Spam")
 
     def test_toggle_label(self):
         label = self.create_label("Spam")

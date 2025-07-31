@@ -1,21 +1,22 @@
 from collections import OrderedDict
 
-from smartmin.users.models import FailedLogin, PasswordHistory
-from smartmin.users.views import UserUpdateForm
+from allauth.account.models import EmailAddress
+from allauth.mfa.models import Authenticator
 from smartmin.views import SmartCRUDL, SmartDeleteView, SmartFormView, SmartListView, SmartReadView, SmartUpdateView
 
 from django import forms
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.models import Group
+from django.db.models import Prefetch
 from django.http import HttpResponse, HttpResponseRedirect
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 from django.views.decorators.csrf import csrf_exempt
 
-from temba.orgs.models import Org, OrgRole, User
+from temba.orgs.models import Org, OrgRole
 from temba.orgs.views import switch_to_org
-from temba.utils import get_anonymous_user
+from temba.users.models import User
 from temba.utils.fields import SelectMultipleWidget
 from temba.utils.views.mixins import ComponentFormMixin, ContextMenuMixin, ModalFormMixin, SpaMixin, StaffOnlyMixin
 
@@ -232,12 +233,16 @@ class OrgCRUDL(SmartCRUDL):
             other_org = forms.ModelChoiceField(queryset=Org.objects.all(), widget=forms.HiddenInput())
             next = forms.CharField(widget=forms.HiddenInput(), required=False)
 
+            def __init__(self, *args, **kwargs):
+                super().__init__(**kwargs)
+                self.fields["other_org"].queryset = Org.objects.filter(is_active=True)
+
         form_class = ServiceForm
         fields = ("other_org", "next")
 
         def get_context_data(self, **kwargs):
             context = super().get_context_data(**kwargs)
-            context["other_org"] = Org.objects.filter(id=self.request.GET.get("other_org")).first()
+            context["other_org"] = Org.objects.filter(is_active=True, id=self.request.GET.get("other_org")).first()
             context["next"] = self.request.GET.get("next", "")
             return context
 
@@ -247,10 +252,10 @@ class OrgCRUDL(SmartCRUDL):
             initial["next"] = self.request.GET.get("next", "")
             return initial
 
-        # valid form means we set our org and redirect to their inbox
+        # valid form means we set our org and redirect to next
         def form_valid(self, form):
-            switch_to_org(self.request, form.cleaned_data["other_org"], servicing=True)
-            success_url = form.cleaned_data["next"] or reverse("msgs.msg_inbox")
+            switch_to_org(self.request, form.cleaned_data["other_org"])
+            success_url = form.cleaned_data["next"] or reverse("orgs.org_start")
             return HttpResponseRedirect(success_url)
 
         # invalid form login 'logs out' the user from the org and takes them to the root
@@ -277,12 +282,20 @@ class UserCRUDL(SmartCRUDL):
                 as_button=True,
             )
 
+            if not obj.is_verified():
+                menu.add_url_post(_("Verify"), f"{reverse('staff.user_update', args=[obj.id])}?action=verify")
+            else:
+                menu.add_url_post(_("Unverify"), f"{reverse('staff.user_update', args=[obj.id])}?action=unverify")
+
             menu.add_modax(
                 _("Delete"), "user-delete", reverse("staff.user_delete", args=[obj.id]), title=_("Delete User")
             )
 
     class Update(StaffOnlyMixin, ModalFormMixin, ComponentFormMixin, ContextMenuMixin, SmartUpdateView):
-        class Form(UserUpdateForm):
+        ACTION_VERIFY = "verify"
+        ACTION_UNVERIFY = "unverify"
+
+        class Form(forms.ModelForm):
             groups = forms.ModelMultipleChoiceField(
                 widget=SelectMultipleWidget(
                     attrs={"placeholder": _("Optional: Select permissions groups."), "searchable": True}
@@ -293,16 +306,26 @@ class UserCRUDL(SmartCRUDL):
 
             class Meta:
                 model = User
-                fields = ("email", "new_password", "first_name", "last_name", "groups")
+                fields = ("email", "first_name", "last_name", "groups")
                 help_texts = {"new_password": _("You can reset the user's password by entering a new password here")}
 
         form_class = Form
         success_message = "User updated successfully."
         title = "Update User"
 
-        def pre_save(self, obj):
-            obj.username = obj.email
-            return obj
+        def post(self, request, *args, **kwargs):
+            if "action" in request.POST:
+                action = request.POST["action"]
+                obj = self.get_object()
+
+                if action == self.ACTION_VERIFY:
+                    obj.set_verified(True)
+                elif action == self.ACTION_UNVERIFY:
+                    obj.set_verified(False)
+
+                return HttpResponseRedirect(reverse("staff.user_read", args=[obj.id]))
+
+            return super().post(request, *args, **kwargs)
 
         def post_save(self, obj):
             """
@@ -312,11 +335,6 @@ class UserCRUDL(SmartCRUDL):
                 obj.groups.clear()
                 for group in self.form.cleaned_data["groups"]:
                     obj.groups.add(group)
-
-            # if a new password was set, reset our failed logins
-            if "new_password" in self.form.cleaned_data and self.form.cleaned_data["new_password"]:
-                FailedLogin.objects.filter(username__iexact=self.object.username).delete()
-                PasswordHistory.objects.create(user=obj, password=obj.password)
 
             return obj
 
@@ -341,7 +359,7 @@ class UserCRUDL(SmartCRUDL):
             return response
 
     class List(StaffOnlyMixin, SpaMixin, SmartListView):
-        fields = ("email", "name", "date_joined", "2fa")
+        fields = ("email", "name", "date_joined", "2fa", "verified")
         ordering = ("-date_joined",)
         search_fields = ("email__icontains", "first_name__icontains", "last_name__icontains")
         filters = (("all", _("All")), ("beta", _("Beta")), ("staff", _("Staff")))
@@ -354,7 +372,10 @@ class UserCRUDL(SmartCRUDL):
             return super().dispatch(*args, **kwargs)
 
         def derive_queryset(self, **kwargs):
-            qs = super().derive_queryset(**kwargs).filter(is_active=True).exclude(id=get_anonymous_user().id)
+            verified_email_qs = EmailAddress.objects.filter(verified=True)
+            mfa_enabled_qs = Authenticator.objects.all()
+
+            qs = super().derive_queryset(**kwargs).filter(is_active=True)
 
             obj_filter = self.request.GET.get("filter")
             if obj_filter == "beta":
@@ -362,7 +383,10 @@ class UserCRUDL(SmartCRUDL):
             elif obj_filter == "staff":
                 qs = qs.filter(is_staff=True)
 
-            return qs.select_related("settings")
+            return qs.prefetch_related(
+                Prefetch("emailaddress_set", queryset=verified_email_qs, to_attr="email_verified"),
+                Prefetch("authenticator_set", queryset=mfa_enabled_qs, to_attr="mfa_enabled"),
+            )
 
         def get_context_data(self, **kwargs):
             context = super().get_context_data(**kwargs)
@@ -371,4 +395,7 @@ class UserCRUDL(SmartCRUDL):
             return context
 
         def get_2fa(self, obj):
-            return _("Yes") if obj.settings.two_factor_enabled else _("No")
+            return _("✓") if obj.mfa_enabled else _("")
+
+        def get_verified(self, obj):
+            return _("✓") if obj.email_verified else _("")
