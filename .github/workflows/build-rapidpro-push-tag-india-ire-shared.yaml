@@ -17,9 +17,12 @@ jobs:
             if grep -qs -e '^.*.*-india' <<< "${TAG}" ; then
               echo "Found environment: INDIA - ${TAG}"
               echo "MANIFESTS_ENVIRONMENT=mumbai" | tee -a "${GITHUB_ENV}"
+            elif grep -qs -e '^.*.*-mumbaistg' <<< "${TAG}" ; then
+              echo "Found environment: MUMBAI-STAGING - ${TAG}"
+              echo "MANIFESTS_ENVIRONMENT=mumbai-staging" | tee -a "${GITHUB_ENV}"
             elif grep -qs -e '^.*.*-staging' <<< "${TAG}" ; then
               echo "Found environment: STAGING - ${TAG}"
-              echo "MANIFESTS_ENVIRONMENT=mumbai-staging" | tee -a "${GITHUB_ENV}"
+              echo "MANIFESTS_ENVIRONMENT=staging" | tee -a "${GITHUB_ENV}"
             elif grep -qs -e '^.*.*-ire' <<< "${TAG}" ; then
               echo "Found environment: IRELAND - ${TAG}"
               echo "MANIFESTS_ENVIRONMENT=ireland" | tee -a "${GITHUB_ENV}"
@@ -69,6 +72,21 @@ jobs:
           push: true
           tags: "${{env.IMAGE_TAG}}"
           no-cache: true
+
+      - name: Build and push - Rapidpro Varnish Image in Shared
+        uses: docker/build-push-action@v3
+        with:
+          context: ./docker
+          labels: |
+            tag=${{env.TAG}}
+            commit=${{env.COMMIT_SHA}}
+            repository=${{env.IMAGE_SOURCE_URL}}
+          file: docker/Dockerfile.varnish
+          push: true
+          tags: "${{env.IMAGE_TAG}}-varnish"
+          no-cache: true
+          build-args: |
+            BACKEND_ADDRESS=rapidpro:8000
 
       - name: Check out Kubernetes Manifests
         uses: actions/checkout@master
