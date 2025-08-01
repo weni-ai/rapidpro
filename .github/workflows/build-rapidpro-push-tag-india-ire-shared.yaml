@@ -6,6 +6,7 @@ on:
       - '*.*.*-india'
       - '*.*.*-ire'
       - '*.*.*-staging'
+      - '*.*.*-mumbaistg'
 
 jobs:
   docker:
