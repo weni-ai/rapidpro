@@ -6,7 +6,7 @@ COPY ./pyproject.toml .
 COPY ./poetry.lock .
 COPY ./docker/pip-requires.txt .
 
-RUN python -m pip install -U poetry==1.8.4 \
+RUN python -m pip install -U poetry==2.0.0 \
  && poetry cache clear -n --all pypi \
  && poetry add -n --lock $(cat pip-requires.txt) \
  && poetry export --without-hashes --with dev --output requirements.txt
