@@ -1,4 +1,4 @@
-name: Build Flows in India and Ireland (Push Tag)
+name: Build Rapidpro v2 in India and Ireland (Push Tag)
 
 on:
   push:
@@ -79,7 +79,7 @@ jobs:
           username: ${{ secrets.AWS_ACCESS_KEY_ID_IRE }}      
           password: ${{ secrets.AWS_SECRET_ACCESS_KEY_IRE }}
 
-      - name: Build and push - Flows Image
+      - name: Build and push - Rapidpro v2 Image
         uses: docker/build-push-action@v3
         with:
           context: .
@@ -96,7 +96,7 @@ jobs:
             FLOWEDITOR_REPO=${{ env.FLOWEDITOR_REPO }}
             FLOWEDITOR_BRANCH=${{ env.FLOWEDITOR_BRANCH }}   
 
-      - name: Build and push - Flows Varnish Image
+      - name: Build and push - Rapidpro v2 Varnish Image
         uses: docker/build-push-action@v3
         with:
           context: ./docker
