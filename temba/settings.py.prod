@@ -167,16 +167,6 @@ DATABASES["readonly"] = DATABASES["default"].copy()
 CELERY_BROKER_URL = REDIS_URL
 BROKER_BACKEND = env("BROKER_BACKEND", default="redis")
 
-# CACHES
-# ------------------------------------------------------------------------------
-CACHES = {
-    "default": {
-        "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": REDIS_URL,
-        "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient"},
-    }
-}
-
 # AWS BUCKET AND MEDIA STORAGE
 # ------------------------------------------------------------------------------
 AWS_S3_ENDPOINT_URL = env("AWS_S3_ENDPOINT_URL", default=None)

@@ -2,7 +2,7 @@ import logging
 
 import requests
 from celery import shared_task
-from django_redis import get_redis_connection
+from django_valkey import get_valkey_connection
 
 from django.utils import timezone
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 @shared_task(track_started=True, name="refresh_teams_tokens")
 def refresh_teams_tokens():
-    r = get_redis_connection()
+    r = get_valkey_connection()
     if r.get("refresh_teams_tokens"):  # pragma: no cover
         return
     with r.lock("refresh_teams_tokens", 1800):
