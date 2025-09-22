@@ -23,7 +23,6 @@ def convert_eventfires(apps, schema_editor):  # pragma: no cover
                         fire_type="C",
                         scope=str(ef.event_id),
                         fire_on=ef.scheduled,
-                        extra={},
                     )
                 )
             ContactFire.objects.bulk_create(fires)

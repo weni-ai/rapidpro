@@ -36,10 +36,7 @@ def backfill_fires(apps, schema_editor):  # pragma: no cover
                     fire_on=session.wait_expires_on,
                     session_uuid=session.uuid,
                     sprint_uuid=session.last_sprint_uuid,
-                    extra={"session_id": session.id, "session_modified_on": session.modified_on.isoformat()},
                 )
-                if session.call_id:
-                    fire.extra["call_id"] = session.call_id
 
                 fires.append(fire)
                 session.wait_expires_on = None
@@ -54,7 +51,6 @@ def backfill_fires(apps, schema_editor):  # pragma: no cover
                         fire_on=session.timeout_on,
                         session_uuid=session.uuid,
                         sprint_uuid=session.last_sprint_uuid,
-                        extra={"session_id": session.id, "session_modified_on": session.modified_on.isoformat()},
                     )
                 )
                 session.timeout_on = None
