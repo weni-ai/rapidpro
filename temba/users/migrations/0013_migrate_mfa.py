@@ -14,7 +14,7 @@ def migration_mfa(apps, schema_editor):  # pragma: no cover
 
     users = User.objects.filter(two_factor_enabled=True)
     for user in users:
-        if Authenticator.objects.filter(user=user).exists():
+        if Authenticator.objects.filter(user_id=user.id).exists():
             continue
         backup_tokens = set(user.backup_tokens.filter(is_used=False).values_list("token", flat=True))
         totp_authenticator = Authenticator(
@@ -36,9 +36,9 @@ def migration_mfa(apps, schema_editor):  # pragma: no cover
     Authenticator.objects.bulk_create(authenticators)
     users = User.objects.filter(email_status="V")
     for user in users:
-        EmailAddress.objects.filter(user=user).delete()
+        EmailAddress.objects.filter(user_id=user.id).delete()
         EmailAddress.objects.create(
-            user=user,
+            user_id=user.id,
             email=user.email,
             verified=True,
             primary=True,
