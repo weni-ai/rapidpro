@@ -13,6 +13,10 @@ def on_post_migrate(sender, **kwargs):
     """
     Creates the system user if necessary
     """
+    # Only run this for our own app to avoid referencing fields (like uuid)
+    # before our migrations have been applied when other apps are migrated.
+    if getattr(sender, "name", None) != "temba.users":
+        return
 
     from .models import User
 
