@@ -84,6 +84,12 @@ BRANDS = [
         "redirect": brand_info.get("redirect"),
     }
 ]
+
+# -----------------------------------------------------------------------------------
+# Auth / Allauth policy per environment
+# In staging/prod, keep mandatory unless explicitly overridden via env
+# -----------------------------------------------------------------------------------
+ACCOUNT_EMAIL_VERIFICATION = env("ACCOUNT_EMAIL_VERIFICATION", default="mandatory")
 HOSTNAME = DEFAULT_BRAND
 BRAND = BRANDS[0]
 
