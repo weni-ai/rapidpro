@@ -15,13 +15,13 @@
     {% endfor %}
     <div class="mt-4">
       <input type="text"
-             name="username"
+             name="login"
              maxlength="254"
              placeholder="{{ _("Email Address") |escapejs }}"
-             value="{% if form.username.value %}{{ form.username.value|escape }}{% endif %}"
+             value="{% if form.login.value %}{{ form.login.value|escape }}{% endif %}"
              class="input">
     </div>
-    {% if form.username.errors %}<div class="alert alert-error mt-4">{{ form.username.errors }}</div>{% endif %}
+    {% if form.login.errors %}<div class="alert alert-error mt-4">{{ form.login.errors }}</div>{% endif %}
     <div class="mt-4">
       <input type="password" name="password" placeholder="{{ _("Password") |escapejs }}" class="input">
     </div>

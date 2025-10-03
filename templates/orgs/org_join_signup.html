@@ -23,12 +23,12 @@
 {% block fields %}
   <div class="control-group">
     <temba-textinput type="text"
-                     name="username"
+                     name="email"
                      maxlength="150"
                      label="{% trans "Email Address" %}"
                      value="{{ invitation.email }}"
                      disabled
-                     id="id_username">
+                     id="id_email">
     </temba-textinput>
   </div>
   {% render_field 'password' %}
