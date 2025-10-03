@@ -72,6 +72,8 @@ BRANDS = [
         "landing": {"hero": "brands/{}/splash.jpg".format(brand_info.get("folder"))},
         "logos": {"primary": "brands/{}/logo.png".format(brand_info.get("folder")), "favico": "brands/{}/push.ico".format(brand_info.get("folder"))},
         "allow_signups": bool(brand_info.get("allow_signups")),
+        # features are used by signup/login flows; ensure "signups" is present when allowed
+        "features": (["signups", "sso"] if bool(brand_info.get("allow_signups")) else ["sso"]),
         "flow_types": ["M", "V", "B", "S"],  # see Flow.FLOW_TYPES
         "location_support": True,
         "tiers": dict(import_flows=0, multi_user=0, multi_org=0),
@@ -154,6 +156,15 @@ REDIS_HOST = env("REDIS_HOST")
 REDIS_PORT = env("REDIS_PORT", default=6379)
 REDIS_DB = env("REDIS_DB", default=10)
 REDIS_URL = "redis://{}:{}/{}".format(REDIS_HOST, REDIS_PORT, REDIS_DB)
+
+# CACHE
+# ------------------------------------------------------------------------------
+CACHES = {
+    "default": {
+        "BACKEND": "django_valkey.cache.ValkeyCache",
+        "LOCATION": REDIS_URL,
+    }
+}
 
 # DATABASE
 # ------------------------------------------------------------------------------
