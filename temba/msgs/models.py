@@ -914,19 +914,9 @@ class MsgFolder(Enum):
         return org.counts.filter(scope=self._count_scope).sum()
 
     @classmethod
-    def get_counts(cls, org):
-        try:
-            counts = org.counts.prefix("msgs:folder:").scope_totals()
-            # Ensure all counts are non-negative to prevent indexing issues
-            result = {}
-            for lb, n in cls.TYPE_CHOICES:
-                count_value = counts.get(f"msgs:folder:{lb}", 0)
-                # Convert negative counts to 0 to prevent negative indexing errors
-                result[lb] = max(count_value, 0)
-            return result
-        except Exception:
-            # If there's any error in getting counts, return zeros to prevent crashes
-            return {lb: 0 for lb, n in cls.TYPE_CHOICES}
+    def get_counts(cls, org) -> dict:
+        counts = org.counts.prefix("msgs:folder:").scope_totals()
+        by_folder = {folder: counts.get(folder._count_scope, 0) for folder in cls}
 
         # TODO stuff counts for scheduled broadcasts and calls until we figure out what to do with them
         by_folder["scheduled"] = counts.get("msgs:folder:E", 0)
