@@ -916,11 +916,11 @@ class MsgFolder(Enum):
     @classmethod
     def get_counts(cls, org) -> dict:
         counts = org.counts.prefix("msgs:folder:").scope_totals()
-        by_folder = {folder: counts.get(folder._count_scope, 0) for folder in cls}
+        by_folder = {folder: max(counts.get(folder._count_scope, 0), 0) for folder in cls}
 
         # TODO stuff counts for scheduled broadcasts and calls until we figure out what to do with them
-        by_folder["scheduled"] = counts.get("msgs:folder:E", 0)
-        by_folder["calls"] = counts.get("msgs:folder:C", 0)
+        by_folder["scheduled"] = max(counts.get("msgs:folder:E", 0), 0)
+        by_folder["calls"] = max(counts.get("msgs:folder:C", 0), 0)
 
         return by_folder
 
@@ -956,7 +956,7 @@ class Label(TembaModel, DependencyMixin):
         Returns the count of visible, non-test message tagged with this label
         """
 
-        return LabelCount.get_totals([self])[self]
+        return max(LabelCount.get_totals([self])[self], 0)
 
     def toggle_label(self, msgs, add):
         """
