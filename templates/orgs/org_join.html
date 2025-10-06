@@ -38,7 +38,7 @@
       </div>
     </fieldset>
     {% csrf_token %}
-    <input type="hidden" name="login" value="{{ invitation.email }}">
+    <input type="hidden" name="username" value="{{ invitation.email }}">
     <input type="submit" value="Login" class="button-primary">
   </form>
 {% endblock content %}

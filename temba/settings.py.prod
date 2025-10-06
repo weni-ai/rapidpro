@@ -360,7 +360,8 @@ OIDC_RENEW_ID_TOKEN_EXPIRY_SECONDS = env.int("OIDC_RENEW_ID_TOKEN_EXPIRY_SECONDS
 SECRET_KEY_CHECK_LEGACY_USER = env("SECRET_KEY_CHECK_LEGACY_USER")
 
 # By default, rapidpro redirects the user to choose an org after login. Inside Weni Connect, the org is already selected, so we can bypass and take user to msg inbox.
-LOGIN_REDIRECT_URL = env("LOGIN_REDIRECT_URL", default="/msg/inbox/")
+# IMPORTANT: If org is not pre-selected in session, must redirect to /org/choose/ to avoid infinite loop
+LOGIN_REDIRECT_URL = env("LOGIN_REDIRECT_URL", default="/org/choose/")
 
 # Enable Weni Templates
 TEMPLATES[0]["OPTIONS"]["context_processors"] += [
