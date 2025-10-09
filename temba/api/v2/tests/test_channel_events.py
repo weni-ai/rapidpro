@@ -27,7 +27,7 @@ class ChannelEventsEndpointTest(APITest):
         # no filtering
         response = self.assertGet(
             endpoint_url,
-            [self.user, self.editor, self.admin],
+            [self.editor, self.admin],
             results=[call4, call3, call2, call1],
             num_queries=self.BASE_SESSION_QUERIES + 3,
         )

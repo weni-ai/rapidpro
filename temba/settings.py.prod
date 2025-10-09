@@ -72,6 +72,8 @@ BRANDS = [
         "landing": {"hero": "brands/{}/splash.jpg".format(brand_info.get("folder"))},
         "logos": {"primary": "brands/{}/logo.png".format(brand_info.get("folder")), "favico": "brands/{}/push.ico".format(brand_info.get("folder"))},
         "allow_signups": bool(brand_info.get("allow_signups")),
+        # features are used by signup/login flows; ensure "signups" is present when allowed
+        "features": (["signups", "sso"] if bool(brand_info.get("allow_signups")) else ["sso"]),
         "flow_types": ["M", "V", "B", "S"],  # see Flow.FLOW_TYPES
         "location_support": True,
         "tiers": dict(import_flows=0, multi_user=0, multi_org=0),
@@ -84,6 +86,12 @@ BRANDS = [
         "redirect": brand_info.get("redirect"),
     }
 ]
+
+# -----------------------------------------------------------------------------------
+# Auth / Allauth policy per environment
+# In staging/prod, keep mandatory unless explicitly overridden via env
+# -----------------------------------------------------------------------------------
+ACCOUNT_EMAIL_VERIFICATION = env("ACCOUNT_EMAIL_VERIFICATION", default="mandatory")
 HOSTNAME = DEFAULT_BRAND
 BRAND = BRANDS[0]
 
@@ -149,6 +157,15 @@ REDIS_PORT = env("REDIS_PORT", default=6379)
 REDIS_DB = env("REDIS_DB", default=10)
 REDIS_URL = "redis://{}:{}/{}".format(REDIS_HOST, REDIS_PORT, REDIS_DB)
 
+# CACHE
+# ------------------------------------------------------------------------------
+CACHES = {
+    "default": {
+        "BACKEND": "django_valkey.cache.ValkeyCache",
+        "LOCATION": REDIS_URL,
+    }
+}
+
 # DATABASE
 # ------------------------------------------------------------------------------
 DATABASES = {}
@@ -166,16 +183,6 @@ DATABASES["readonly"] = DATABASES["default"].copy()
 # ------------------------------------------------------------------------------
 CELERY_BROKER_URL = REDIS_URL
 BROKER_BACKEND = env("BROKER_BACKEND", default="redis")
-
-# CACHES
-# ------------------------------------------------------------------------------
-CACHES = {
-    "default": {
-        "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": REDIS_URL,
-        "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient"},
-    }
-}
 
 # AWS BUCKET AND MEDIA STORAGE
 # ------------------------------------------------------------------------------
@@ -353,7 +360,8 @@ OIDC_RENEW_ID_TOKEN_EXPIRY_SECONDS = env.int("OIDC_RENEW_ID_TOKEN_EXPIRY_SECONDS
 SECRET_KEY_CHECK_LEGACY_USER = env("SECRET_KEY_CHECK_LEGACY_USER")
 
 # By default, rapidpro redirects the user to choose an org after login. Inside Weni Connect, the org is already selected, so we can bypass and take user to msg inbox.
-LOGIN_REDIRECT_URL = env("LOGIN_REDIRECT_URL", default="/msg/inbox/")
+# IMPORTANT: If org is not pre-selected in session, must redirect to /org/choose/ to avoid infinite loop
+LOGIN_REDIRECT_URL = env("LOGIN_REDIRECT_URL", default="/org/choose/")
 
 # Enable Weni Templates
 TEMPLATES[0]["OPTIONS"]["context_processors"] += [

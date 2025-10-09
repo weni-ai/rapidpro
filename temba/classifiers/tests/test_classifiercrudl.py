@@ -4,7 +4,6 @@ from django.urls import reverse
 from django.utils import timezone
 
 from temba.classifiers.models import Classifier
-from temba.classifiers.types.luis import LuisType
 from temba.classifiers.types.wit import WitType
 from temba.tests import CRUDLTestMixin, TembaTest
 from temba.utils.views.mixins import TEMBA_MENU_SELECTION
@@ -31,7 +30,7 @@ class ClassifierCRUDLTest(TembaTest, CRUDLTestMixin):
         self.c3.save()
 
         # on another org
-        self.other_org = Classifier.create(self.org2, self.admin, LuisType.slug, "Org2 Booker", {}, sync=False)
+        self.other_org = Classifier.create(self.org2, self.admin, WitType.slug, "Org2 Booker", {}, sync=False)
 
         self.flow = self.create_flow("Color Flow")
         self.flow.classifier_dependencies.add(self.c1)
@@ -58,7 +57,7 @@ class ClassifierCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertNotContains(response, "book_hotel")
         self.assertContains(response, "book_car")
 
-        self.assertContentMenu(read_url, self.admin, ["Log", "Sync", "Delete"])
+        self.assertContentMenu(read_url, self.admin, ["Sync", "Delete"])
 
         self.c1.intents.all().delete()
 
@@ -79,19 +78,19 @@ class ClassifierCRUDLTest(TembaTest, CRUDLTestMixin):
         read_url = reverse("classifiers.classifier_read", args=[self.c1.uuid])
 
         self.assertRequestDisallowed(read_url, [None, self.agent, self.admin2])
-        response = self.assertReadFetch(read_url, [self.user, self.editor, self.admin], context_object=self.c1)
+        response = self.assertReadFetch(read_url, [self.editor, self.admin], context_object=self.c1)
 
         # lists active intents
         self.assertContains(response, "book_flight")
         self.assertNotContains(response, "book_hotel")
         self.assertContains(response, "book_car")
 
-        self.assertContentMenu(read_url, self.admin, ["Log", "Sync", "Delete"])
+        self.assertContentMenu(read_url, self.admin, ["Sync", "Delete"])
 
     def test_delete(self):
         delete_url = reverse("classifiers.classifier_delete", args=[self.c2.uuid])
 
-        self.assertRequestDisallowed(delete_url, [None, self.user, self.editor, self.agent, self.admin2])
+        self.assertRequestDisallowed(delete_url, [None, self.editor, self.agent, self.admin2])
 
         # fetch delete modal
         response = self.assertDeleteFetch(delete_url, [self.admin])

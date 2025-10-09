@@ -11,14 +11,14 @@ from typing import Any
 from urllib.parse import urlparse
 
 import pycountry
-import pyotp
 import pytz
+from django_valkey import get_valkey_connection
 from packaging.version import Version
 from smartmin.models import SmartModel
 from timezone_field import TimeZoneField
 
 from django.conf import settings
-from django.contrib.auth.models import Group, Permission, User as AuthUser
+from django.contrib.auth.models import Group
 from django.contrib.postgres.fields import ArrayField
 from django.contrib.postgres.indexes import OpClass
 from django.contrib.postgres.validators import ArrayMinLengthValidator
@@ -26,8 +26,6 @@ from django.core.files import File
 from django.core.files.storage import default_storage
 from django.db import models, transaction
 from django.db.models import Count, Prefetch, Q
-from django.db.models.signals import post_save
-from django.dispatch import receiver
 from django.utils import timezone
 from django.utils.encoding import force_str
 from django.utils.functional import cached_property
@@ -37,14 +35,13 @@ from django.utils.translation import gettext_lazy as _
 from temba import mailroom
 from temba.archives.models import Archive
 from temba.locations.models import AdminBoundary
+from temba.users.models import User
 from temba.utils import json, languages, on_transaction_commit
 from temba.utils.dates import datetime_to_str
 from temba.utils.email import EmailSender
-from temba.utils.fields import UploadToIdPathAndRename
 from temba.utils.models import JSONField, TembaUUIDMixin, delete_in_batches
-from temba.utils.models.counts import BaseScopedCount
-from temba.utils.s3 import public_file_storage
-from temba.utils.text import generate_secret, generate_token
+from temba.utils.models.counts import BaseDailyCount, BaseScopedCount
+from temba.utils.text import generate_secret
 from temba.utils.timezones import timezone_to_country_code
 from temba.utils.uuid import uuid4
 
@@ -137,219 +134,9 @@ class IntegrationType(metaclass=ABCMeta):
         return [t for t in TYPES.values() if not category or t.category == category]
 
 
-class User(AuthUser):
-    """
-    There's still no easy way to migrate an existing project to a custom user model, so this is a proxy which provides
-    extra functionality based on the same underlying auth.User model, and for additional fields we use the UserSettings
-    related model.
-    """
-
-    SYSTEM_USER_USERNAME = "system"
-
-    @classmethod
-    def create(cls, email: str, first_name: str, last_name: str, password: str, language: str = None):
-        assert not cls.get_by_email(email), "user with this email already exists"
-
-        obj = cls.objects.create_user(
-            username=email, email=email, first_name=first_name, last_name=last_name, password=password
-        )
-        if language:
-            obj.settings.language = language
-            obj.settings.save(update_fields=("language",))
-        return obj
-
-    @classmethod
-    def get_or_create(cls, email: str, first_name: str, last_name: str, password: str, language: str = None):
-        obj = cls.get_by_email(email)
-        if obj:
-            obj.first_name = first_name
-            obj.last_name = last_name
-            obj.save(update_fields=("first_name", "last_name"))
-            return obj
-
-        return cls.create(email, first_name, last_name, password=password, language=language)
-
-    @classmethod
-    def get_by_email(cls, email: str):
-        return cls.objects.filter(username__iexact=email).first()
-
-    @classmethod
-    def get_orgs_for_request(cls, request):
-        """
-        Gets the orgs that the logged in user has a membership of.
-        """
-
-        return request.user.orgs.filter(is_active=True).order_by("name")
-
-    @classmethod
-    def get_system_user(cls):
-        user = cls.objects.filter(username=cls.SYSTEM_USER_USERNAME).first()
-        if not user:
-            user = cls.objects.create_user(cls.SYSTEM_USER_USERNAME, first_name="System", last_name="Update")
-        return user
-
-    @property
-    def name(self) -> str:
-        return self.get_full_name()
-
-    def get_orgs(self):
-        return self.orgs.filter(is_active=True).order_by("name")
-
-    def get_owned_orgs(self):
-        """
-        Gets the orgs where this user is the only user.
-        """
-        owned_orgs = []
-        for org in self.get_orgs():
-            if not org.users.exclude(id=self.id).exists():
-                owned_orgs.append(org)
-        return owned_orgs
-
-    def record_auth(self):
-        """
-        Records that this user authenticated
-        """
-        self.settings.last_auth_on = timezone.now()
-        self.settings.save(update_fields=("last_auth_on",))
-
-    def enable_2fa(self):
-        """
-        Enables 2FA for this user
-        """
-        self.settings.two_factor_enabled = True
-        self.settings.save(update_fields=("two_factor_enabled",))
-
-        BackupToken.generate_for_user(self)
-
-    def disable_2fa(self):
-        """
-        Disables 2FA for this user
-        """
-        self.settings.two_factor_enabled = False
-        self.settings.save(update_fields=("two_factor_enabled",))
-
-        self.backup_tokens.all().delete()
-
-    def verify_2fa(self, *, otp: str = None, backup_token: str = None) -> bool:
-        """
-        Verifies a user using a 2FA mechanism (OTP or backup token)
-        """
-        if otp:
-            secret = self.settings.otp_secret
-            return pyotp.TOTP(secret).verify(otp, valid_window=2)
-        elif backup_token:
-            token = self.backup_tokens.filter(token=backup_token, is_used=False).first()
-            if token:
-                token.is_used = True
-                token.save(update_fields=("is_used",))
-                return True
-
-        return False
-
-    @cached_property
-    def is_alpha(self) -> bool:
-        return self.groups.filter(name="Alpha").exists()
-
-    @cached_property
-    def is_beta(self) -> bool:
-        return self.groups.filter(name="Beta").exists()
-
-    def has_org_perm(self, org, permission: str) -> bool:
-        """
-        Determines if a user has the given permission in the given org.
-        """
-
-        # has it innately? e.g. Granter group
-        if self.has_perm(permission):
-            return True
-
-        role = org.get_user_role(self)
-        if not role:
-            return False
-
-        return role.has_perm(permission)
-
-    def get_api_tokens(self, org):
-        """
-        Gets this users active API tokens for the given org
-        """
-        return self.api_tokens.filter(org=org, is_active=True)
-
-    def as_engine_ref(self) -> dict:
-        return {"email": self.email, "name": self.name}
-
-    def release(self, user):
-        """
-        Releases this user, and any orgs of which they are the sole owner.
-        """
-        user_uuid = str(uuid4())
-        self.first_name = ""
-        self.last_name = ""
-        self.email = f"{user_uuid}@rapidpro.io"
-        self.username = f"{user_uuid}@rapidpro.io"
-        self.password = ""
-        self.is_active = False
-        self.save()
-
-        # release any API tokens
-        self.api_tokens.update(is_active=False)
-
-        # release any orgs we own
-        for org in self.get_owned_orgs():
-            org.release(user, release_users=False)
-
-        # remove user from all roles on other orgs
-        for org in self.get_orgs():
-            org.remove_user(self)
-
-    def __str__(self):
-        return self.name or self.username
-
-    class Meta:
-        proxy = True
-
-
-class UserSettings(models.Model):
-    """
-    Additional non-org specific fields for users
-    """
-
-    STATUS_UNVERIFIED = "U"
-    STATUS_VERIFIED = "V"
-    STATUS_FAILING = "F"
-    STATUS_CHOICES = (
-        (STATUS_UNVERIFIED, _("Unverified")),
-        (STATUS_VERIFIED, _("Verified")),
-        (STATUS_FAILING, _("Failing")),
-    )
-
-    user = models.OneToOneField(User, on_delete=models.PROTECT, related_name="settings")
-    language = models.CharField(max_length=8, choices=settings.LANGUAGES, default=settings.DEFAULT_LANGUAGE)
-    otp_secret = models.CharField(max_length=16, default=pyotp.random_base32)
-    two_factor_enabled = models.BooleanField(default=False)
-    last_auth_on = models.DateTimeField(null=True)
-    external_id = models.CharField(max_length=128, null=True)
-    verification_token = models.CharField(max_length=64, null=True)
-    email_status = models.CharField(max_length=1, default=STATUS_UNVERIFIED, choices=STATUS_CHOICES)
-    email_verification_secret = models.CharField(max_length=64, db_index=True)
-    avatar = models.ImageField(upload_to=UploadToIdPathAndRename("avatars/"), storage=public_file_storage, null=True)
-    is_system = models.BooleanField(default=False)
-
-
-@receiver(post_save, sender=User)
-def on_user_post_save(sender, instance: User, created: bool, *args, **kwargs):
-    """
-    Handle user post-save signals so that we can create user settings for them.
-    """
-
-    if created:
-        instance.settings = UserSettings.objects.create(user=instance, email_verification_secret=generate_secret(64))
-
-
 class OrgRole(Enum):
     ADMINISTRATOR = ("A", _("Administrator"), _("Administrators"), "Administrators", "msgs.msg_inbox")
     EDITOR = ("E", _("Editor"), _("Editors"), "Editors", "msgs.msg_inbox")
-    VIEWER = ("V", _("Viewer"), _("Viewers"), "Viewers", "msgs.msg_inbox")
     AGENT = ("T", _("Agent"), _("Agents"), "Agents", "tickets.ticket_list")
 
     def __init__(self, code: str, display: str, display_plural: str, group_name: str, start_view: str):
@@ -391,7 +178,7 @@ class OrgRole(Enum):
 
     @classmethod
     def choices(cls):
-        return [(r.code, r.display) for r in cls if r != cls.VIEWER]
+        return [(r.code, r.display) for r in cls]
 
     def has_perm(self, permission: str) -> bool:
         """
@@ -457,11 +244,13 @@ class Org(SmartModel):
     FEATURE_NEW_ORGS = "new_orgs"  # can create new workspace with same login
     FEATURE_CHILD_ORGS = "child_orgs"  # can create child workspaces of this org
     FEATURE_TEAMS = "teams"  # can create teams to organize agent users
+    FEATURE_PROMETHEUS = "prometheus"  # can create a prometheus token to access metrics
     FEATURES_CHOICES = (
         (FEATURE_USERS, _("Users")),
         (FEATURE_NEW_ORGS, _("New Orgs")),
         (FEATURE_CHILD_ORGS, _("Child Orgs")),
         (FEATURE_TEAMS, _("Teams")),
+        (FEATURE_PROMETHEUS, _("Prometheus")),
     )
 
     LIMIT_CHANNELS = "channels"
@@ -469,6 +258,7 @@ class Org(SmartModel):
     LIMIT_GLOBALS = "globals"
     LIMIT_GROUPS = "groups"
     LIMIT_LABELS = "labels"
+    LIMIT_LLMS = "llms"
     LIMIT_TOPICS = "topics"
     LIMIT_TEAMS = "teams"
 
@@ -486,7 +276,7 @@ class Org(SmartModel):
     uuid = models.UUIDField(unique=True, default=uuid4)
     name = models.CharField(verbose_name=_("Name"), max_length=128)
     parent = models.ForeignKey("orgs.Org", on_delete=models.PROTECT, null=True, related_name="children")
-    users = models.ManyToManyField(User, through="OrgMembership", related_name="orgs")
+    users = models.ManyToManyField(settings.AUTH_USER_MODEL, through="OrgMembership", related_name="orgs")
 
     language = models.CharField(
         verbose_name=_("Default Language"),
@@ -765,12 +555,12 @@ class Org(SmartModel):
 
         # queue mailroom tasks to schedule campaign events
         for campaign in new_campaigns:
-            campaign.schedule_events_async()
+            campaign.schedule_async()
 
         # with all the flows and dependencies committed, we can now have mailroom do full validation
         for flow in new_flows:
-            flow_info = mailroom.get_client().flow_inspect(self, flow.get_definition())
-            flow.has_issues = len(flow_info[Flow.INSPECT_ISSUES]) > 0
+            info = mailroom.get_client().flow_inspect(self, flow.get_definition(), is_import=True)
+            flow.has_issues = len(info["issues"]) > 0
             flow.save(update_fields=("has_issues",))
 
     def clean_import(self, import_def):
@@ -845,9 +635,9 @@ class Org(SmartModel):
         return self.get_call_channel() or self.get_answer_channel()
 
     def is_outbox_full(self) -> bool:
-        from temba.msgs.models import SystemLabel
+        from temba.msgs.models import MsgFolder
 
-        return SystemLabel.get_counts(self)[SystemLabel.TYPE_OUTBOX] >= 1_000_000
+        return MsgFolder.OUTBOX.get_count(self) >= 1_000_000
 
     def get_estimated_send_time(self, msg_count):
         """
@@ -1036,19 +826,18 @@ class Org(SmartModel):
         """
         formats = self.get_datetime_formats(seconds=seconds)
         format = formats[1] if show_time else formats[0]
-        return datetime_to_str(d, format, self.timezone)
 
-    def get_users(self, *, roles: list = None, with_perm: str = None):
+        try:
+            date_str = datetime_to_str(d, format, self.timezone)
+        except OverflowError:
+            date_str = ""
+        return date_str
+
+    def get_users(self, *, roles: list = None):
         """
         Gets users in this org, filtered by role or permission.
         """
-        qs = self.users.filter(is_active=True).select_related("settings")
-
-        if with_perm:
-            app_label, codename = with_perm.split(".")
-            permission = Permission.objects.get(content_type__app_label=app_label, codename=codename)
-            groups = Group.objects.filter(permissions=permission)
-            roles = [OrgRole.from_group(g) for g in groups]
+        qs = self.users.filter(is_active=True)
 
         if roles is not None:
             qs = qs.filter(orgmembership__org=self, orgmembership__role_code__in=[r.code for r in roles])
@@ -1059,7 +848,7 @@ class Org(SmartModel):
         """
         Convenience method for getting all org administrators, excluding system users
         """
-        return self.get_users(roles=[OrgRole.ADMINISTRATOR]).exclude(settings__is_system=True)
+        return self.get_users(roles=[OrgRole.ADMINISTRATOR]).exclude(is_system=True)
 
     def has_user(self, user: User) -> bool:
         """
@@ -1133,7 +922,7 @@ class Org(SmartModel):
         user = self.get_admins().first()
         if user:
             # some some substitutions
-            samples = samples.replace("{{EMAIL}}", user.username).replace("{{API_URL}}", api_url)
+            samples = samples.replace("{{EMAIL}}", user.email).replace("{{API_URL}}", api_url)
 
             try:
                 self.import_app(json.loads(samples), user)
@@ -1155,7 +944,7 @@ class Org(SmartModel):
         campaign_prefetches = (
             Prefetch(
                 "events",
-                queryset=CampaignEvent.objects.filter(is_active=True).exclude(flow__is_system=True),
+                queryset=CampaignEvent.objects.filter(event_type=CampaignEvent.TYPE_FLOW, is_active=True),
                 to_attr="flow_events",
             ),
             "flow_events__flow",
@@ -1247,15 +1036,14 @@ class Org(SmartModel):
         from temba.contacts.models import ContactField, ContactGroup
         from temba.tickets.models import Team, Topic
 
-        with transaction.atomic():
-            ContactGroup.create_system_groups(self)
-            ContactField.create_system_fields(self)
-            Team.create_system(self)
-            Topic.create_system(self)
+        ContactGroup.create_system_groups(self)
+        ContactField.create_system_fields(self)
+        Team.create_system(self)
+        Topic.create_system(self)
 
-        # outside of the transaction as it's going to call out to mailroom for flow validation
+        # we should be called within a transaction, create the sample flows when its committed
         if sample_flows:
-            self.create_sample_flows(f"https://{self.get_brand_domain()}")
+            on_transaction_commit(lambda: self.create_sample_flows(f"https://{self.get_brand_domain()}"))
 
     def get_delete_date(self, *, archive_type=Archive.TYPE_MSG):
         """
@@ -1350,7 +1138,6 @@ class Org(SmartModel):
 
         # delete contact-related data
         delete_in_batches(self.http_logs.all())
-        delete_in_batches(self.sessions.all())
         delete_in_batches(self.ticket_events.all())
         delete_in_batches(self.tickets.all())
         delete_in_batches(self.topics.all())
@@ -1364,7 +1151,7 @@ class Org(SmartModel):
             contact.delete()
             counts["contacts"] += 1
 
-        # delete all our URNs
+        # delete any remaining orphaned URNs
         self.urns.all().delete()
 
         # delete our fields
@@ -1386,6 +1173,9 @@ class Org(SmartModel):
         for classifier in self.classifiers.all():
             classifier.release(user)
             classifier.delete()
+
+        for llm in self.llms.all():
+            llm.delete()
 
         for flow in self.flows.all():
             flow.delete()
@@ -1409,8 +1199,8 @@ class Org(SmartModel):
         delete_in_batches(self.templates.all())
 
         # needs to come after deletion of other things as those insert new negative counts
-        delete_in_batches(self.system_labels.all())
         delete_in_batches(self.counts.all())
+        delete_in_batches(self.daily_counts.all())
 
         # now that contacts are no longer in the database, we can start de-indexing them from search
         mailroom.get_client().org_deindex(self)
@@ -1423,21 +1213,6 @@ class Org(SmartModel):
 
         return counts
 
-    def as_environment_def(self):
-        """
-        Returns this org as an environment definition as used by the flow engine
-        """
-
-        return {
-            "date_format": Org.DATE_FORMATS_ENGINE.get(self.date_format),
-            "time_format": "tt:mm",
-            "timezone": str(self.timezone),
-            "allowed_languages": self.flow_languages,
-            "default_country": self.default_country_code,
-            "redaction_policy": "urns" if self.is_anon else "none",
-            "input_collation": self.input_collation,
-        }
-
     def __repr__(self):
         return f'<Org: id={self.id} name="{self.name}">'
 
@@ -1447,13 +1222,23 @@ class Org(SmartModel):
 
 class OrgMembership(models.Model):
     org = models.ForeignKey(Org, on_delete=models.CASCADE)
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     role_code = models.CharField(max_length=1)
     team = models.ForeignKey("tickets.Team", on_delete=models.PROTECT, null=True)
+    last_seen_on = models.DateTimeField(null=True)
 
     @property
     def role(self):
         return OrgRole.from_code(self.role_code)
+
+    def record_seen(self):
+        r = get_valkey_connection()
+        r.sadd("org_members_seen", self.id)
+
+    @classmethod
+    def get_seen(self) -> list:
+        r = get_valkey_connection()
+        return [k.decode() for k in r.spop("org_members_seen", r.scard("org_members_seen"))]
 
     class Meta:
         unique_together = (("org", "user"),)
@@ -1542,9 +1327,12 @@ class Invitation(SmartModel):
         sender = EmailSender.from_email_type(self.org.branding, "notifications")
         sender.send(
             [self.email],
-            _("%(name)s Invitation") % self.org.branding,
             "orgs/email/invitation_email",
-            {"org": self.org, "invitation": self},
+            {
+                "org": self.org,
+                "invitation": self,
+            },
+            _("[%(name)s] Invitation to join workspace") % {"name": self.org.name},
         )
 
     def accept(self, user):
@@ -1561,27 +1349,6 @@ class Invitation(SmartModel):
         self.modified_on = timezone.now()
         self.modified_by = user or self.modified_by
         self.save(update_fields=("is_active", "modified_by", "modified_on"))
-
-
-class BackupToken(models.Model):
-    """
-    A 2FA backup token for a user
-    """
-
-    user = models.ForeignKey(User, related_name="backup_tokens", on_delete=models.PROTECT)
-    token = models.CharField(max_length=18, unique=True, default=generate_token)
-    is_used = models.BooleanField(default=False)
-    created_on = models.DateTimeField(default=timezone.now)
-
-    @classmethod
-    def generate_for_user(cls, user, count: int = 10):
-        # delete any existing tokens for this user
-        user.backup_tokens.all().delete()
-
-        return [cls.objects.create(user=user) for i in range(count)]
-
-    def __str__(self):
-        return self.token
 
 
 class ExportType:
@@ -1703,7 +1470,7 @@ class Export(TembaUUIDMixin, models.Model):
     # additional type specific filtering and extra columns
     config = models.JSONField(default=dict)
 
-    created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="exports")
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="exports")
     created_on = models.DateTimeField(default=timezone.now)
     modified_on = models.DateTimeField(default=timezone.now)
 
@@ -1886,4 +1653,23 @@ class ItemCount(BaseScopedCount):
             models.Index("org", OpClass("scope", name="varchar_pattern_ops"), name="orgcount_org_scope"),
             # for squashing task
             models.Index(name="orgcount_unsquashed", fields=("org", "scope"), condition=Q(is_squashed=False)),
+        ]
+
+
+class DailyCount(BaseDailyCount):
+    """
+    Org-level daily counts of things.
+    """
+
+    squash_over = ("org_id", "day", "scope")
+
+    org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="daily_counts", db_index=False)  # indexed below
+
+    class Meta:
+        indexes = [
+            models.Index("org", "day", OpClass("scope", name="varchar_pattern_ops"), name="orgdailycount_org_scope"),
+            # for squashing task
+            models.Index(
+                name="orgdailycount_unsquashed", fields=("org", "day", "scope"), condition=Q(is_squashed=False)
+            ),
         ]

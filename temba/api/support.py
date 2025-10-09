@@ -45,7 +45,7 @@ class APITokenAuthentication(RequestAttributesMixin, TokenAuthentication):
     """
 
     model = APIToken
-    select_related = ("user", "user__settings", "org", "org__parent")
+    select_related = ("user", "org", "org__parent")
 
     def authenticate_credentials(self, key):
         try:
@@ -66,7 +66,7 @@ class APIBasicAuthentication(RequestAttributesMixin, BasicAuthentication):
 
     Clients should authenticate using HTTP Basic Authentication.
 
-    Credentials: username:api_token
+    Credentials: email:api_token
     """
 
     def authenticate_credentials(self, userid, password, request=None):
@@ -75,7 +75,7 @@ class APIBasicAuthentication(RequestAttributesMixin, BasicAuthentication):
         except APIToken.DoesNotExist:
             raise exceptions.AuthenticationFailed("Invalid token or email")
 
-        if token.user.username != userid:
+        if token.user.email != userid:
             raise exceptions.AuthenticationFailed("Invalid token or email")
 
         if token.user.is_active:
@@ -175,6 +175,11 @@ class SentOnCursorPagination(CursorPagination):
 
 class DateJoinedCursorPagination(CursorPagination):
     ordering = ("-date_joined", "-id")
+    offset_cutoff = 100000
+
+
+class NameCursorPagination(CursorPagination):
+    ordering = ("name", "id")
     offset_cutoff = 100000
 
 

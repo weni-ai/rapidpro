@@ -13,7 +13,7 @@ class TopicsEndpointTest(APITest):
         endpoint_url = reverse("api.v2.topics") + ".json"
 
         self.assertGetNotPermitted(endpoint_url, [None])
-        self.assertPostNotPermitted(endpoint_url, [None, self.agent, self.user])
+        self.assertPostNotPermitted(endpoint_url, [None, self.agent])
         self.assertDeleteNotAllowed(endpoint_url)
 
         # create some topics
@@ -27,7 +27,7 @@ class TopicsEndpointTest(APITest):
         # no filtering
         self.assertGet(
             endpoint_url,
-            [self.user, self.editor],
+            [self.editor, self.admin],
             results=[
                 {
                     "uuid": str(sales.uuid),
@@ -68,7 +68,7 @@ class TopicsEndpointTest(APITest):
                 "name": "Food",
                 "counts": {"open": 0, "closed": 0},
                 "system": False,
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
             },
         )
 
@@ -122,6 +122,6 @@ class TopicsEndpointTest(APITest):
                 endpoint_url,
                 self.admin,
                 {"name": "Interesting"},
-                errors={None: "Cannot create object because workspace has reached limit of 4."},
+                errors={None: "Cannot create object because workspace has reached limit."},
                 status=409,
             )

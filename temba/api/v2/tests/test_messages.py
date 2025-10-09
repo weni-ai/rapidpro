@@ -5,7 +5,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from temba.api.v2.serializers import format_datetime
-from temba.msgs.models import Msg
+from temba.msgs.models import Msg, QuickReply
 from temba.tests import mock_mailroom
 
 from . import APITest
@@ -17,7 +17,7 @@ class MessagesEndpointTest(APITest):
         endpoint_url = reverse("api.v2.messages") + ".json"
 
         self.assertGetNotPermitted(endpoint_url, [None, self.agent])
-        self.assertPostNotPermitted(endpoint_url, [None, self.user])
+        self.assertPostNotPermitted(endpoint_url, [None])
         self.assertDeleteNotAllowed(endpoint_url)
 
         joe = self.create_contact("Joe Blow", phone="+250788123123")
@@ -69,7 +69,7 @@ class MessagesEndpointTest(APITest):
         # default response is all messages sorted by created_on
         self.assertGet(
             endpoint_url,
-            [self.user, self.editor, self.admin],
+            [self.editor, self.admin],
             results=[joe_msg4, frank_msg4, frank_msg3, joe_msg3, frank_msg2, joe_msg2, frank_msg1, joe_msg1],
             num_queries=self.BASE_SESSION_QUERIES + 6,
         )
@@ -87,6 +87,7 @@ class MessagesEndpointTest(APITest):
                     "urn": "facebook:123456",
                     "text": "Bonjour",
                     "attachments": [],
+                    "quick_replies": [],
                     "archived": False,
                     "broadcast": None,
                     "created_on": format_datetime(frank_msg1.created_on),
@@ -153,7 +154,9 @@ class MessagesEndpointTest(APITest):
         )
 
         # filter by broadcast
-        broadcast = self.create_broadcast(self.user, {"eng": {"text": "A beautiful broadcast"}}, contacts=[joe, frank])
+        broadcast = self.create_broadcast(
+            self.editor, {"eng": {"text": "A beautiful broadcast"}}, contacts=[joe, frank]
+        )
         self.assertGet(
             endpoint_url + f"?broadcast={broadcast.id}",
             [self.editor],
@@ -210,6 +213,7 @@ class MessagesEndpointTest(APITest):
                 "urn": "tel:+250788123123",
                 "text": "Interesting",
                 "attachments": [],
+                "quick_replies": [],
                 "archived": False,
                 "broadcast": None,
                 "created_on": format_datetime(msg.created_on),
@@ -226,7 +230,7 @@ class MessagesEndpointTest(APITest):
         )
 
         self.assertEqual(
-            call(self.org, self.admin, joe, "Interesting", [], None),
+            call(self.org, self.admin, joe, "Interesting", [], [], None),
             mr_mocks.calls["msg_send"][-1],
         )
 
@@ -251,7 +255,7 @@ class MessagesEndpointTest(APITest):
         # create a new message with an attachment as the media UUID...
         self.assertPost(endpoint_url, self.admin, {"contact": joe.uuid, "attachments": [str(upload.uuid)]}, status=201)
         self.assertEqual(  # check that was sent via mailroom
-            call(self.org, self.admin, joe, "", [f"image/jpeg:{upload.url}"], None),
+            call(self.org, self.admin, joe, "", [f"image/jpeg:{upload.url}"], [], None),
             mr_mocks.calls["msg_send"][-1],
         )
 
@@ -263,7 +267,7 @@ class MessagesEndpointTest(APITest):
             status=201,
         )
         self.assertEqual(
-            call(self.org, self.admin, joe, "", [f"image/jpeg:{upload.url}"], None),
+            call(self.org, self.admin, joe, "", [f"image/jpeg:{upload.url}"], [], None),
             mr_mocks.calls["msg_send"][-1],
         )
 
@@ -288,3 +292,51 @@ class MessagesEndpointTest(APITest):
         self.assertIsNone(msg_json["channel"])
         self.assertIsNone(msg_json["urn"])
         self.assertEqual("failed", msg_json["status"])
+
+        response = self.assertPost(
+            endpoint_url,
+            self.admin,
+            {
+                "contact": joe.uuid,
+                "text": "What is your preferred color?",
+                "quick_replies": [{"text": "Red"}, {"text": "Green", "extra": "Like grass"}, {"text": "Blue"}],
+            },
+            status=201,
+        )
+        self.assertEqual(
+            call(
+                self.org,
+                self.admin,
+                joe,
+                "What is your preferred color?",
+                [],
+                [QuickReply("Red", None), QuickReply("Green", "Like grass"), QuickReply("Blue", None)],
+                None,
+            ),
+            mr_mocks.calls["msg_send"][-1],
+        )
+        msg = Msg.objects.order_by("id").last()
+        self.assertEqual(
+            {
+                "id": msg.id,
+                "type": "text",
+                "channel": {"uuid": str(self.channel.uuid), "name": "Test Channel"},
+                "contact": {"uuid": str(joe.uuid), "name": "Joe Blow"},
+                "urn": "tel:+250788123123",
+                "text": "What is your preferred color?",
+                "attachments": [],
+                "quick_replies": [{"text": "Red"}, {"text": "Green", "extra": "Like grass"}, {"text": "Blue"}],
+                "archived": False,
+                "broadcast": None,
+                "created_on": format_datetime(msg.created_on),
+                "direction": "out",
+                "flow": None,
+                "labels": [],
+                "media": None,
+                "modified_on": format_datetime(msg.modified_on),
+                "sent_on": None,
+                "status": "queued",
+                "visibility": "visible",
+            },
+            response.json(),
+        )

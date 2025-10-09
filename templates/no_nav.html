@@ -29,8 +29,8 @@
     <div class="middle flex flex-row mb-10">
       <div class="flex-grow"></div>
       <div class="card content-card">
-        <div class="flex items-center">
-          <div class="brand flex-grow">
+        <div class="flex justify-between items-center">
+          <div class="brand">
             {% block logo %}
               <img class="no-nav-logo"
                    style="max-height:4em;
@@ -43,17 +43,21 @@
             {% endblock top-right %}
           </div>
         </div>
-        {% block alert-messages %}
-          {% if messages %}
-            {% for msg in messages %}
-              <temba-alert class="mb-3">
-                {{ msg }}
-              </temba-alert>
-            {% endfor %}
-          {% endif %}
-        {% endblock alert-messages %}
-        {% block content %}
-        {% endblock content %}
+        {% block content-wrapper %}
+          {% block alert-messages %}
+            {% if messages %}
+              <div class="px-4 pb-4">
+                {% for msg in messages %}
+                  <temba-alert class="mb-3">
+                    {{ msg }}
+                  </temba-alert>
+                {% endfor %}
+              </div>
+            {% endif %}
+          {% endblock alert-messages %}
+          {% block content %}
+          {% endblock content %}
+        {% endblock content-wrapper %}
       </div>
       <div class="flex-grow"></div>
     </div>

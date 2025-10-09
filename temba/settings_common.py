@@ -29,31 +29,14 @@ if TESTING:
 
 if os.getenv("REMOTE_CONTAINERS") == "true":
     _db_host = "postgres"
-    _redis_host = "redis"
+    _valkey_host = "valkey"
     _minio_host = "minio"
     _dynamo_host = "dynamo"
 else:
     _db_host = "localhost"
-    _redis_host = "localhost"
+    _valkey_host = "localhost"
     _minio_host = "localhost"
     _dynamo_host = "localhost"
-
-# -----------------------------------------------------------------------------------
-# Email
-# -----------------------------------------------------------------------------------
-
-SEND_EMAILS = TESTING  # enable sending emails in tests
-
-EMAIL_HOST = "smtp.gmail.com"
-EMAIL_HOST_USER = "server@temba.io"
-DEFAULT_FROM_EMAIL = "server@temba.io"
-EMAIL_HOST_PASSWORD = "mypassword"
-EMAIL_USE_TLS = True
-EMAIL_TIMEOUT = 10
-
-# Used when sending email from within a flow and the user hasn't configured
-# their own SMTP server.
-FLOW_FROM_EMAIL = "no-reply@temba.io"
 
 # -----------------------------------------------------------------------------------
 # AWS
@@ -166,6 +149,20 @@ MEDIA_ROOT = os.path.join(PROJECT_DIR, "../media")
 MEDIA_URL = "/media/"
 
 # -----------------------------------------------------------------------------------
+# Email
+# -----------------------------------------------------------------------------------
+EMAIL_HOST = "smtp.gmail.com"
+EMAIL_HOST_USER = "server@temba.io"
+DEFAULT_FROM_EMAIL = "Temba <server@temba.io>"
+EMAIL_HOST_PASSWORD = "mypassword"
+EMAIL_USE_TLS = True
+EMAIL_TIMEOUT = 10
+
+# Used when sending email from within a flow and the user hasn't configured
+# their own SMTP server.
+FLOW_FROM_EMAIL = "Temba <no-reply@temba.io>"
+
+# -----------------------------------------------------------------------------------
 # Templates
 # -----------------------------------------------------------------------------------
 
@@ -214,6 +211,7 @@ MIDDLEWARE = (
     "temba.middleware.LanguageMiddleware",
     "temba.middleware.TimezoneMiddleware",
     "temba.middleware.ToastMiddleware",
+    "allauth.account.middleware.AccountMiddleware",
 )
 
 # -----------------------------------------------------------------------------------
@@ -225,7 +223,7 @@ ROOT_URLCONF = "temba.urls"
 # other urls to add
 APP_URLS = []
 
-SITEMAP = ("public.public_index", "public.video_list", "api")
+SITEMAP = ("public.public_index", "api")
 
 INSTALLED_APPS = (
     "django.contrib.auth",
@@ -239,19 +237,22 @@ INSTALLED_APPS = (
     "django.contrib.sitemaps",
     "django.contrib.postgres",
     "django.forms",
+    "allauth",
+    "allauth.account",
+    "allauth.mfa",
+    "allauth.socialaccount",
+    "allauth.socialaccount.providers.google",
     "formtools",
     "imagekit",
-    "redis",
     "rest_framework",
     "rest_framework.authtoken",
     "compressor",
     "smartmin",
-    "smartmin.csv_imports",
-    "smartmin.users",
     "timezone_field",
+    "temba.users",
+    "temba.ai",
     "temba.apks",
     "temba.archives",
-    "temba.auth_tweaks",
     "temba.api",
     "temba.request_logs",
     "temba.classifiers",
@@ -312,7 +313,7 @@ BRAND = {
     "landing": {
         "hero": "brands/rapidpro/splash.jpg",
     },
-    "features": ["signups"],
+    "features": ["signups", "sso"],
 }
 
 FEATURES = {"locations"}
@@ -336,17 +337,17 @@ PERMISSIONS = {
         "delete",  # can delete an object,
         "list",  # can view a list of the objects
     ),
+    "ai.llm": ("connect", "translate"),
     "api.apitoken": ("explorer",),
     "archives.archive": ("run", "message"),
     "campaigns.campaign": ("archive", "activate", "menu"),
-    "channels.channel": ("chart", "claim", "configuration", "errors", "facebook_whitelist"),
-    "channels.channellog": ("connection",),
+    "channels.channel": ("chart", "claim", "configuration", "logs", "facebook_whitelist"),
     "classifiers.classifier": ("connect", "sync"),
     "contacts.contact": ("export", "history", "interrupt", "menu", "omnibox", "open_ticket", "start"),
     "contacts.contactfield": ("update_priority",),
     "contacts.contactgroup": ("menu",),
     "contacts.contactimport": ("preview",),
-    "flows.flow": ("assets", "copy", "editor", "export", "menu", "results", "start"),
+    "flows.flow": ("assets", "copy", "editor", "export", "menu", "next", "results", "start"),
     "flows.flowstart": ("interrupt", "status"),
     "flows.flowsession": ("json",),
     "globals.global": ("unused",),
@@ -374,26 +375,25 @@ PERMISSIONS = {
         "service",
         "signup",
         "spa",
+        "switch",
         "trial",
         "twilio_account",
         "twilio_connect",
         "workspace",
     ),
     "request_logs.httplog": ("webhooks", "classifier"),
-    "tickets.ticket": ("assign", "assignee", "menu", "note", "export_stats", "export"),
+    "tickets.ticket": ("assign", "menu", "note", "export", "analytics"),
     "triggers.trigger": ("archived", "type", "menu"),
 }
 
 
 # assigns the permissions that each group should have
 GROUP_PERMISSIONS = {
-    "Alpha": (),
     "Beta": (),
     "Dashboard": ("orgs.org_dashboard",),
-    "Surveyors": (),
-    "Customer Support": (),
     "Granters": ("orgs.org_grant",),
     "Administrators": (
+        "ai.llm.*",
         "airtime.airtimetransfer_list",
         "airtime.airtimetransfer_read",
         "api.apitoken_explorer",
@@ -412,11 +412,10 @@ GROUP_PERMISSIONS = {
         "channels.channel_delete",
         "channels.channel_facebook_whitelist",
         "channels.channel_list",
+        "channels.channel_logs",
         "channels.channel_read",
         "channels.channel_update",
         "channels.channelevent_list",
-        "channels.channellog_list",
-        "channels.channellog_read",
         "classifiers.classifier_connect",
         "classifiers.classifier_delete",
         "classifiers.classifier_list",
@@ -436,10 +435,8 @@ GROUP_PERMISSIONS = {
         "contacts.contactfield.*",
         "contacts.contactgroup.*",
         "contacts.contactimport.*",
-        "csv_imports.importtask.*",
         "flows.flow.*",
         "flows.flowlabel.*",
-        "flows.flowrun_delete",
         "flows.flowrun_list",
         "flows.flowstart.*",
         "globals.global.*",
@@ -479,11 +476,10 @@ GROUP_PERMISSIONS = {
         "orgs.org_prometheus",
         "orgs.org_read",
         "orgs.org_resthooks",
+        "orgs.org_switch",
         "orgs.org_update",
         "orgs.org_workspace",
         "orgs.orgimport.*",
-        "orgs.user_list",
-        "orgs.user_update",
         "request_logs.httplog_list",
         "request_logs.httplog_read",
         "request_logs.httplog_webhooks",
@@ -493,8 +489,13 @@ GROUP_PERMISSIONS = {
         "tickets.ticket.*",
         "tickets.topic.*",
         "triggers.trigger.*",
+        "users.user_list",
+        "users.user_update",
     ),
     "Editors": (
+        "ai.llm_list",
+        "ai.llm_read",
+        "ai.llm_translate",
         "airtime.airtimetransfer_list",
         "airtime.airtimetransfer_read",
         "api.apitoken_explorer",
@@ -531,10 +532,8 @@ GROUP_PERMISSIONS = {
         "contacts.contactfield.*",
         "contacts.contactgroup.*",
         "contacts.contactimport.*",
-        "csv_imports.importtask.*",
         "flows.flow.*",
         "flows.flowlabel.*",
-        "flows.flowrun_delete",
         "flows.flowrun_list",
         "flows.flowstart_create",
         "flows.flowstart_list",
@@ -565,6 +564,7 @@ GROUP_PERMISSIONS = {
         "orgs.org_menu",
         "orgs.org_read",
         "orgs.org_resthooks",
+        "orgs.org_switch",
         "orgs.org_workspace",
         "orgs.orgimport.*",
         "request_logs.httplog_webhooks",
@@ -578,87 +578,25 @@ GROUP_PERMISSIONS = {
         "tickets.topic.*",
         "triggers.trigger.*",
     ),
-    "Viewers": (
-        "campaigns.campaign_list",
-        "campaigns.campaign_menu",
-        "campaigns.campaign_read",
-        "campaigns.campaignevent_list",
-        "campaigns.campaignevent_read",
-        "channels.channel_list",
-        "channels.channel_read",
-        "channels.channelevent_list",
-        "classifiers.classifier_list",
-        "classifiers.classifier_read",
-        "contacts.contact_export",
-        "contacts.contact_history",
-        "contacts.contact_list",
-        "contacts.contact_menu",
-        "contacts.contact_read",
-        "contacts.contactfield_list",
-        "contacts.contactfield_read",
-        "contacts.contactgroup_list",
-        "contacts.contactgroup_menu",
-        "contacts.contactgroup_read",
-        "contacts.contactimport_read",
-        "flows.flow_assets",
-        "flows.flow_editor",
-        "flows.flow_export",
-        "flows.flow_list",
-        "flows.flow_menu",
-        "flows.flow_results",
-        "flows.flowrun_list",
-        "flows.flowstart_list",
-        "globals.global_list",
-        "globals.global_read",
-        "ivr.call_list",
-        "locations.adminboundary_alias",
-        "locations.adminboundary_boundaries",
-        "locations.adminboundary_geometry",
-        "locations.adminboundary_list",
-        "msgs.broadcast_list",
-        "msgs.broadcast_scheduled",
-        "msgs.label_list",
-        "msgs.label_read",
-        "msgs.msg_export",
-        "msgs.msg_list",
-        "msgs.msg_menu",
-        "msgs.optin_list",
-        "notifications.notification_list",
-        "orgs.export_download",
-        "orgs.org_download",
-        "orgs.org_export",
-        "orgs.org_menu",
-        "orgs.org_read",
-        "orgs.org_workspace",
-        "templates.template_list",
-        "templates.template_read",
-        "tickets.ticket_export",
-        "tickets.ticket_list",
-        "tickets.ticket_menu",
-        "tickets.topic_list",
-        "triggers.trigger_list",
-        "triggers.trigger_menu",
-    ),
     "Agents": (
         "contacts.contact_history",
+        "contacts.contact_interrupt",
         "notifications.notification_list",
         "orgs.org_languages",
         "orgs.org_menu",
+        "orgs.org_switch",
         "tickets.ticket_assign",
-        "tickets.ticket_assignee",
         "tickets.ticket_list",
         "tickets.ticket_menu",
         "tickets.ticket_note",
         "tickets.ticket_update",
         "tickets.topic_list",
     ),
-    "Prometheus": (),
 }
 
 # extra permissions that only apply to API requests (wildcard notation not supported here)
 API_PERMISSIONS = {
-    "Editors": ("orgs.user_list",),
-    "Viewers": ("orgs.user_list",),
+    "Editors": ("orgs.org_list", "users.user_list"),
     "Agents": (
         "contacts.contact_create",
         "contacts.contact_list",
@@ -668,9 +606,10 @@ API_PERMISSIONS = {
         "locations.adminboundary_list",
         "msgs.media_create",
         "msgs.msg_create",
+        "orgs.org_list",
         "orgs.org_read",
-        "orgs.user_list",
         "tickets.shortcut_list",
+        "users.user_list",
     ),
 }
 
@@ -678,16 +617,13 @@ API_PERMISSIONS = {
 # Authentication
 # -----------------------------------------------------------------------------------
 
-LOGIN_URL = "/users/login/"
+LOGIN_URL = "/accounts/login/"
 LOGIN_REDIRECT_URL = "/org/choose/"
 
-AUTHENTICATION_BACKENDS = ("temba.orgs.backend.AuthenticationBackend",)
-
+AUTH_USER_MODEL = "users.User"
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator", "OPTIONS": {"min_length": 8}},
 ]
-
-ANONYMOUS_USER_NAME = "AnonymousUser"
 
 INVITATION_VALIDITY = timedelta(days=30)
 
@@ -701,8 +637,12 @@ if os.getenv("REMOTE_CONTAINERS") == "true":
 # -----------------------------------------------------------------------------------
 # Database
 # -----------------------------------------------------------------------------------
+
+# temp workaround to allow running migrations without PostGIS
+POSTGIS = os.getenv("POSTGIS", "") != "off"
+
 _default_database_config = {
-    "ENGINE": "django.contrib.gis.db.backends.postgis",
+    "ENGINE": "django.contrib.gis.db.backends.postgis" if POSTGIS else "django.db.backends.postgresql",
     "NAME": "temba",
     "USER": "temba",
     "PASSWORD": "temba",
@@ -723,13 +663,12 @@ DEFAULT_AUTO_FIELD = "django.db.models.AutoField"
 # -----------------------------------------------------------------------------------
 # Cache
 # -----------------------------------------------------------------------------------
-_redis_url = f"redis://{_redis_host}:6379/{10 if TESTING else 15}"
+_valkey_url = f"redis://{_valkey_host}:6379/{10 if TESTING else 15}"
 
 CACHES = {
     "default": {
-        "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": _redis_url,
-        "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient"},
+        "BACKEND": "django_valkey.cache.ValkeyCache",
+        "LOCATION": _valkey_url,
     }
 }
 
@@ -740,11 +679,11 @@ SESSION_CACHE_ALIAS = "default"
 # Celery
 # -----------------------------------------------------------------------------------
 
-CELERY_BROKER_URL = _redis_url
+CELERY_BROKER_URL = _valkey_url
 CELERY_RESULT_BACKEND = None
 CELERY_TASK_TRACK_STARTED = True
 
-# by default, celery doesn't have any timeout on our redis connections, this fixes that
+# by default, celery doesn't have any timeout on our valkey connections, this fixes that
 CELERY_BROKER_TRANSPORT_OPTIONS = {"socket_timeout": 5}
 
 CELERY_BEAT_SCHEDULE = {
@@ -752,23 +691,17 @@ CELERY_BEAT_SCHEDULE = {
     "delete-released-orgs": {"task": "delete_released_orgs", "schedule": crontab(hour=4, minute=0)},
     "expire-invitations": {"task": "expire_invitations", "schedule": crontab(hour=0, minute=10)},
     "fail-old-android-messages": {"task": "fail_old_android_messages", "schedule": crontab(hour=0, minute=0)},
-    "interrupt-flow-sessions": {"task": "interrupt_flow_sessions", "schedule": crontab(hour=23, minute=30)},
     "refresh-whatsapp-tokens": {"task": "refresh_whatsapp_tokens", "schedule": crontab(hour=6, minute=0)},
-    "refresh-templates": {"task": "refresh_templates", "schedule": timedelta(seconds=900)},
+    "refresh-templates": {"task": "refresh_templates", "schedule": timedelta(minutes=30)},
     "send-notification-emails": {"task": "send_notification_emails", "schedule": timedelta(seconds=60)},
-    "squash-activity-counts": {"task": "squash_activity_counts", "schedule": timedelta(seconds=30)},
     "squash-channel-counts": {"task": "squash_channel_counts", "schedule": timedelta(seconds=60)},
     "squash-group-counts": {"task": "squash_group_counts", "schedule": timedelta(seconds=60)},
-    "squash-flow-counts": {"task": "squash_flow_counts", "schedule": timedelta(seconds=60)},
+    "squash-flow-counts": {"task": "squash_flow_counts", "schedule": timedelta(seconds=30)},
     "squash-item-counts": {"task": "squash_item_counts", "schedule": timedelta(seconds=30)},
     "squash-msg-counts": {"task": "squash_msg_counts", "schedule": timedelta(seconds=60)},
-    "squash-ticket-counts": {"task": "squash_ticket_counts", "schedule": timedelta(seconds=60)},
     "sync-classifier-intents": {"task": "sync_classifier_intents", "schedule": timedelta(seconds=300)},
-    "track-org-channel-counts": {"task": "track_org_channel_counts", "schedule": crontab(hour=4, minute=0)},
     "trim-channel-events": {"task": "trim_channel_events", "schedule": crontab(hour=3, minute=0)},
-    "trim-channel-logs": {"task": "trim_channel_logs", "schedule": crontab(hour=3, minute=0)},
     "trim-channel-sync-events": {"task": "trim_channel_sync_events", "schedule": crontab(hour=3, minute=0)},
-    "trim-event-fires": {"task": "trim_event_fires", "schedule": timedelta(seconds=900)},
     "trim-exports": {"task": "trim_exports", "schedule": crontab(hour=2, minute=0)},
     "trim-flow-revisions": {"task": "trim_flow_revisions", "schedule": crontab(hour=0, minute=0)},
     "update-org-activity": {"task": "update_org_activity_task", "schedule": crontab(hour=3, minute=5)},
@@ -777,6 +710,7 @@ CELERY_BEAT_SCHEDULE = {
     "trim-http-logs": {"task": "trim_http_logs", "schedule": crontab(hour=2, minute=0)},
     "trim-notifications": {"task": "trim_notifications", "schedule": crontab(hour=2, minute=0)},
     "trim-webhook-events": {"task": "trim_webhook_events", "schedule": crontab(hour=3, minute=0)},
+    "update-members-seen": {"task": "update_members_seen", "schedule": timedelta(seconds=30)},
     "update-tokens-used": {"task": "update_tokens_used", "schedule": timedelta(seconds=30)},
 }
 
@@ -789,7 +723,7 @@ REST_FRAMEWORK = {
         "v2": "2500/hour",
         "v2.contacts": "2500/hour",
         "v2.messages": "2500/hour",
-        "v2.broadcasts": "36000/hour",
+        "v2.broadcasts": "2500/hour",
         "v2.runs": "2500/hour",
     },
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.LimitOffsetPagination",
@@ -828,8 +762,6 @@ INTEGRATION_TYPES = [
 
 CLASSIFIER_TYPES = [
     "temba.classifiers.types.wit.WitType",
-    "temba.classifiers.types.luis.LuisType",
-    "temba.classifiers.types.bothub.BothubType",
 ]
 
 CHANNEL_TYPES = [
@@ -838,6 +770,7 @@ CHANNEL_TYPES = [
     "temba.channels.types.bandwidth.BandwidthType",
     "temba.channels.types.bongolive.BongoLiveType",
     "temba.channels.types.burstsms.BurstSMSType",
+    "temba.channels.types.chip.ChipType",
     "temba.channels.types.clickatell.ClickatellType",
     "temba.channels.types.clickmobile.ClickMobileType",
     "temba.channels.types.clicksend.ClickSendType",
@@ -848,7 +781,7 @@ CHANNEL_TYPES = [
     "temba.channels.types.dmark.DMarkType",
     "temba.channels.types.external.ExternalType",
     "temba.channels.types.facebook_legacy.FacebookLegacyType",
-    "temba.channels.types.facebookapp.FacebookAppType",
+    "temba.channels.types.facebook.FacebookType",
     "temba.channels.types.firebase.FirebaseCloudMessagingType",
     "temba.channels.types.freshchat.FreshChatType",
     "temba.channels.types.globe.GlobeType",
@@ -889,7 +822,7 @@ CHANNEL_TYPES = [
     "temba.channels.types.twilio_whatsapp.TwilioWhatsappType",
     "temba.channels.types.twilio.TwilioType",
     "temba.channels.types.verboice.VerboiceType",
-    "temba.channels.types.viber_public.ViberPublicType",
+    "temba.channels.types.viber.ViberType",
     "temba.channels.types.vk.VKType",
     "temba.channels.types.vonage.VonageType",
     "temba.channels.types.wavy.WavyType",
@@ -905,9 +838,28 @@ CHANNEL_TYPES = [
     "temba.channels.types.test.TestType",
 ]
 
-ANALYTICS_TYPES = [
-    "temba.utils.analytics.ConsoleBackend",
-]
+LLM_TYPES = {
+    "temba.ai.types.anthropic.type.AnthropicType": {
+        "models": [
+            "claude-3-7-sonnet-20250219",
+            "claude-3-5-sonnet-20241022",
+            "claude-3-5-haiku-20241022",
+            "claude-3-opus-20240229",
+        ],
+    },
+    "temba.ai.types.deepseek.type.DeepSeekType": {
+        "models": ["deepseek-chat"],
+    },
+    "temba.ai.types.google.type.GoogleType": {
+        "models": ["gemini-2.0-flash", "gemini-1.5-flash"],
+    },
+    "temba.ai.types.openai.type.OpenAIType": {
+        "models": ["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"],
+    },
+}
+if TESTING:
+    LLM_TYPES["temba.ai.types.openai_azure.type.OpenAIAzureType"] = {"models": ["gpt-35-turbo", "gpt-4"]}
+
 
 # set of ISO-639-3 codes of languages to allow in addition to all ISO-639-1 languages
 NON_ISO6391_LANGUAGES = {"mul", "und"}
@@ -935,20 +887,7 @@ WHATSAPP_WEBHOOK_SECRET = os.environ.get("WHATSAPP_WEBHOOK_SECRET", "")
 WHATSAPP_CONFIGURATION_ID = os.environ.get("WHATSAPP_CONFIGURATION_ID", "")
 WHATSAPP_CLOUD_EXTENDED_CREDIT_ID = os.environ.get("WHATSAPP_CLOUD_EXTENDED_CREDIT_ID", "")
 
-# -----------------------------------------------------------------------------------
-# IP Addresses
-# These are the externally accessible IP addresses of the servers running RapidPro.
-# Needed for channel types that authenticate by whitelisting public IPs.
-#
-# You need to change these to real addresses to work with these.
-# -----------------------------------------------------------------------------------
-IP_ADDRESSES = ("172.16.10.10", "162.16.10.20")
 
-# -----------------------------------------------------------------------------------
-# Data model limits
-# -----------------------------------------------------------------------------------
-MSG_FIELD_SIZE = 640  # used for broadcast text and message campaign events
-FLOW_START_PARAMS_SIZE = 256  # used for params passed to flow start API endpoint
 GLOBAL_VALUE_SIZE = 10_000  # max length of global values
 
 ORG_LIMIT_DEFAULTS = {
@@ -957,6 +896,7 @@ ORG_LIMIT_DEFAULTS = {
     "globals": 250,
     "groups": 250,
     "labels": 250,
+    "llms": 10,
     "teams": 50,
     "topics": 50,
 }
@@ -965,7 +905,6 @@ RETENTION_PERIODS = {
     "channelevent": timedelta(days=90),
     "channellog": timedelta(days=7),
     "export": timedelta(days=90),
-    "eventfire": timedelta(days=90),
     "flowsession": timedelta(days=7),
     "httplog": timedelta(days=3),
     "notification": timedelta(days=30),
@@ -1017,3 +956,43 @@ IP_ADDRESSES = ("172.16.10.10", "162.16.10.20")
 # Android clients FCM config
 ANDROID_FCM_PROJECT_ID = os.environ.get("ANDROID_FCM_PROJECT_ID", "")
 ANDROID_CREDENTIALS_FILE = os.environ.get("ANDROID_CREDENTIALS_FILE", "")
+
+# -----------------------------------------------------------------------------------
+# AllAuth
+# -----------------------------------------------------------------------------------
+
+AUTHENTICATION_BACKENDS = [
+    "allauth.account.auth_backends.AuthenticationBackend",
+]
+
+ACCOUNT_FORMS = {
+    "login": "temba.users.forms.TembaLoginForm",
+    "signup": "temba.users.forms.TembaSignupForm",
+    "change_password": "temba.users.forms.TembaChangePasswordForm",
+    "add_email": "temba.users.forms.TembaAddEmailForm",
+}
+
+ACCOUNT_ADAPTER = "temba.users.adapter.TembaAccountAdapter"
+SOCIALACCOUNT_ADAPTER = "temba.users.adapter.TembaSocialAccountAdapter"
+
+MFA_ADAPTER = "temba.users.adapter.TembaMFAAdapter"
+
+SOCIALACCOUNT_PROVIDERS = {}
+SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT = True
+SOCIALACCOUNT_LOGIN_ON_GET = True
+SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
+
+ACCOUNT_LOGIN_METHODS = ("email",)
+ACCOUNT_EMAIL_VERIFICATION = "mandatory"
+ACCOUNT_EMAIL_NOTIFICATIONS = True
+ACCOUNT_UNIQUE_EMAIL = True
+ACCOUNT_CHANGE_EMAIL = True
+ACCOUNT_DEFAULT_HTTP_PROTOCOL = "https"
+ACCOUNT_USER_MODEL_USERNAME_FIELD = None
+ACCOUNT_SESSION_REMEMBER = True
+
+
+ACCOUNT_LOGIN_ON_EMAIL_CONFIRMATION = True
+ACCOUNT_CONFIRM_EMAIL_ON_GET = True
+
+ACCOUNT_SIGNUP_FIELDS = ["email*", "password1"]

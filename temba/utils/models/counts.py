@@ -1,3 +1,5 @@
+from datetime import date
+
 from django.db import connection, models
 from django.db.models import Q, Sum
 
@@ -98,7 +100,10 @@ class ScopedCountQuerySet(CountQuerySet):
         Filters by the given scope prefix or list of prefixes.
         """
         if isinstance(match, list):
-            return self.filter(or_list([Q(scope__startswith=p) for p in match]))
+            if match:
+                return self.filter(or_list([Q(scope__startswith=p) for p in match]))
+            else:
+                return self.none()
 
         return self.filter(scope__startswith=match)
 
@@ -123,115 +128,48 @@ class BaseScopedCount(BaseSquashableCount):
         abstract = True
 
 
-class DailyCountModel(BaseSquashableCount):
+class DailyCountQuerySet(ScopedCountQuerySet):
     """
-    Base for daily scoped count squashable models
+    Specialized queryset for scope + day + count models.
     """
 
-    squash_over = ("count_type", "scope", "day")
+    def period(self, since, until):
+        return self.filter(day__gte=since, day__lt=until)
 
-    count_type = models.CharField(max_length=1)
-    scope = models.CharField(max_length=32)
+    def day_totals(self, *, scoped: bool) -> dict[date | tuple, int]:
+        """
+        Sums counts grouped by day or day + scope.
+        """
+        if scoped:
+            counts = self.values_list("day", "scope").annotate(count_sum=Sum("count"))
+            return {(c[0], c[1]): c[2] for c in counts}
+        else:
+            counts = self.values_list("day").annotate(count_sum=Sum("count"))
+            return {c[0]: c[1] for c in counts}
+
+    def month_totals(self, *, scoped: bool) -> dict[date | tuple, int]:
+        """
+        Sums counts grouped by month or month + scope.
+        """
+
+        with_month = self.extra({"month": "date_trunc('month', day)::date"})
+
+        if scoped:
+            counts = with_month.values_list("month", "scope").annotate(count_sum=Sum("count"))
+            return {(c[0], c[1]): c[2] for c in counts}
+        else:
+            counts = with_month.values_list("month").annotate(count_sum=Sum("count"))
+            return {c[0]: c[1] for c in counts}
+
+
+class BaseDailyCount(BaseScopedCount):
+    """
+    Base class for count models which have scope and day field.
+    """
+
     day = models.DateField()
 
-    @classmethod
-    def _get_counts(cls, count_type: str, scopes: dict, since, until):
-        counts = cls.objects.filter(count_type=count_type, scope__in=scopes.keys())
-        if since:
-            counts = counts.filter(day__gte=since)
-        if until:
-            counts = counts.filter(day__lt=until)
-        return counts
-
-    @classmethod
-    def _get_count_set(cls, count_type: str, scopes: dict, since, until):
-        return DailyCountModel.CountSet(cls._get_counts(count_type, scopes, since, until), scopes)
-
-    class CountSet:
-        """
-        A queryset of counts which can be aggregated in different ways
-        """
-
-        def __init__(self, counts, scopes):
-            self.counts = counts
-            self.scopes = scopes
-
-        def total(self):
-            """
-            Calculates the overall total over a set of counts
-            """
-            total = self.counts.aggregate(total=Sum("count"))
-            return total["total"] if total["total"] is not None else 0
-
-        def scope_totals(self):
-            """
-            Calculates per-scope totals over a set of counts
-            """
-            totals = list(self.counts.values_list("scope").annotate(replies=Sum("count")))
-            total_by_encoded_scope = {t[0]: t[1] for t in totals}
-
-            total_by_scope = {}
-            for encoded_scope, scope in self.scopes.items():
-                total_by_scope[scope] = total_by_encoded_scope.get(encoded_scope, 0)
-
-            return total_by_scope
-
-        def day_totals(self):
-            """
-            Calculates per-day totals over a set of counts
-            """
-            return list(self.counts.values_list("day").annotate(total=Sum("count")).order_by("day"))
-
-        def month_totals(self):
-            """
-            Calculates per-month totals over a set of counts
-            """
-            counts = self.counts.extra(select={"month": 'EXTRACT(month FROM "day")'})
-            return list(counts.values_list("month").annotate(replies=Sum("count")).order_by("month"))
-
-    class Meta:
-        abstract = True
-
-
-class DailyTimingModel(DailyCountModel):
-    """
-    Base for daily scoped count+seconds squashable models
-    """
-
-    seconds = models.BigIntegerField()
-
-    @classmethod
-    def get_squash_query(cls, distinct_set: dict) -> tuple:
-        sql = f"""
-        WITH removed as (
-            DELETE FROM {cls._meta.db_table} WHERE count_type = %s AND scope = %s AND day = %s RETURNING count, seconds
-        )
-        INSERT INTO {cls._meta.db_table}(count_type, scope, day, count, seconds, is_squashed)
-        VALUES (%s, %s, %s, GREATEST(0, (SELECT SUM(count) FROM removed)), GREATEST(0, (SELECT SUM(seconds) FROM removed)), TRUE);
-        """
-
-        return sql, (distinct_set["count_type"], distinct_set["scope"], distinct_set["day"]) * 2
-
-    @classmethod
-    def _get_count_set(cls, count_type: str, scopes: dict, since, until):
-        return DailyTimingModel.CountSet(cls._get_counts(count_type, scopes, since, until), scopes)
-
-    class CountSet(DailyCountModel.CountSet):
-        """
-        A queryset of counts which can be aggregated in different ways
-        """
-
-        def day_averages(self, rounded=False):
-            """
-            Calculates per-day seconds averages over a set of counts
-            """
-            totals = (
-                self.counts.values_list("day")
-                .annotate(total_count=Sum("count"), total_seconds=Sum("seconds"))
-                .order_by("day")
-            )
-
-            return [(t[0], round(t[2] / t[1]) if rounded else t[2] / t[1]) for t in totals]
+    objects = DailyCountQuerySet.as_manager()
 
     class Meta:
         abstract = True
