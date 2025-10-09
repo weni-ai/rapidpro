@@ -1,3 +1,7 @@
+1.8.2-rapidpro-10.2.4
+----------
+* Update to v10.2.4
+
 1.8.2-rapidpro-10.2.0
 ----------
 * Update to v10.2.0
