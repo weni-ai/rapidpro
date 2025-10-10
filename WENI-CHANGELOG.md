@@ -1,3 +1,7 @@
+1.8.4-rapidpro-10.2.4
+----------
+* Get back with bothub
+
 1.8.3-rapidpro-10.2.4
 ----------
 * Fix error to get User in API
