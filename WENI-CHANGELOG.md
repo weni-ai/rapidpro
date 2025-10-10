@@ -1,3 +1,7 @@
+1.8.3-rapidpro-10.2.4
+----------
+* Fix error to get User in API
+
 1.8.2-rapidpro-10.2.4
 ----------
 * Update to v10.2.4
