@@ -3497,7 +3497,7 @@ class UsersEndpoint(ListAPIMixin, BaseEndpoint):
         else:
             roles = None
 
-        return org.get_users(roles=roles).prefetch_related("settings")
+        return org.get_users(roles=roles)
 
     def filter_queryset(self, queryset):
         # filter by UUID if specified
