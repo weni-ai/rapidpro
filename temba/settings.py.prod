@@ -495,3 +495,27 @@ ORG_LIMIT_DEFAULTS["channels"] = env.int("ORG_LIMIT_DEFAULTS_CHANNELS", default=
 # DynamoDB configuration
 DYNAMO_ENDPOINT_URL = env("DYNAMO_ENDPOINT_URL", default="http://localhost:6000")
 DYNAMO_TABLE_PREFIX = env("DYNAMO_TABLE_PREFIX", default="Temba")
+
+
+# ----------------------------------------------------------------------------------------
+# # Allauth settings
+# ----------------------------------------------------------------------------------------
+
+SOCIALACCOUNT_ENABLED = env.bool("SOCIALACCOUNT_ENABLED", default=True)
+SOCIALACCOUNT_ADAPTER = "temba.users.adapter.TembaSocialAccountAdapter"
+SOCIALACCOUNT_AUTO_SIGNUP = env.bool("SOCIALACCOUNT_AUTO_SIGNUP", default=True)
+SOCIALACCOUNT_EMAIL_AUTHENTICATION = env.bool("SOCIALACCOUNT_EMAIL_AUTHENTICATION", default=True)
+SOCIALACCOUNT_PROVIDERS = {
+    'google': {
+        'SCOPE': [
+            'profile',
+            'email',
+        ],
+        'APP': {
+            'client_id': env("GOOGLE_CLIENT_ID", default=""),
+            'secret': env("GOOGLE_CLIENT_SECRET", default=""),
+            'key': ''
+        },
+        'OAUTH_PKCE_ENABLED': True,
+    }
+}
