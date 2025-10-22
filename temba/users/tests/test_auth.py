@@ -14,7 +14,7 @@ class UserAuthTest(TembaTest):
     # Auth is handled by allauth, only test things we override in any way
     def test_signup(self):
         signup_url = reverse("account_signup")
-        success_url = reverse("account_email_verification_sent")
+        success_url = reverse("orgs.org_choose")
 
         response = self.client.get(signup_url)
         self.assertEqual(200, response.status_code)

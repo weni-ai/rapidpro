@@ -66,6 +66,16 @@ jobs:
             --health-retries 5 \
             minio/minio:latest minio server /data --console-address ":9001"
 
+      - name: Create MinIO buckets
+        run: |
+          # Wait for MinIO to be ready
+          sleep 5
+          # Install MinIO client and create buckets
+          wget -q https://dl.min.io/client/mc/release/linux-amd64/mc -O mc
+          chmod +x mc
+          ./mc alias set minio http://localhost:9000 root tembatemba
+          ./mc mb minio/test-default minio/test-archives minio/test-sessions --ignore-existing
+
       - name: Initialize environment
         env:
           POSTGIS: 'off'
@@ -76,7 +86,6 @@ jobs:
           ln -s ${{ github.workspace }}/temba/settings.py.dev ${{ github.workspace }}/temba/settings.py
           poetry run python manage.py migrate
           poetry run python manage.py migrate_dynamo --testing
-          poetry run python manage.py create_buckets --testing
           # fetch, extract and start mailroom
           wget https://github.com/nyaruka/mailroom/releases/download/v${{ env.mailroom-version }}/mailroom_${{ env.mailroom-version }}_linux_amd64.tar.gz
           tar -xvf mailroom_${{ env.mailroom-version }}_linux_amd64.tar.gz mailroom
@@ -109,10 +118,3 @@ jobs:
       - name: Mailroom log
         if: failure()
         run: cat mailroom.log
-
-      - name: Upload coverage
-        if: success()
-        uses: codecov/codecov-action@v4
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: true
