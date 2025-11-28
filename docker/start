@@ -1,31 +1,39 @@
 #!/bin/bash
 
-#set -o errexit
-#set -o pipefail
-#set -o nounset
+set -e
+
+run_as_app_user() {
+    su $PROJECT_USER -c "$@"
+}
 
 if [ ! -z "${BRANDING_FILES}" ]; then
-    git clone -b $BRANDING_BRANCH $BRANDING_FILES $PROJECT_PATH/$BRANDING_SLUG/
+    echo "Cloning branding files..."
+    run_as_app_user "git clone -b $BRANDING_BRANCH $BRANDING_FILES $PROJECT_PATH/$BRANDING_SLUG/"
     mv $PROJECT_PATH/$BRANDING_SLUG/$BRANDING_SLUG/ $PROJECT_PATH/static/brands/
 fi
 
-su $PROJECT_USER -c "python manage.py collectstatic --noinput"
+echo "Applying database migrations..."
+run_as_app_user "python manage.py migrate --noinput"
+
+echo "Collecting static files..."
+run_as_app_user "python manage.py collectstatic --noinput"
+
 if [ "${COMPRESS_ENABLED}" = true ]; then
-    python manage.py compress --extension=.haml,.html --force
+  echo "Compressing static files..."
+  run_as_app_user "python manage.py compress --extension=.haml,.html --force"
 fi
 
 echo "Starting nginx..."
-service nginx start  # TODO: Update after change the user from root
+service nginx start
 echo "Done!"
 
-echo "Starting server..."
-#gunicorn --access-logfile - --workers 3 --bind unix:/run/gunicorn.sock temba.wsgi:application
-exec gunicorn temba.wsgi:application \
-  --name=$PROJECT \
-  --user=$PROJECT_USER \
-  --chdir=$PROJECT_PATH \
-  --bind=0.0.0.0:8001 \
-  --timeout=120 \
-  --log-level=info \
-  --log-config=$PROJECT_PATH/docker/gunicorn/gunicorn-logging.conf \
-  -c $PROJECT_PATH/docker/gunicorn/gunicorn.conf.py
+echo "Starting Gunicorn server..."
+
+exec su $PROJECT_USER -c "exec gunicorn temba.wsgi:application \
+    --name=$PROJECT \
+    --chdir=$PROJECT_PATH \
+    --bind=0.0.0.0:8001 \
+    --timeout=120 \
+    --log-level=info \
+    --log-config=$PROJECT_PATH/docker/gunicorn/gunicorn-logging.conf \
+    -c $PROJECT_PATH/docker/gunicorn/gunicorn.conf.py"
