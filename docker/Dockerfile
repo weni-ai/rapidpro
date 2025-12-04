@@ -4,18 +4,18 @@ ARG PYTHON_VERSION="3.12"
 ARG DEBIAN_VERSION="bullseye"
 
 ARG BUILD_DEPS="\
+  build-essential \
+  python3-dev \
   gcc \
   bzip2 \
   git \
   libpq-dev \
   python3-cffi \
   curl \
-  build-essential\
-  python3-dev\
+  pkg-config \
   apt-utils"
 
 ARG RUNTIME_DEPS="\
-  nginx \
   libpq5 \
   gettext \
   libgdal-dev \
@@ -100,18 +100,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && rm -rf /usr/share/man /usr/share/doc
 
 COPY --from=build-python /install /install
-
 COPY --from=build-assets --chown=${PROJECT_USER}:${PROJECT_GROUP} ${NPM_CONFIG_PREFIX} ${NPM_CONFIG_PREFIX}
-
-RUN rm /etc/nginx/sites-enabled/default
-COPY ./docker/nginx.site.conf /tmp/
-RUN cp /tmp/nginx.site.conf /etc/nginx/sites-available/${PROJECT}.conf \
-  && ln -s /etc/nginx/sites-available/${PROJECT}.conf /etc/nginx/sites-enabled/${PROJECT}.conf
 
 COPY --chown=${PROJECT_USER}:${PROJECT_GROUP} . ${PROJECT_PATH}
 
 RUN ln -s ${PROJECT_PATH}/temba/settings.py.prod ${PROJECT_PATH}/temba/settings.py
 
+USER ${PROJECT_USER}:${PROJECT_GROUP}
+
 EXPOSE 8000
-EXPOSE 8001
 ENTRYPOINT ["bash", "./docker/start"]
