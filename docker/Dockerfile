@@ -1,78 +1,112 @@
-FROM python:3.12-bullseye as build-poetry
+# syntax = docker/dockerfile:1
 
-WORKDIR /app
+ARG PYTHON_VERSION="3.12"
+ARG DEBIAN_VERSION="bullseye"
 
-COPY ./pyproject.toml .
-COPY ./poetry.lock .
-COPY ./docker/pip-requires.txt .
+ARG BUILD_DEPS="\
+  build-essential \
+  python3-dev \
+  gcc \
+  bzip2 \
+  git \
+  libpq-dev \
+  python3-cffi \
+  curl \
+  pkg-config \
+  apt-utils"
 
-RUN python -m pip install -U poetry==2.0.0 \
- && poetry self add poetry-plugin-export \
- && poetry cache clear -n --all pypi \
- && poetry add -n --lock $(cat pip-requires.txt) \
- && poetry export --without-hashes --with dev --output requirements.txt
+ARG RUNTIME_DEPS="\
+  libpq5 \
+  gettext \
+  libgdal-dev \
+  vim \
+  gosu \
+  curl \
+  bzip2 \
+  git \
+  tzdata \
+  netcat-traditional"
 
-FROM python:3.12-bullseye
+FROM python:${PYTHON_VERSION}-slim-${DEBIAN_VERSION} as base
 
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    PROJECT=rapidpro \
+    PROJECT_PATH=/app \
+    PROJECT_USER=rapidpro \
+    PROJECT_GROUP=rapidpro \
+    NPM_CONFIG_PREFIX=/opt/npm-globals \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PATH="/opt/npm-globals/bin:/install/bin:${PATH}"
+
+RUN addgroup --gid 1999 "${PROJECT_GROUP}" \
+  && useradd --system -m -d "${PROJECT_PATH}" -u 1999 -g 1999 "${PROJECT_USER}" \
+  && usermod -aG adm "${PROJECT_USER}"
+
+WORKDIR "${PROJECT_PATH}"
+
+RUN rm -f /etc/apt/apt.conf.d/docker-clean; echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
+
+FROM base as build-assets
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y curl \
+    && curl -sL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs
+
+RUN mkdir -p ${NPM_CONFIG_PREFIX} \
+    && chown -R ${PROJECT_USER}:${PROJECT_GROUP} ${PROJECT_PATH} ${NPM_CONFIG_PREFIX}
+
+COPY . ${PROJECT_PATH}
+
+USER "${PROJECT_USER}:${PROJECT_GROUP}"
+RUN npm install --global yarn \
+    && yarn global add less \
+    && yarn install
+
+FROM base as build-python
+
+ARG BUILD_DEPS
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
+    && apt-get install --no-install-recommends --no-install-suggests -y ${BUILD_DEPS}
+
+COPY ./pyproject.toml ./poetry.lock ./docker/pip-requires.txt ./
+
+RUN --mount=type=cache,mode=0755,target=/pip_cache,id=pip \
+    pip install --cache-dir /pip_cache -U poetry==2.0.0 \
+    && poetry self add poetry-plugin-export \
+    && poetry cache clear -n --all pypi \
+    && poetry add -n --lock $(cat pip-requires.txt) \
+    && poetry export --without-hashes --with dev --output requirements.txt
+
+RUN --mount=type=cache,mode=0755,target=/pip_cache,id=pip \
+    pip install --cache-dir /pip_cache --prefix=/install -r requirements.txt
+
+FROM base
+
+ARG RUNTIME_DEPS
 ARG COMPRESS_ENABLED
 ARG BRANDING_ENABLED
- 
-ARG RAPIDPRO_APPS_GIT_URL
-ARG RAPIDPRO_APPS_GIT_BRANCH
 
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
+    && apt-get install -y --no-install-recommends ${RUNTIME_DEPS} \
+    && rm -rf /usr/share/man /usr/share/doc
 
-ENV PYTHONUNBUFFERED 1
-ENV DEBIAN_FRONTEND  noninteractive
+COPY --from=build-python /install /install
+COPY --from=build-assets --chown=${PROJECT_USER}:${PROJECT_GROUP} ${NPM_CONFIG_PREFIX} ${NPM_CONFIG_PREFIX}
 
-ENV PROJECT           rapidpro
-ENV PROJECT_PATH      /app
-ENV PROJECT_USER      $PROJECT
-ENV PROJECT_GROUP     $PROJECT_USER
-ENV PROJECT_CONF      ${PROJECT_PATH}-conf
-ENV NPM_CONFIG_PREFIX /opt/npm-globals
-ENV PATH              "${NPM_CONFIG_PREFIX}/bin:${PATH}"
+COPY --chown=${PROJECT_USER}:${PROJECT_GROUP} . ${PROJECT_PATH}
 
-RUN apt-get update \
- && apt-get install --no-install-recommends --no-install-suggests -y apt-utils \
- && apt-get install --no-install-recommends --no-install-suggests -y gcc bzip2 git curl nginx libpq-dev gettext \
-    libgdal-dev python3-cffi python3-gdal vim
+RUN ln -s ${PROJECT_PATH}/temba/settings.py.prod ${PROJECT_PATH}/temba/settings.py
 
-RUN curl -sL https://deb.nodesource.com/setup_20.x | bash - \
- && apt-get install --no-install-recommends --no-install-suggests -y nodejs
-
-RUN rm -rf /var/lib/apt/lists/*
-
-RUN useradd -Ums /bin/bash $PROJECT_USER \
- && usermod -aG adm $PROJECT_USER
-
-RUN mkdir $PROJECT_PATH \
- && mkdir $PROJECT_CONF \
- && mkdir $NPM_CONFIG_PREFIX \
- && chown -R $PROJECT_USER:$PROJECT_GROUP $PROJECT_PATH \
- && chown -R $PROJECT_USER:$PROJECT_GROUP $NPM_CONFIG_PREFIX
-
-RUN rm /etc/nginx/sites-enabled/default
-
-COPY --from=build-poetry /app/requirements.txt /tmp/dep/
-COPY ./docker/pip-freeze.txt /tmp/dep/
-COPY ./docker/nginx.site.conf /tmp/
-RUN pip install --no-cache-dir -r /tmp/dep/requirements.txt
-
-RUN cp /tmp/nginx.site.conf /etc/nginx/sites-available/$PROJECT.conf \
- && ln -s /etc/nginx/sites-available/$PROJECT.conf /etc/nginx/sites-enabled/$PROJECT.conf
-
-COPY . $PROJECT_PATH
-RUN chown -R $PROJECT_USER:$PROJECT_GROUP $PROJECT_PATH
-
-WORKDIR $PROJECT_PATH
-
-RUN su $PROJECT_USER -c "npm install --global yarn"
-RUN su $PROJECT_USER -c "yarn global add less"
-
-RUN su $PROJECT_USER -c "ln -s $PROJECT_PATH/temba/settings.py.prod $PROJECT_PATH/temba/settings.py"
-
-RUN su $PROJECT_USER -c "yarn install"
+USER ${PROJECT_USER}:${PROJECT_GROUP}
 
 EXPOSE 8000
-EXPOSE 8001
-ENTRYPOINT ["sh", "./docker/start"]
+ENTRYPOINT ["bash", "./docker/start"]

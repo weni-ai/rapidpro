@@ -1,31 +1,92 @@
 #!/bin/bash
 
-#set -o errexit
-#set -o pipefail
-#set -o nounset
+set -e
 
-if [ ! -z "${BRANDING_FILES}" ]; then
-    git clone -b $BRANDING_BRANCH $BRANDING_FILES $PROJECT_PATH/$BRANDING_SLUG/
-    mv $PROJECT_PATH/$BRANDING_SLUG/$BRANDING_SLUG/ $PROJECT_PATH/static/brands/
+export GUNICORN_APP=${GUNICORN_APP:-"temba.wsgi:application"}
+export GUNICORN_LOG_CONF=${GUNICORN_LOG_CONF:-"${PROJECT_PATH}/docker/gunicorn/gunicorn-logging.conf"}
+export GUNICORN_CONF=${GUNICORN_CONF:-"${PROJECT_PATH}/docker/gunicorn/gunicorn.conf.py"}
+export LOG_LEVEL=${LOG_LEVEL:-"INFO"}
+export APP_USER=${PROJECT_USER:-"rapidpro"}
+export APP_GROUP=${PROJECT_GROUP:-"rapidpro"}
+
+export FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS:-'*'}
+export COMPRESS_ENABLED=${COMPRESS_ENABLED:-'true'}
+export BRANDING_ENABLED=${BRANDING_ENABLED:-'true'}
+
+do_gosu(){
+    user="$1"
+    shift 1
+
+    is_exec="false"
+    if [ "$1" = "exec" ]; then
+        is_exec="true"
+        shift 1
+    fi
+
+    if [ "$(id -u)" = "0" ]; then
+        if [ "${is_exec}" = "true" ]; then
+            exec gosu "${user}" "$@"
+        else
+            gosu "${user}" "$@"
+            return "$?"
+        fi
+    else
+        if [ "${is_exec}" = "true" ]; then
+            exec "$@"
+        else
+            eval '"$@"'
+            return "$?"
+        fi
+    fi
+}
+
+if [[ "start" == "$1" ]]; then
+    
+    do_gosu "${APP_USER}:${APP_GROUP}" rm -rf "/tmp/${BRANDING_SLUG}/"
+    do_gosu "${APP_USER}:${APP_GROUP}" mkdir -p "${PROJECT_PATH}/static/brands/${BRANDING_SLUG}/"
+    
+    if [ ! -z "${BRANDING_FILES}" ]; then
+        echo "Cloning branding files..."
+        do_gosu "${APP_USER}:${APP_GROUP}" git clone \
+             -b "${BRANDING_BRANCH}" "${BRANDING_FILES}" "/tmp/${BRANDING_SLUG}/" \
+             --single-branch --depth=1
+        do_gosu "${APP_USER}:${APP_GROUP}" cp -rf "/tmp/${BRANDING_SLUG}/${BRANDING_SLUG}/"* "${PROJECT_PATH}/static/brands/${BRANDING_SLUG}/"
+    fi
+
+    echo "Applying database migrations..."
+    do_gosu "${APP_USER}:${APP_GROUP}" python manage.py migrate --noinput
+
+    echo "Collecting static files..."
+    do_gosu "${APP_USER}:${APP_GROUP}" python manage.py collectstatic --noinput
+
+    if [ "${COMPRESS_ENABLED}" = true ]; then
+        echo "Compressing static files..."
+        do_gosu "${APP_USER}:${APP_GROUP}" python manage.py compress --extension=.haml,.html --force
+    fi
+
+    echo "Starting server on port 8000..."
+    do_gosu "${APP_USER}:${APP_GROUP}" exec gunicorn "${GUNICORN_APP}" \
+      --name="${PROJECT}" \
+      --chdir="${PROJECT_PATH}" \
+      --bind=0.0.0.0:8000 \
+      --log-config="${GUNICORN_LOG_CONF}" \
+      -c "${GUNICORN_CONF}"
+
+elif [[ "celery-worker" == "$1" ]]; then
+    celery_queue="celery"
+    if [ "${2}" ] ; then
+        celery_queue="${2}"
+    fi
+    do_gosu "${APP_USER}:${APP_GROUP}" exec celery \
+        -A temba --workdir="${PROJECT_PATH}" worker \
+        -Q "${celery_queue}" \
+        -O fair \
+        -l "${LOG_LEVEL}"
+
+elif [[ "celery-beat" == "$1" ]]; then
+    do_gosu "${APP_USER}:${APP_GROUP}" exec celery \
+        -A temba --workdir="${PROJECT_PATH}" beat \
+        --loglevel="${LOG_LEVEL}"
 fi
 
-su $PROJECT_USER -c "python manage.py collectstatic --noinput"
-if [ "${COMPRESS_ENABLED}" = true ]; then
-    python manage.py compress --extension=.haml,.html --force
-fi
-
-echo "Starting nginx..."
-service nginx start  # TODO: Update after change the user from root
-echo "Done!"
-
-echo "Starting server..."
-#gunicorn --access-logfile - --workers 3 --bind unix:/run/gunicorn.sock temba.wsgi:application
-exec gunicorn temba.wsgi:application \
-  --name=$PROJECT \
-  --user=$PROJECT_USER \
-  --chdir=$PROJECT_PATH \
-  --bind=0.0.0.0:8001 \
-  --timeout=120 \
-  --log-level=info \
-  --log-config=$PROJECT_PATH/docker/gunicorn/gunicorn-logging.conf \
-  -c $PROJECT_PATH/docker/gunicorn/gunicorn.conf.py
+exec "$@"
