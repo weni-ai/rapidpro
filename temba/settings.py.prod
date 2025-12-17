@@ -95,6 +95,33 @@ ACCOUNT_EMAIL_VERIFICATION = env("ACCOUNT_EMAIL_VERIFICATION", default="mandator
 HOSTNAME = DEFAULT_BRAND
 BRAND = BRANDS[0]
 
+# -----------------------------------------------------------------------------------
+# Allauth: Microsoft provider (SSO) configuration via environment variables
+# - Keeps secrets out of code; Admin SocialApp remains an alternative
+# - Expected env vars (staging/prod):
+#   MICROSOFT_TENANT: Directory (tenant) ID or 'common'/'organizations'/'consumers'
+#   MICROSOFT_CLIENT_ID: App (client) ID
+#   MICROSOFT_CLIENT_SECRET: Client secret
+#   MICROSOFT_SCOPE: comma-separated scopes (default: openid,email,profile)
+# -----------------------------------------------------------------------------------
+MICROSOFT_TENANT = env("MICROSOFT_TENANT", default=None)
+MICROSOFT_CLIENT_ID = env("MICROSOFT_CLIENT_ID", default=None)
+MICROSOFT_CLIENT_SECRET = env("MICROSOFT_CLIENT_SECRET", default=None)
+MICROSOFT_SCOPE = env.list("MICROSOFT_SCOPE", default=["openid", "email", "profile"])
+
+# Ensure dict exists from settings_common
+SOCIALACCOUNT_PROVIDERS.setdefault("microsoft", {})
+if MICROSOFT_TENANT:
+    SOCIALACCOUNT_PROVIDERS["microsoft"]["tenant"] = MICROSOFT_TENANT
+if MICROSOFT_SCOPE:
+    SOCIALACCOUNT_PROVIDERS["microsoft"]["SCOPE"] = MICROSOFT_SCOPE
+if MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET:
+    SOCIALACCOUNT_PROVIDERS["microsoft"]["APP"] = {
+        "client_id": MICROSOFT_CLIENT_ID,
+        "secret": MICROSOFT_CLIENT_SECRET,
+        "key": "",
+    }
+
 # VARIABLES TO API REQUISITIONS
 # ------------------------------------------------------------------------------
 
