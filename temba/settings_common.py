@@ -242,6 +242,7 @@ INSTALLED_APPS = (
     "allauth.mfa",
     "allauth.socialaccount",
     "allauth.socialaccount.providers.google",
+    "allauth.socialaccount.providers.microsoft",
     "formtools",
     "imagekit",
     "rest_framework",
