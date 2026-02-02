@@ -14,15 +14,16 @@ from temba import mailroom
 from temba.campaigns.models import CampaignEvent
 from temba.channels.models import ChannelEvent
 from temba.contacts.models import URN, Contact, ContactField, ContactGroup, ContactURN
-from temba.flows.models import FlowRun, FlowSession
+from temba.flows.models import FlowRun, FlowSession, FlowStart
 from temba.locations.models import AdminBoundary
 from temba.mailroom.client.client import MailroomClient
 from temba.mailroom.modifiers import Modifier
 from temba.msgs.models import Broadcast, Msg, QuickReply
 from temba.schedules.models import Schedule
 from temba.tests.dates import parse_datetime
-from temba.tickets.models import Ticket, TicketEvent
+from temba.tickets.models import Ticket
 from temba.utils import json
+from temba.utils.uuid import uuid7
 
 event_units = {
     CampaignEvent.UNIT_MINUTES: "minutes",
@@ -63,8 +64,6 @@ class Mocks:
         self._llm_translate = []
         self._msg_broadcast_preview = []
         self._exceptions = []
-
-        self.queued_batch_tasks = []
 
     def contact_parse_query(self, query, *, cleaned=None, fields=None):
         def mock(org):
@@ -177,6 +176,7 @@ class TestClient(MailroomClient):
             return {"id": existing.id, "duplicate": True}
 
         msg = Msg.objects.create(
+            uuid=uuid7(),
             org=org,
             channel=channel,
             contact=contact,
@@ -198,6 +198,10 @@ class TestClient(MailroomClient):
 
     @_client_method
     def campaign_schedule(self, org, event):
+        pass
+
+    @_client_method
+    def channel_interrupt(self, org, channel):
         pass
 
     @_client_method
@@ -233,6 +237,10 @@ class TestClient(MailroomClient):
         return group.get_member_count()
 
     @_client_method
+    def contact_import(self, org, imp) -> int:
+        return imp.batches.count()
+
+    @_client_method
     def contact_modify(self, org, user, contacts, modifiers: list[Modifier]):
         apply_modifiers(org, user, contacts, modifiers)
 
@@ -265,13 +273,18 @@ class TestClient(MailroomClient):
         return {c: inspect(c) for c in contacts}
 
     @_client_method
-    def contact_interrupt(self, org, user, contact) -> int:
+    def contact_interrupt(self, org, user, contacts):
         # get the waiting session UUIDs
-        session_uuids = list(contact.sessions.filter(status=FlowSession.STATUS_WAITING).values_list("uuid", flat=True))
+        session_uuids = []
+        for contact in contacts:
+            if contact.current_session_uuid:
+                session = FlowSession.objects.filter(
+                    uuid=contact.current_session_uuid, status=FlowSession.STATUS_WAITING
+                ).first()
+                if session:
+                    session_uuids.append(session.uuid)
 
         exit_sessions(session_uuids, FlowSession.STATUS_INTERRUPTED)
-
-        return len(session_uuids)
 
     @_client_method
     def contact_parse_query(self, org, query: str, parse_only: bool = False):
@@ -280,6 +293,10 @@ class TestClient(MailroomClient):
             return mock(org)
 
         return mailroom.ParsedQuery(query=query, metadata=mock_inspect_query(org, query))
+
+    @_client_method
+    def contact_populate_group(self, org, group):
+        pass
 
     @_client_method
     def contact_search(self, org, group, query: str, sort: str, offset=0, limit=50, exclude_ids=()):
@@ -322,6 +339,14 @@ class TestClient(MailroomClient):
             "results": [],
             "parent_refs": [],
         }
+
+    @_client_method
+    def flow_interrupt(self, org, flow):
+        pass
+
+    @_client_method
+    def flow_start(self, org, user, typ, flow, groups, contacts, urns, query, exclude, params):
+        return create_flowstart(org, user, typ, flow, groups, contacts, urns, query, exclude, params)
 
     @_client_method
     def flow_start_preview(self, org, flow, include, exclude):
@@ -381,49 +406,48 @@ class TestClient(MailroomClient):
         return mock(org)
 
     @_client_method
-    def msg_resend(self, org, msgs):
-        return {"msg_ids": [m.id for m in msgs]}
+    def msg_delete(self, org, user, msgs):
+        return {}
+
+    @_client_method
+    def msg_resend(self, org, user, msgs):
+        return {"msg_uuids": [str(m.uuid) for m in msgs]}
 
     @_client_method
     def msg_send(self, org, user, contact, text: str, attachments: list[str], quick_replies: list[QuickReply], ticket):
         msg = send_to_contact(org, contact, text, attachments, quick_replies)
-
-        return {
-            "id": msg.id,
+        msg_json = {
             "channel": {"uuid": str(msg.channel.uuid), "name": msg.channel.name} if msg.channel else None,
-            "contact": {"uuid": str(msg.contact.uuid), "name": msg.contact.name},
             "urn": str(msg.contact_urn) if msg.contact_urn else "",
             "text": msg.text,
-            "attachments": msg.attachments,
-            "quick_replies": [qr.as_json() for qr in msg.get_quick_replies()],
+        }
+        if msg.attachments:
+            msg_json["attachments"] = msg.attachments
+        if msg.quick_replies:
+            msg_json["quick_replies"] = [qr.as_json() for qr in msg.get_quick_replies()]
+
+        event_json = {
+            "uuid": str(msg.uuid),
+            "type": "msg_created",
+            "created_on": msg.created_on.isoformat(),
+            "msg": msg_json,
+        }
+
+        if org.users.filter(id=user.id, is_active=True).exists():
+            event_json["_user"] = user.as_engine_ref()
+
+        return {
+            "event": event_json,
+            "contact": {"uuid": str(msg.contact.uuid), "name": msg.contact.name},
             "status": msg.status,
             "created_on": msg.created_on.isoformat(),
             "modified_on": msg.modified_on.isoformat(),
+            "id": msg.id,  # deprecated
         }
 
     @_client_method
     def org_deindex(self, org):
         return {}
-
-    @_client_method
-    def ticket_assign(self, org, user, tickets, assignee):
-        now = timezone.now()
-        tickets = list(Ticket.objects.filter(org=org, id__in=[t.id for t in tickets]).exclude(assignee=assignee))
-
-        for ticket in tickets:
-            ticket.assignee = assignee
-            ticket.modified_on = now
-            ticket.last_activity_on = now
-            ticket.save(update_fields=("assignee", "modified_on", "last_activity_on"))
-            ticket.events.create(
-                org=org,
-                contact=ticket.contact,
-                event_type=TicketEvent.TYPE_ASSIGNED,
-                assignee=assignee,
-                created_by=user,
-            )
-
-        return {"changed_ids": [t.id for t in tickets]}
 
     @_client_method
     def ticket_add_note(self, org, user, tickets, note: str):
@@ -434,15 +458,21 @@ class TestClient(MailroomClient):
             ticket.modified_on = now
             ticket.last_activity_on = now
             ticket.save(update_fields=("modified_on", "last_activity_on"))
-            ticket.events.create(
-                org=org,
-                contact=ticket.contact,
-                event_type=TicketEvent.TYPE_NOTE_ADDED,
-                note=note,
-                created_by=user,
-            )
 
-        return {"changed_ids": [t.id for t in tickets]}
+        return {"changed_uuids": [str(t.uuid) for t in tickets]}
+
+    @_client_method
+    def ticket_change_assignee(self, org, user, tickets, assignee):
+        now = timezone.now()
+        tickets = list(Ticket.objects.filter(org=org, id__in=[t.id for t in tickets]).exclude(assignee=assignee))
+
+        for ticket in tickets:
+            ticket.assignee = assignee
+            ticket.modified_on = now
+            ticket.last_activity_on = now
+            ticket.save(update_fields=("assignee", "modified_on", "last_activity_on"))
+
+        return {"changed_uuids": [str(t.uuid) for t in tickets]}
 
     @_client_method
     def ticket_change_topic(self, org, user, tickets, topic):
@@ -454,15 +484,8 @@ class TestClient(MailroomClient):
             ticket.modified_on = now
             ticket.last_activity_on = now
             ticket.save(update_fields=("topic", "modified_on", "last_activity_on"))
-            ticket.events.create(
-                org=org,
-                contact=ticket.contact,
-                event_type=TicketEvent.TYPE_TOPIC_CHANGED,
-                topic=topic,
-                created_by=user,
-            )
 
-        return {"changed_ids": [t.id for t in tickets]}
+        return {"changed_uuids": [str(t.uuid) for t in tickets]}
 
     @_client_method
     def ticket_close(self, org, user, tickets):
@@ -472,9 +495,8 @@ class TestClient(MailroomClient):
             ticket.status = Ticket.STATUS_CLOSED
             ticket.closed_on = timezone.now()
             ticket.save(update_fields=("status", "closed_on"))
-            ticket.events.create(org=org, contact=ticket.contact, event_type=TicketEvent.TYPE_CLOSED, created_by=user)
 
-        return {"changed_ids": [t.id for t in tickets]}
+        return {"changed_uuids": [str(t.uuid) for t in tickets]}
 
     @_client_method
     def ticket_reopen(self, org, user, tickets):
@@ -484,12 +506,18 @@ class TestClient(MailroomClient):
             ticket.status = Ticket.STATUS_OPEN
             ticket.closed_on = None
             ticket.save(update_fields=("status", "closed_on"))
-            ticket.events.create(org=org, contact=ticket.contact, event_type=TicketEvent.TYPE_REOPENED, created_by=user)
 
-        return {"changed_ids": [t.id for t in tickets]}
+        return {"changed_uuids": [str(t.uuid) for t in tickets]}
+
+    def system_queues(self) -> dict:
+        return {
+            "batch": {"queued": {}, "active": {}, "paused": {}},
+            "realtime": {"queued": {}, "active": {}, "paused": {}},
+            "throttled": {"queued": {}, "active": {}, "paused": {}},
+        }
 
 
-def mock_mailroom(method=None, *, client=True, queue=True):
+def mock_mailroom(method=None):
     """
     Convenience decorator to make a test method use a mocked version of the mailroom client
     """
@@ -497,42 +525,26 @@ def mock_mailroom(method=None, *, client=True, queue=True):
     def actual_decorator(f):
         @wraps(f)
         def wrapper(instance, *args, **kwargs):
-            _wrap_test_method(f, client, queue, instance, *args, **kwargs)
+            _wrap_test_method(f, instance, *args, **kwargs)
 
         return wrapper
 
     return actual_decorator(method) if method else actual_decorator
 
 
-def _wrap_test_method(f, mock_client: bool, mock_queue: bool, instance, *args, **kwargs):
+def _wrap_test_method(f, instance, *args, **kwargs):
     mocks = Mocks()
 
     patch_get_client = None
-    patch_queue_batch_task = None
 
     try:
-        if mock_client:
-            patch_get_client = patch("temba.mailroom.get_client")
-            mock_get_client = patch_get_client.start()
-            mock_get_client.return_value = TestClient(mocks)
-
-        if mock_queue:
-            patch_queue_batch_task = patch("temba.mailroom.queue._queue_batch_task")
-            mock_queue_batch_task = patch_queue_batch_task.start()
-
-            def queue_batch_task(org_id, task_type, task, priority):
-                mocks.queued_batch_tasks.append(
-                    {"type": task_type.value, "org_id": org_id, "task": task, "queued_on": timezone.now()}
-                )
-
-            mock_queue_batch_task.side_effect = queue_batch_task
+        patch_get_client = patch("temba.mailroom.get_client")
+        mock_get_client = patch_get_client.start()
+        mock_get_client.return_value = TestClient(mocks)
 
         return f(instance, mocks, *args, **kwargs)
     finally:
-        if patch_get_client:
-            patch_get_client.stop()
-        if patch_queue_batch_task:
-            patch_queue_batch_task.stop()
+        patch_get_client.stop()
 
 
 def apply_modifiers(org, user, contacts, modifiers: list):
@@ -576,14 +588,12 @@ def apply_modifiers(org, user, contacts, modifiers: list):
             topic = org.topics.get(uuid=mod.topic.uuid, is_active=True)
             assignee = org.users.get(email=mod.assignee.email, is_active=True) if mod.assignee else None
             for contact in contacts:
-                ticket = contact.tickets.create(
+                contact.tickets.create(
+                    uuid=uuid7(),
                     org=org,
                     topic=topic,
                     status=Ticket.STATUS_OPEN,
                     assignee=assignee,
-                )
-                ticket.events.create(
-                    org=org, contact=contact, event_type=TicketEvent.TYPE_OPENED, note=mod.note, created_by=user
                 )
 
         elif mod.type == "urns":
@@ -643,7 +653,6 @@ def create_contact_locally(
         language=language,
         created_by=user,
         modified_by=user,
-        created_on=timezone.now(),
         status=status,
         last_seen_on=last_seen_on,
         **kwargs,
@@ -875,17 +884,20 @@ def exit_sessions(session_uuids: list, status: str):
     FlowRun.objects.filter(session_uuid__in=session_uuids).update(
         status=status, exited_on=timezone.now(), modified_on=timezone.now()
     )
+
+    contact_uuids = set(FlowSession.objects.filter(uuid__in=session_uuids).values_list("contact_uuid", flat=True))
+
     FlowSession.objects.filter(uuid__in=session_uuids).update(
         status=status,
         ended_on=timezone.now(),
-        current_flow_id=None,
+        current_flow_uuid=None,
     )
 
-    for session in FlowSession.objects.filter(uuid__in=session_uuids):
-        session.contact.current_session_uuid = None
-        session.contact.current_flow = None
-        session.contact.modified_on = timezone.now()
-        session.contact.save(update_fields=("current_session_uuid", "current_flow", "modified_on"))
+    Contact.objects.filter(uuid__in=contact_uuids).update(
+        current_session_uuid=None,
+        current_flow=None,
+        modified_on=timezone.now(),
+    )
 
 
 def resolve_destination(org, contact, channel=None) -> tuple:
@@ -915,6 +927,7 @@ def send_to_contact(org, contact, text: str, attachments: list[str], quick_repli
         failed_reason = Msg.FAILED_NO_DESTINATION
 
     return Msg.objects.create(
+        uuid=uuid7(),
         org=org,
         channel=channel,
         contact=contact,
@@ -959,6 +972,7 @@ def create_broadcast(
         )
 
     bcast = Broadcast.objects.create(
+        uuid=uuid7(),
         org=org,
         translations=translations,
         base_language=base_language,
@@ -979,3 +993,24 @@ def create_broadcast(
         bcast.contacts.add(*contacts)
 
     return bcast
+
+
+def create_flowstart(org, user, typ, flow, groups, contacts, urns, query, exclude, params) -> FlowStart:
+    start = FlowStart.objects.create(
+        org=org,
+        flow=flow,
+        start_type=typ,
+        urns=list(urns),
+        query=query,
+        exclusions=asdict(exclude) if exclude else None,
+        created_by=user,
+        params=params,
+    )
+
+    for contact in contacts:
+        start.contacts.add(contact)
+
+    for group in groups:
+        start.groups.add(group)
+
+    return start

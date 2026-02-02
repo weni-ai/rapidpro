@@ -2,7 +2,7 @@ from django.contrib.auth.models import Group
 from django.test.utils import override_settings
 from django.urls import reverse
 
-from temba.tests import CRUDLTestMixin, TembaTest
+from temba.tests import CRUDLTestMixin, TembaTest, mock_mailroom
 from temba.utils.views.mixins import TEMBA_MENU_SELECTION
 
 from ..models import Channel, ChannelLog
@@ -44,9 +44,10 @@ class ChannelCRUDLTest(TembaTest, CRUDLTestMixin):
         # 3 recommended channels for Rwanda
         self.assertEqual(["AT", "MT", "TG"], [t.code for t in response.context["recommended_channels"]])
 
-        self.assertEqual(response.context["channel_types"]["PHONE"][0].code, "CT")
-        self.assertEqual(response.context["channel_types"]["PHONE"][1].code, "EX")
-        self.assertEqual(response.context["channel_types"]["PHONE"][2].code, "I2")
+        self.assertEqual(response.context["channel_types"]["PHONE"][0].code, "BW")
+        self.assertEqual(response.context["channel_types"]["PHONE"][1].code, "CT")
+        self.assertEqual(response.context["channel_types"]["PHONE"][2].code, "EX")
+        self.assertEqual(response.context["channel_types"]["PHONE"][3].code, "I2")
         self.assertEqual(response.context["channel_types"]["PHONE"][-1].code, "A")
 
         self.org.timezone = "Canada/Central"
@@ -57,9 +58,10 @@ class ChannelCRUDLTest(TembaTest, CRUDLTestMixin):
 
         self.assertEqual(["TG", "TMS", "T", "NX"], [t.code for t in response.context["recommended_channels"]])
 
-        self.assertEqual(response.context["channel_types"]["PHONE"][0].code, "CT")
-        self.assertEqual(response.context["channel_types"]["PHONE"][1].code, "EX")
-        self.assertEqual(response.context["channel_types"]["PHONE"][2].code, "I2")
+        self.assertEqual(response.context["channel_types"]["PHONE"][0].code, "BW")
+        self.assertEqual(response.context["channel_types"]["PHONE"][1].code, "CT")
+        self.assertEqual(response.context["channel_types"]["PHONE"][2].code, "EX")
+        self.assertEqual(response.context["channel_types"]["PHONE"][3].code, "I2")
         self.assertEqual(response.context["channel_types"]["PHONE"][-1].code, "A")
 
         with override_settings(ORG_LIMIT_DEFAULTS={"channels": 2}):
@@ -77,8 +79,9 @@ class ChannelCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual(["AT", "MT", "TG"], [t.code for t in response.context["recommended_channels"]])
 
         self.assertEqual(response.context["channel_types"]["PHONE"][0].code, "AC")
-        self.assertEqual(response.context["channel_types"]["PHONE"][1].code, "BL")
-        self.assertEqual(response.context["channel_types"]["PHONE"][2].code, "BS")
+        self.assertEqual(response.context["channel_types"]["PHONE"][1].code, "BW")
+        self.assertEqual(response.context["channel_types"]["PHONE"][2].code, "BL")
+        self.assertEqual(response.context["channel_types"]["PHONE"][3].code, "BS")
         self.assertEqual(response.context["channel_types"]["PHONE"][-1].code, "A")
 
         self.assertEqual(response.context["channel_types"]["SOCIAL_MEDIA"][0].code, "D3C")
@@ -104,7 +107,6 @@ class ChannelCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual(response.context["channel_types"]["SOCIAL_MEDIA"][0].code, "D3C")
         self.assertEqual(response.context["channel_types"]["SOCIAL_MEDIA"][1].code, "FBA")
         self.assertEqual(response.context["channel_types"]["SOCIAL_MEDIA"][2].code, "IG")
-        self.assertEqual(response.context["channel_types"]["SOCIAL_MEDIA"][-2].code, "WA")
         self.assertEqual(response.context["channel_types"]["SOCIAL_MEDIA"][-1].code, "ZVW")
 
     def test_configuration(self):
@@ -320,7 +322,7 @@ class ChannelCRUDLTest(TembaTest, CRUDLTestMixin):
         )
         self.create_outgoing_msg(contact, "Message 2", status="D", logs=[log3])
 
-        logs_url = reverse("channels.channel_logs_read", args=[self.channel.uuid, "msg", msg1.id])
+        logs_url = reverse("channels.channel_logs_read", args=[self.channel.uuid, "msg", msg1.uuid])
 
         self.assertRequestDisallowed(logs_url, [None, self.editor, self.agent, self.admin2])
         response = self.assertReadFetch(logs_url, [self.admin], context_object=self.channel)
@@ -339,7 +341,7 @@ class ChannelCRUDLTest(TembaTest, CRUDLTestMixin):
             org2_contact, "Message 3", status="D", channel=org2_channel, logs=[org2_log]
         )
 
-        logs_url = reverse("channels.channel_logs_read", args=[self.channel.uuid, "msg", org2_msg2.id])
+        logs_url = reverse("channels.channel_logs_read", args=[self.channel.uuid, "msg", org2_msg2.uuid])
         self.assertRequestDisallowed(logs_url, [None, self.editor, self.agent, self.admin, self.admin2])
 
     def test_logs_call(self):
@@ -396,7 +398,7 @@ class ChannelCRUDLTest(TembaTest, CRUDLTestMixin):
         )
         self.create_incoming_call(flow, contact, logs=[log3])
 
-        logs_url = reverse("channels.channel_logs_read", args=[self.channel.uuid, "call", call1.id])
+        logs_url = reverse("channels.channel_logs_read", args=[self.channel.uuid, "call", call1.uuid])
 
         self.assertRequestDisallowed(logs_url, [None, self.editor, self.agent, self.admin2])
         response = self.assertReadFetch(logs_url, [self.admin], context_object=self.channel)
@@ -404,7 +406,8 @@ class ChannelCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual("https://foo.bar/call1", response.context["logs"][0]["http_logs"][0]["url"])
         self.assertEqual("https://foo.bar/call2", response.context["logs"][1]["http_logs"][0]["url"])
 
-    def test_delete(self):
+    @mock_mailroom
+    def test_delete(self, mr_mocks):
         delete_url = reverse("channels.channel_delete", args=[self.ex_channel.uuid])
 
         self.assertRequestDisallowed(delete_url, [None, self.agent, self.admin2])

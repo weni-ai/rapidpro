@@ -94,6 +94,8 @@ class ChannelType(metaclass=ABCMeta):
     category = None
     beta_only = False
 
+    org_feature = None  # org feature required to use this channel type
+
     unique_addresses = False
 
     # the courier handling URL, will be wired automatically for use in templates, but wired to a null handler
@@ -130,7 +132,9 @@ class ChannelType(metaclass=ABCMeta):
         """
         Determines whether this channel type is available to the given user considering the region and when not considering region, e.g. check timezone
         """
-        region_ignore_visible = (not self.beta_only) or user.is_beta
+
+        org_feature_visible = self.org_feature is None or self.org_feature in org.features
+        region_ignore_visible = org_feature_visible and ((not self.beta_only) or user.is_beta)
         region_aware_visible = True
 
         if self.available_timezones is not None:
@@ -161,6 +165,8 @@ class ChannelType(metaclass=ABCMeta):
         """
         Returns all the URLs this channel exposes to Django, the URL should be relative.
         """
+        if self.claim_view is None:
+            return []
         return [self.get_claim_url()]
 
     def get_claim_url(self):
@@ -410,7 +416,7 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
 
             except Exception as e:
                 # release our channel, raise error upwards
-                channel.release(user)
+                channel.release(user, interrupt=False)
                 raise e
 
         return channel
@@ -429,6 +435,16 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
         from .types import TYPES
 
         return TYPES.values()
+
+    @classmethod
+    def get_org_features_choices(cls):
+        from .types import TYPES
+
+        features = []
+        for channel_type in TYPES.values():
+            if channel_type.org_feature:
+                features.append((channel_type.org_feature, f"Channel: {channel_type.name}"))
+        return tuple(features)
 
     @property
     def type(self) -> ChannelType:
@@ -455,7 +471,7 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
 
         with r.lock(key, 60):
             # for channels which have version in their config, refresh it
-            if self.config.get("version"):
+            if self.config.get("version"):  # pragma: no cover
                 update_api_version(self)
 
             try:
@@ -650,7 +666,7 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
     def check_credentials(self) -> bool:
         return self.type.check_credentials(self.config)
 
-    def release(self, user, *, trigger_sync: bool = True):
+    def release(self, user, *, trigger_sync: bool = True, interrupt: bool = True):
         """
         Releases this channel making it inactive
         """
@@ -667,17 +683,18 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
             # proceed with removing this channel but log the problem
             logger.error(f"Unable to deactivate a channel: {str(e)}", exc_info=True)
 
-        # delay mailroom task for 5 seconds, so mailroom assets cache expires
-        interrupt_channel_task.apply_async((self.id,), countdown=5)
-
         # make the channel inactive
         self.modified_by = user
         self.is_active = False
         self.save(update_fields=("is_active", "modified_by", "modified_on"))
 
+        if interrupt:
+            # delay mailroom call for 5 seconds, so mailroom assets cache expires
+            interrupt_channel_task.apply_async((self.id,), countdown=5)
+
         # trigger the orphaned channel
         if trigger_sync and self.is_android:
-            self.trigger_sync()
+            mailroom.get_client().android_sync(self)
 
         # any triggers associated with our channel get archived and released
         for trigger in self.triggers.filter(is_active=True):
@@ -707,14 +724,6 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
         delete_in_batches(self.counts.all())
 
         super().delete()
-
-    def trigger_sync(self):  # pragma: no cover
-        """
-        Sends a FCM command to trigger a sync on the client
-        """
-
-        assert self.is_android, "can only trigger syncs on Android channels"
-        mailroom.get_client().android_sync(self)
 
     def get_msg_count(self, since=None):
         counts = self.counts.filter(scope__in=[ChannelCount.SCOPE_TEXT_IN, ChannelCount.SCOPE_TEXT_OUT])
@@ -795,11 +804,8 @@ class ChannelEvent(TembaUUIDMixin, models.Model):
         (TYPE_OPTOUT, _("Opt Out"), "optout"),
         (TYPE_DELETE_CONTACT, _("Delete Contact"), "delete-contact"),
     )
-
     TYPE_CHOICES = [(t[0], t[1]) for t in TYPE_CONFIG]
-
     ALL_TYPES = {t[0] for t in TYPE_CONFIG}
-    CALL_TYPES = {TYPE_CALL_OUT, TYPE_CALL_OUT_MISSED, TYPE_CALL_IN, TYPE_CALL_IN_MISSED}
 
     STATUS_PENDING = "P"
     STATUS_HANDLED = "H"

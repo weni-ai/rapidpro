@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+import iso8601
 from allauth.account.models import EmailAddress
 from django_valkey import get_valkey_connection
 from PIL import Image, ImageDraw
@@ -25,21 +26,24 @@ from django.utils import timezone
 from temba.archives.models import Archive, jsonlgz_encode
 from temba.channels.models import Channel, ChannelEvent, ChannelLog
 from temba.contacts.models import URN, Contact, ContactField, ContactGroup, ContactImport
-from temba.flows.models import Flow, FlowRun, FlowSession
+from temba.flows.models import Flow, FlowRun, FlowSession, FlowStart
 from temba.ivr.models import Call
 from temba.locations.models import AdminBoundary, BoundaryAlias
+from temba.mailroom.events import Event
 from temba.msgs.models import Broadcast, Label, Msg, OptIn
 from temba.orgs.models import Org, OrgRole
 from temba.templates.models import Template
-from temba.tickets.models import Ticket, TicketEvent
+from temba.tickets.models import Ticket
 from temba.users.models import User
-from temba.utils import dynamo, json
+from temba.utils import dynamo, json, s3 as s3_utils
 from temba.utils.uuid import UUID, uuid4, uuid7
 
+from .dynamo import dynamo_truncate
 from .mailroom import (
     contact_urn_lookup,
     create_broadcast,
     create_contact_locally,
+    create_flowstart,
     resolve_destination,
     update_field_locally,
 )
@@ -139,13 +143,7 @@ class TembaTest(SmartminTest):
         self.org.country = self.country
         self.org.save(update_fields=("country",))
 
-    def tearDown(self):
-        super().tearDown()
-
-        r = get_valkey_connection()
-        r.flushdb()
-
-    def login(self, user, *, update_last_auth_on: bool = True, choose_org=None):
+    def login(self, user, *, choose_org=None):
         self.assertTrue(
             self.client.login(username=user.email, password=self.default_password),
             f"couldn't login as {user.email}:{self.default_password}",
@@ -154,9 +152,6 @@ class TembaTest(SmartminTest):
         # infer our org if we weren't handed one
         if not choose_org:
             choose_org = user.orgs.filter(is_active=True).order_by("-created_on").first()
-
-        if update_last_auth_on:
-            user.record_auth()
 
         if choose_org:
             session = self.client.session
@@ -329,7 +324,6 @@ class TembaTest(SmartminTest):
         next_attempt=None,
         failed_reason=None,
         flow=None,
-        ticket=None,
         logs=None,
     ):
         if failed_reason:
@@ -352,26 +346,8 @@ class TembaTest(SmartminTest):
             sent_on=sent_on,
             high_priority=high_priority,
             flow=flow,
-            ticket=ticket,
             next_attempt=next_attempt,
             failed_reason=failed_reason,
-            logs=logs,
-        )
-
-    def create_optin_request(self, contact, channel, optin, flow=None, logs=None) -> Msg:
-        return self._create_msg(
-            contact,
-            "",
-            Msg.DIRECTION_OUT,
-            channel=channel,
-            msg_type=Msg.TYPE_OPTIN,
-            attachments=[],
-            quick_replies=[],
-            status=Msg.STATUS_SENT,
-            sent_on=timezone.now(),
-            created_on=None,
-            optin=optin,
-            flow=flow,
             logs=logs,
         )
 
@@ -393,7 +369,6 @@ class TembaTest(SmartminTest):
         external_id=None,
         high_priority=False,
         flow=None,
-        ticket=None,
         broadcast=None,
         optin=None,
         locale=None,
@@ -414,6 +389,7 @@ class TembaTest(SmartminTest):
             assert channel and contact_urn, "messages require a channel and contact URN, except for failed_reason=D"
 
         return Msg.objects.create(
+            uuid=uuid7(),
             org=org,
             direction=direction,
             contact=contact,
@@ -436,7 +412,6 @@ class TembaTest(SmartminTest):
             broadcast=broadcast,
             optin=optin,
             flow=flow,
-            ticket=ticket,
             next_attempt=next_attempt,
             failed_reason=failed_reason,
             log_uuids=[l.uuid for l in logs or []],
@@ -549,6 +524,31 @@ class TembaTest(SmartminTest):
 
         return flow
 
+    def create_flowstart(
+        self,
+        flow,
+        user,
+        typ=FlowStart.TYPE_MANUAL,
+        groups=(),
+        contacts=(),
+        urns=(),
+        query="",
+        exclude=None,
+        params=None,
+    ):
+        return create_flowstart(
+            flow.org,
+            user,
+            typ=typ,
+            flow=flow,
+            groups=groups,
+            contacts=contacts,
+            urns=urns,
+            query=query,
+            exclude=exclude,
+            params=params or {},
+        )
+
     def create_incoming_call(
         self, flow, contact, status=Call.STATUS_COMPLETED, error_reason=None, created_on=None, logs=()
     ):
@@ -556,7 +556,7 @@ class TembaTest(SmartminTest):
         Create something that looks like an incoming IVR call handled by mailroom
         """
         call = Call.objects.create(
-            uuid=uuid4(),
+            uuid=uuid7(),
             org=self.org,
             channel=self.channel,
             direction=Call.DIRECTION_IN,
@@ -569,14 +569,15 @@ class TembaTest(SmartminTest):
             log_uuids=[l.uuid for l in logs or []],
         )
         session = FlowSession.objects.create(
-            uuid=uuid4(),
-            contact=contact,
+            uuid=uuid7(),
+            contact_uuid=contact.uuid,
             status=FlowSession.STATUS_COMPLETED,
             output_url="http://sessions.com/123.json",
-            call=call,
+            call_uuid=call.uuid,
             ended_on=timezone.now(),
         )
         FlowRun.objects.create(
+            uuid=uuid7(),
             org=self.org,
             flow=flow,
             contact=contact,
@@ -585,6 +586,7 @@ class TembaTest(SmartminTest):
             exited_on=timezone.now(),
         )
         Msg.objects.create(
+            uuid=uuid7(),
             org=self.org,
             channel=self.channel,
             direction=Msg.DIRECTION_OUT,
@@ -605,28 +607,40 @@ class TembaTest(SmartminTest):
         return call
 
     def create_archive(
-        self, archive_type, period, start_date, records=(), needs_deletion=False, rollup_of=(), org=None
+        self,
+        archive_type,
+        period,
+        start_date,
+        records=(),
+        *,
+        needs_deletion=False,
+        deleted_on=None,
+        rollup_of=(),
+        org=None,
     ):
+        assert not (needs_deletion and deleted_on)
+
         org = org or self.org
         body, md5, size = jsonlgz_encode(records)
         type_code = "run" if archive_type == Archive.TYPE_FLOWRUN else "message"
         date_code = start_date.strftime("%Y%m") if period == "M" else start_date.strftime("%Y%m%d")
-        key = f"{org.id}/{type_code}_{period}{date_code}_{md5}.jsonl.gz"
 
+        key = f"{org.id}/{type_code}_{period}{date_code}_{md5}.jsonl.gz"
         key = Archive.storage().save(key, body)
-        url = Archive.storage().url(key)
 
         archive = Archive.objects.create(
+            uuid=uuid7(),
             org=org,
             archive_type=archive_type,
             size=size,
-            hash=md5,
-            url=url,
+            hash=md5 if records else None,
+            location=f"{Archive.storage().bucket.name}:{key}" if records else None,
             record_count=len(records),
             start_date=start_date,
             period=period,
             build_time=23425,
             needs_deletion=needs_deletion,
+            deleted_on=deleted_on,
         )
         if rollup_of:
             Archive.objects.filter(id__in=[a.id for a in rollup_of]).update(rollup=archive)
@@ -750,10 +764,11 @@ class TembaTest(SmartminTest):
         if not opened_on:
             opened_on = timezone.now()
 
-        ticket = Ticket.objects.create(
+        return Ticket.objects.create(
+            uuid=uuid7(),
             org=contact.org,
             contact=contact,
-            topic=topic or contact.org.default_ticket_topic,
+            topic=topic or contact.org.default_topic,
             status=Ticket.STATUS_CLOSED if closed_on else Ticket.STATUS_OPEN,
             assignee=assignee,
             opened_on=opened_on,
@@ -761,33 +776,28 @@ class TembaTest(SmartminTest):
             opened_in=opened_in,
             closed_on=closed_on,
         )
-        TicketEvent.objects.create(
-            org=ticket.org,
-            contact=contact,
-            ticket=ticket,
-            event_type=TicketEvent.TYPE_OPENED,
-            assignee=assignee,
-            note=note,
-            created_by=opened_by,
-            created_on=opened_on,
-        )
-        if closed_on:
-            TicketEvent.objects.create(
-                org=ticket.org,
-                contact=contact,
-                ticket=ticket,
-                event_type=TicketEvent.TYPE_CLOSED,
-                created_by=closed_by,
-                created_on=closed_on,
-            )
-
-        return ticket
 
     def create_optin(self, name: str, org=None):
         return OptIn.create(org or self.org, self.admin, name)
 
     def set_contact_field(self, contact, key, value):
         update_field_locally(self.admin, contact, key, value)
+
+    def write_history_event(self, contact, event: dict):
+        data = event.copy()
+        uuid = data.pop("uuid")
+        expires_on = iso8601.parse_date(event["created_on"]) + timezone.timedelta(days=14)
+        pk, sk = Event._get_key(contact, uuid)
+
+        dynamo.HISTORY.put_item(
+            Item={
+                "PK": pk,
+                "SK": sk,
+                "OrgID": contact.org_id,
+                "TTL": int(expires_on.timestamp()),
+                "Data": data,
+            }
+        )
 
     def assertLoginRedirectLegacy(self, response, msg=None):
         self.assertRedirect(response, reverse("orgs.login"), msg=msg)
@@ -998,11 +1008,43 @@ def mock_uuids(method=None, *, seed=1234):
     def actual_decorator(f):
         @wraps(f)
         def wrapper(instance, *args, **kwargs):
-            _wrap_test_method(f, instance, *args, **kwargs)
+            return _wrap_test_method(f, instance, *args, **kwargs)
 
         return wrapper
 
     return actual_decorator(method) if method else actual_decorator
+
+
+def cleanup(*, valkey=False, dynamodb=False, s3=False):
+    """
+    Explicit cleanup operations to perform after a test method runs.
+    """
+
+    def _wrap_test_method(f, instance, *args, **kwargs):
+        try:
+            return f(instance, *args, **kwargs)
+        finally:
+            if valkey:
+                r = get_valkey_connection()
+                r.flushdb()
+            if dynamodb:
+                dynamo_truncate(dynamo.HISTORY)
+                dynamo_truncate(dynamo.MAIN)
+            if s3:
+                s3client = s3_utils.client()
+                for bucket_name in ["test-default", "test-archives"]:
+                    objects = s3client.list_objects_v2(Bucket=bucket_name)
+                    for obj in objects.get("Contents", []):
+                        s3client.delete_object(Bucket=bucket_name, Key=obj["Key"])
+
+    def actual_decorator(f):
+        @wraps(f)
+        def wrapper(instance, *args, **kwargs):
+            return _wrap_test_method(f, instance, *args, **kwargs)
+
+        return wrapper
+
+    return actual_decorator
 
 
 def get_contact_search(*, query=None, contacts=None, groups=None):

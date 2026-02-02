@@ -3,7 +3,7 @@ import logging
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timezone as tzone
+from datetime import date, datetime, timedelta, timezone as tzone
 from uuid import UUID
 
 import iso8601
@@ -30,7 +30,6 @@ from temba.msgs.models import Label, OptIn
 from temba.orgs.models import DependencyMixin, Export, ExportType, Org, User
 from temba.templates.models import Template
 from temba.tickets.models import Topic
-from temba.utils import json, on_transaction_commit, s3
 from temba.utils.export.models import MultiSheetExporter
 from temba.utils.models import JSONAsTextField, LegacyUUIDMixin, TembaModel, delete_in_batches
 from temba.utils.models.counts import BaseScopedCount, BaseSquashableCount
@@ -524,17 +523,18 @@ class Flow(LegacyUUIDMixin, TembaModel, DependencyMixin):
         # won't see any new database objects
         self.save_revision(user, cloned_definition)
 
-    def archive(self, user):
+    def archive(self, user, *, interrupt_sessions: bool = True):
         self.is_archived = True
         self.modified_by = user
         self.save(update_fields=("is_archived", "modified_by", "modified_on"))
 
-        # queue mailroom to interrupt sessions where contact is currently in this flow
-        mailroom.queue_interrupt(self.org, flow=self)
-
         # archive our triggers as well
         for trigger in self.triggers.filter(is_active=True):
             trigger.archive(user)
+
+        if interrupt_sessions:
+            # call mailroom to interrupt sessions where contact is currently in this flow
+            mailroom.get_client().flow_interrupt(self.org, self)
 
     def restore(self, user):
         self.is_archived = False
@@ -590,24 +590,22 @@ class Flow(LegacyUUIDMixin, TembaModel, DependencyMixin):
 
         return recent
 
-    def async_start(self, user, groups, contacts, query=None, exclusions=None):
+    def start(self, user, groups, contacts, query=None, exclude=None):
         """
-        Causes us to schedule a flow to start in a background thread.
+        Starts this flow (asynchronously via mailroom).
         """
 
         assert not self.org.is_flagged and not self.org.is_suspended, "flagged and suspended orgs can't start flows"
 
-        start = FlowStart.create(
+        return FlowStart.create(
             self,
             user,
             start_type=FlowStart.TYPE_MANUAL,
             groups=groups,
             contacts=contacts,
             query=query,
-            exclusions=exclusions,
+            exclude=exclude,
         )
-
-        start.async_start()
 
     def get_export_dependencies(self):
         """
@@ -922,9 +920,9 @@ class Flow(LegacyUUIDMixin, TembaModel, DependencyMixin):
 
         self.counts.all().delete()
 
-        # queue mailroom to interrupt sessions where contact is currently in this flow
+        # call mailroom to interrupt sessions where contact is currently in this flow
         if interrupt_sessions:
-            mailroom.queue_interrupt(self.org, flow=self)
+            mailroom.get_client().flow_interrupt(self.org, self)
 
     def delete(self):
         """
@@ -977,15 +975,14 @@ class FlowSession(models.Model):
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(unique=True)
-    contact = models.ForeignKey("contacts.Contact", on_delete=models.PROTECT, related_name="sessions")
+    contact_uuid = models.UUIDField(null=True)
     status = models.CharField(max_length=1, choices=STATUS_CHOICES)
     last_sprint_uuid = models.UUIDField(null=True)  # last sprint in this session
+    current_flow_uuid = models.UUIDField(null=True)  # the flow of the waiting run
+    call_uuid = models.UUIDField(null=True)  # the call used for sessions over IVR
 
     # the modality of this session
     session_type = models.CharField(max_length=1, choices=Flow.TYPE_CHOICES, default=Flow.TYPE_MESSAGE)
-
-    # the call used for flow sessions over IVR
-    call = models.OneToOneField("ivr.Call", on_delete=models.PROTECT, null=True, related_name="session")
 
     # the engine output of this session (either stored in this field or at the URL pointed to by output_url)
     output = JSONAsTextField(null=True, default=dict)
@@ -995,27 +992,8 @@ class FlowSession(models.Model):
     created_on = models.DateTimeField(default=timezone.now)
     ended_on = models.DateTimeField(null=True)
 
-    # the flow of the waiting run
-    current_flow = models.ForeignKey("flows.Flow", related_name="sessions", null=True, on_delete=models.PROTECT)
-
-    @property
-    def output_json(self):
-        """
-        Returns the output JSON for this session, loading it either from our DB field or S3 if stored there.
-        """
-        # if our output is stored on S3, fetch it from there
-        if self.output_url:
-            bucket, key = s3.split_url(self.output_url)
-
-            obj = s3.client().get_object(Bucket=bucket, Key=key)
-            return json.loads(obj["Body"].read())
-
-        # otherwise, read it from our DB field
-        else:
-            return self.output
-
     def __repr__(self):  # pragma: no cover
-        return f"<FlowSession: id={self.id} contact={self.contact.id}>"
+        return f"<FlowSession: uuid={self.uuid} contact={self.contact_uuid}>"
 
     class Meta:
         indexes = [
@@ -1071,7 +1049,7 @@ class FlowRun(models.Model):
     org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="runs", db_index=False)
     flow = models.ForeignKey(Flow, on_delete=models.PROTECT, related_name="runs")
     status = models.CharField(max_length=1, choices=STATUS_CHOICES)
-    session_uuid = models.UUIDField(null=True)
+    session_uuid = models.UUIDField()
 
     # contact isn't an index because we have flows_flowrun_contact_inc_flow below
     contact = models.ForeignKey(Contact, on_delete=models.PROTECT, related_name="runs", db_index=False)
@@ -1091,7 +1069,6 @@ class FlowRun(models.Model):
     results = JSONAsTextField(null=True, default=dict)
 
     # path taken by this run through the flow
-    path = JSONAsTextField(null=True, default=list)  # to be replaced by path_nodes and path_times
     path_nodes = ArrayField(models.UUIDField(), null=True)
     path_times = ArrayField(models.DateTimeField(), null=True)
 
@@ -1104,10 +1081,7 @@ class FlowRun(models.Model):
         time: datetime
 
     def get_path(self):
-        if self.path_nodes is not None and self.path_times is not None:
-            return [self.Step(node=n, time=t) for n, t in zip(self.path_nodes, self.path_times)]
-        else:
-            return [self.Step(node=UUID(s["node_uuid"]), time=iso8601.parse_date(s["arrived_on"])) for s in self.path]
+        return [self.Step(node=n, time=t) for n, t in zip(self.path_nodes or [], self.path_times or [])]
 
     def as_archive_json(self):
         from temba.api.v2.views import FlowRunReadSerializer
@@ -1171,16 +1145,6 @@ class FlowRun(models.Model):
                 name="flows_run_inactive_has_exited_on",
             ),
         ]
-
-
-class FlowExit:
-    """
-    A helper class used for building contact histories which simply wraps a run which may occur more than once in the
-    same history as both a flow run start and an exit.
-    """
-
-    def __init__(self, run):
-        self.run = run
 
 
 class FlowRevision(models.Model):
@@ -1672,27 +1636,21 @@ class FlowStart(models.Model):
         contacts=(),
         urns=(),
         query=None,
-        exclusions=None,
+        exclude=None,
         params=None,
     ):
-        start = cls.objects.create(
-            org=flow.org,
+        return mailroom.get_client().flow_start(
+            flow.org,
+            user,
+            typ=start_type,
             flow=flow,
-            start_type=start_type,
+            groups=list(groups),
+            contacts=list(contacts),
             urns=list(urns),
             query=query,
-            exclusions=exclusions or {},
+            exclude=exclude,
             params=params or {},
-            created_by=user,
         )
-
-        for contact in contacts:
-            start.contacts.add(contact)
-
-        for group in groups:
-            start.groups.add(group)
-
-        return start
 
     @classmethod
     def preview(cls, flow, *, include: mailroom.Inclusions, exclude: mailroom.Exclusions) -> tuple[str, int]:
@@ -1709,10 +1667,10 @@ class FlowStart(models.Model):
 
     @classmethod
     def has_unfinished(cls, org) -> bool:
-        return org.flow_starts.filter(status__in=(cls.STATUS_PENDING, cls.STATUS_STARTED)).exists()
-
-    def async_start(self):
-        on_transaction_commit(lambda: mailroom.queue_flow_start(self))
+        a_week_ago = timezone.now() - timedelta(days=7)
+        return org.flow_starts.filter(
+            status__in=(cls.STATUS_PENDING, cls.STATUS_STARTED), created_on__gte=a_week_ago
+        ).exists()
 
     def interrupt(self, user):
         """

@@ -33,7 +33,8 @@ class MtnTypeTest(TembaTest):
             response = self.client.get(reverse("channels.channel_claim"))
             self.assertNotContains(response, url)
 
-            self.make_beta(self.admin)
+            self.org.timezone = "Africa/Brazzaville"
+            self.org.save()
 
             # should see the general channel claim page
             response = self.client.get(reverse("channels.channel_claim"))
@@ -97,7 +98,7 @@ class MtnTypeTest(TembaTest):
                 self.assertRedirect(response, "/org/workspace/")
 
             # release channel and deactivate the subscription
-            channel.release(self.admin)
+            channel.release(self.admin, interrupt=False)
             self.assertEqual(mock_delete.call_count, 1)
 
             self.assertEqual(

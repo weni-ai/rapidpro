@@ -55,7 +55,6 @@ class User(TembaUUIDMixin, AbstractBaseUser, PermissionsMixin):
     avatar = models.ImageField(upload_to=UploadToIdPathAndRename("avatars/"), storage=storages["public"], null=True)
 
     date_joined = models.DateTimeField(default=timezone.now)
-    last_auth_on = models.DateTimeField(null=True)
     is_system = models.BooleanField(default=False)
     is_staff = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
@@ -149,16 +148,23 @@ class User(TembaUUIDMixin, AbstractBaseUser, PermissionsMixin):
         """
 
         self.emailaddress_set.update_or_create(
-            primary=True, defaults={"email": self.email, "primary": True, "verified": verified}
+            email=self.email, defaults={"email": self.email, "primary": True, "verified": verified}
         )
 
-    def record_auth(self):
+    @property
+    def is_mfa_enabled(self) -> bool:
         """
-        Records that this user authenticated
+        Returns whether this user has MFA enabled.
         """
 
-        self.last_auth_on = timezone.now()
-        self.save(update_fields=("last_auth_on",))
+        return bool(self.authenticator_set.all())
+
+    def disable_mfa(self):
+        """
+        Disables this user's MFA.
+        """
+
+        self.authenticator_set.all().delete()
 
     @cached_property
     def is_alpha(self) -> bool:
@@ -191,6 +197,9 @@ class User(TembaUUIDMixin, AbstractBaseUser, PermissionsMixin):
 
     def as_engine_ref(self) -> dict:
         return {"uuid": str(self.uuid), "name": self.name}
+
+    def as_chat_ref(self) -> dict:
+        return {"uuid": str(self.uuid), "name": self.first_name, "avatar": self.avatar.url if self.avatar else None}
 
     def fetch_avatar(self, url: str):  # pragma: no cover
         # fetch the avatar from the url and store it locally

@@ -1,9 +1,10 @@
 from datetime import date
 
+from django.conf import settings
 from django.urls import reverse
 
 from temba.archives.models import Archive
-from temba.tests import CRUDLTestMixin, TembaTest
+from temba.tests import CRUDLTestMixin, TembaTest, cleanup
 
 
 class ArchiveCRUDLTest(TembaTest, CRUDLTestMixin):
@@ -24,23 +25,24 @@ class ArchiveCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertRequestDisallowed(msgs_url, [None, self.agent])
 
         response = self.assertListFetch(runs_url, [self.editor, self.admin], context_objects=[d3])
-        self.assertContains(response, f"/archive/read/{d3.id}/")
+        self.assertContains(response, f"/archive/read/{d3.uuid}/")
 
         response = self.assertListFetch(msgs_url, [self.editor, self.admin], context_objects=[d2, m1])
-        self.assertContains(response, f"/archive/read/{d2.id}/")
-        self.assertContains(response, f"/archive/read/{m1.id}/")
+        self.assertContains(response, f"/archive/read/{d2.uuid}/")
+        self.assertContains(response, f"/archive/read/{m1.uuid}/")
 
+    @cleanup(s3=True)
     def test_read(self):
         archive = self.create_archive(Archive.TYPE_MSG, "D", date(2020, 7, 31), [{"id": 1}, {"id": 2}])
 
         download_url = (
-            f"http://localhost:9000/test-archives/{self.org.id}/message_D20200731_{archive.hash}.jsonl.gz?response-con"
+            f"{settings.AWS_S3_ENDPOINT_URL}/test-archives/{self.org.id}/message_D20200731_{archive.hash}.jsonl.gz?response-con"
             f"tent-disposition=attachment%3B&response-content-type=application%2Foctet&response-content-encoding=none"
         )
 
         self.assertRequestDisallowed(download_url, [None, self.agent, self.admin2])
         response = self.assertReadFetch(
-            reverse("archives.archive_read", args=[archive.id]), [self.editor, self.admin], status=302
+            reverse("archives.archive_read", args=[archive.uuid]), [self.editor, self.admin], status=302
         )
 
         self.assertIn(download_url, response.get("Location"))
