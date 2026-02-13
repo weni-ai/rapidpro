@@ -183,6 +183,9 @@ TEMPLATES = [
                 "django.template.context_processors.request",
                 "temba.context_processors.branding",
                 "temba.context_processors.config",
+            # allauth context processors needed for SOCIALACCOUNT_ENABLED and related flags
+            "allauth.account.context_processors.account",
+            "allauth.socialaccount.context_processors.socialaccount",
                 "temba.orgs.views.context_processors.org_perms_processor",
             ],
             "loaders": [
