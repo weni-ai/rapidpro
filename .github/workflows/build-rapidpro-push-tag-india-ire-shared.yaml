@@ -171,34 +171,20 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       repository_name: ${{ steps.setup.outputs.repository_name }}
-      manifest_env: ${{ steps.setup.outputs.manifest_env }}
     steps:
       - name: Setup outputs
         id: setup
         run: |
           export GITHUB_REPOSITORY_NAME="${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/}"
-          echo "repository_name=${GITHUB_REPOSITORY_NAME}" >> "${GITHUB_OUTPUT}"
-
-          # --- Lógica de TAG original incorporada ---
-          TAG="$( echo "${GITHUB_REF}" | cut -d'/' -f3 )"
-          if grep -qs -e '^.*.*-india' <<< "${TAG}" ; then
-            echo "manifest_env=mumbai" >> "${GITHUB_OUTPUT}"
-          elif grep -qs -e '^.*.*-mumbaistg' <<< "${TAG}" ; then
-            echo "manifest_env=mumbai-staging" >> "${GITHUB_OUTPUT}"
-          elif grep -qs -e '^.*.*-staging' <<< "${TAG}" ; then
-            echo "manifest_env=staging" >> "${GITHUB_OUTPUT}"
-          elif grep -qs -e '^.*.*-ire' <<< "${TAG}" ; then
-            echo "manifest_env=ireland" >> "${GITHUB_OUTPUT}"
-          else
-            echo "manifest_env=production" >> "${GITHUB_OUTPUT}"
-          fi
+          {
+            echo "repository_name=${GITHUB_REPOSITORY_NAME}"
+          } | tee -a "${GITHUB_OUTPUT}"
 
           {
             echo "### Workflow Outputs"
-            echo "| Variable         | Description      |"
-            echo "| ---------------- | ---------------- |"
-            echo "| repository_name  | Repository name  |"
-            echo "| manifest_env     | Target Env       |"
+            echo "| Variable        | Description     |"
+            echo "| --------------- | --------------- |"
+            echo "| repository_name | Repository name |"
           } | tee -a "${GITHUB_STEP_SUMMARY}"
 
   call-workflow:
@@ -212,4 +198,7 @@ jobs:
       target_application: rapidpro/backend
       target_patch_file: deployment.json
       default_environment: ${{ needs.setup.outputs.manifest_env }}
+      image_tags: |
+        type=ref,event=tag
+        type=raw,value=${{ needs.setup.outputs.manifest_env }}
     secrets: inherit
