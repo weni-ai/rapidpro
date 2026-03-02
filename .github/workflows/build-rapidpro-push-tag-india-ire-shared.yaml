@@ -197,4 +197,9 @@ jobs:
       target_repository: weni-ai/kubernetes-manifests-platform
       target_application: rapidpro/backend
       target_patch_file: deployment.json
+      default_environment: >-
+        ${{ contains(github.ref, '-india') && 'mumbai' || 
+            contains(github.ref, '-ire') && 'ireland' || 
+            contains(github.ref, '-mumbaistg') && 'mumbai-staging' || 
+            'production' }}
     secrets: inherit
