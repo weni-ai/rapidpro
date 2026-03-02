@@ -188,7 +188,7 @@ jobs:
           } | tee -a "${GITHUB_STEP_SUMMARY}"
 
   call-workflow:
-    uses: weni-ai/actions-workflows/.github/workflows/reusable-workflow.yaml@main
+    uses: weni-ai/actions-workflows/.github/workflows/reusable-workflow.yaml@fix-tag
     needs:
       - setup
     with:
@@ -197,8 +197,4 @@ jobs:
       target_repository: weni-ai/kubernetes-manifests-platform
       target_application: rapidpro/backend
       target_patch_file: deployment.json
-      default_environment: ${{ needs.setup.outputs.manifest_env }}
-      image_tags: |
-        type=ref,event=tag
-        type=raw,value=${{ needs.setup.outputs.manifest_env }}
     secrets: inherit
