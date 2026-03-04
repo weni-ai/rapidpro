@@ -161,10 +161,10 @@ name: Build Rapidpro India and Ireland in Shared (Push Tag)
 on:
   push:
     tags:
-      - '*.*.*-india'
-      - '*.*.*-ire'
+      - '*.*.*-mumbai-staging'
+      - '*.*.*-ireland'
       - '*.*.*-staging'
-      - '*.*.*-mumbaistg'
+      - '*.*.*-mumbai'
 
 jobs:
   setup:
