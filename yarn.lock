@@ -85,43 +85,19 @@
     "@nodelib/fs.scandir" "2.1.5"
     fastq "^1.6.0"
 
-"@nyaruka/flow-editor@1.44.7":
-  version "1.44.7"
-  resolved "https://registry.yarnpkg.com/@nyaruka/flow-editor/-/flow-editor-1.44.7.tgz#7aa31b77c545d6714e057a46475c1ea34f5eac58"
-  integrity sha512-jVNP8SgEW2ZBuMIoPrkGVWZyvMPx4i05C2iyzxY80x73EP6RFKQEj8IzU7eJOlloTKstF8z3m7/w07qiBE3jUg==
+"@nyaruka/flow-editor@1.45.1":
+  version "1.45.1"
+  resolved "https://registry.yarnpkg.com/@nyaruka/flow-editor/-/flow-editor-1.45.1.tgz#3efb21a60e717282091954a3c3e9a6fc562cb62c"
+  integrity sha512-7WTgX61FG564TaXXVcsTLElspotPBObjnLnyu9mGGWq7ds80WksqDC8MFVB64vEE0RP0vklJ7ASxQcA6f6uMBQ==
   dependencies:
-    "@nyaruka/temba-components" "0.124.2"
+    "@nyaruka/temba-components" "0.130.1"
     react "^16.8.6"
     react-dom "^16.8.6"
 
-"@nyaruka/temba-components@0.124.2":
-  version "0.124.2"
-  resolved "https://registry.yarnpkg.com/@nyaruka/temba-components/-/temba-components-0.124.2.tgz#019a4a5df18b502a53d16338b2e328c2e6436701"
-  integrity sha512-VF6C2LWTXbJ3PBPy6NkOqD9vhs44ohTNvs9PHISOrmsC8i0JF1oj+msDBGm1ig/f6LTouzBNLs08YjWg9O1eyg==
-  dependencies:
-    "@jsplumb/browser-ui" "^6.2.10"
-    "@lit/localize" "^0.12.1"
-    chart.js "^4.4.8"
-    chartjs-adapter-luxon "^1.3.1"
-    color-hash "^2.0.2"
-    croppie "^2.6.5"
-    geojson "^0.5.0"
-    image-size "^1.1.1"
-    immer "10"
-    leaflet "1.5.1"
-    lit "3.1.2"
-    lit-element "^4.0.4"
-    lit-html "^3.1.2"
-    luxon "3.5"
-    remarkable "^2.0.1"
-    serialize-javascript "^6.0.2"
-    tiny-lru "^11.2.5"
-    zustand "^5.0.3"
-
-"@nyaruka/temba-components@0.129.2":
-  version "0.129.2"
-  resolved "https://registry.yarnpkg.com/@nyaruka/temba-components/-/temba-components-0.129.2.tgz#400fda01ca4c3c27fd1634f85589c6f9e5a3b6a5"
-  integrity sha512-E0H2I14YhLs/ZQFys0rFHovyDJt5hOwXPH0B2dcy7lT5D86ddmO6t0R45dwBLSMlBHizx2wC4JEZTBwgcHBExA==
+"@nyaruka/temba-components@0.130.1":
+  version "0.130.1"
+  resolved "https://registry.yarnpkg.com/@nyaruka/temba-components/-/temba-components-0.130.1.tgz#cf461b46e7362f7e441f615b08674a9d9328215a"
+  integrity sha512-vI9GBNse359qYcUBq/f2Ry7o6jDyLedwPIMl3t5MMO+2L+uuGkS89/lblLzRmaSyLKlQkEru1FNjmsDLrnCAYQ==
   dependencies:
     "@jsplumb/browser-ui" "^6.2.10"
     "@lit/localize" "^0.12.1"
@@ -141,7 +117,40 @@
     remarkable "^2.0.1"
     serialize-javascript "^6.0.2"
     tiny-lru "^11.2.5"
+    uuid "^11.1.0"
     zustand "^5.0.3"
+
+"@nyaruka/temba-components@0.135.9":
+  version "0.135.9"
+  resolved "https://registry.yarnpkg.com/@nyaruka/temba-components/-/temba-components-0.135.9.tgz#c38da12a6540d6f4c4470b89e41fba5342e2588f"
+  integrity sha512-3OERfIl1afomo7PXtPxhfvEawxPUADpg2UdB8BbXPiY2Vr6FHSF9HK3lwmXy9eP+UubzL8GuAkIbv+vqnyaHUw==
+  dependencies:
+    "@jsplumb/browser-ui" "^6.2.10"
+    "@lit/localize" "^0.12.1"
+    "@open-wc/lit-helpers" "^0.7.0"
+    chart.js "^4.4.8"
+    chartjs-adapter-luxon "^1.3.1"
+    chartjs-plugin-datalabels "^2.2.0"
+    color-hash "^2.0.2"
+    croppie "^2.6.5"
+    geojson "^0.5.0"
+    image-size "^1.1.1"
+    immer "10"
+    leaflet "1.5.1"
+    lit "3.1.2"
+    lit-element "^4.0.4"
+    lit-html "^3.1.2"
+    luxon "3.5"
+    remarkable "^2.0.1"
+    serialize-javascript "^6.0.2"
+    tiny-lru "^11.2.5"
+    uuid "^11.1.0"
+    zustand "^5.0.3"
+
+"@open-wc/lit-helpers@^0.7.0":
+  version "0.7.0"
+  resolved "https://registry.yarnpkg.com/@open-wc/lit-helpers/-/lit-helpers-0.7.0.tgz#69899f7554424a1ed7d2e12b4328f3d194bc1d82"
+  integrity sha512-4NBlx5ve0EvZplCRJbESm0MdMbRCw16alP2y76KAAAwzmFFXXrUj5hFwhw55+sSg5qaRRx6sY+s7usKgnNo3TQ==
 
 "@sindresorhus/merge-streams@^2.1.0":
   version "2.3.0"
@@ -1491,6 +1500,11 @@ util-deprecate@^1.0.2:
   version "1.0.2"
   resolved "https://registry.npmjs.org/util-deprecate/-/util-deprecate-1.0.2.tgz#450d4dc9fa70de732762fbd2d4a28981419a0ccf"
   integrity sha512-EPD5q1uXyFxJpCrLnCc1nHnq3gOa6DZBocAIiI2TaSCA7VCJ1UJDMagCzIkXNsUYfD1daK//LTEQ8xiIbrHtcw==
+
+uuid@^11.1.0:
+  version "11.1.0"
+  resolved "https://registry.yarnpkg.com/uuid/-/uuid-11.1.0.tgz#9549028be1753bb934fc96e2bca09bb4105ae912"
+  integrity sha512-0/A9rDy9P7cJ+8w1c9WD9V//9Wj15Ce2MPz8Ri6032usz+NfePxx5AcN3bN+r6ZL6jEo066/yNYB3tn4pQEx+A==
 
 watch@0.13.0:
   version "0.13.0"

@@ -14,6 +14,7 @@ from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 from django.views.decorators.csrf import csrf_exempt
 
+from temba.channels.models import Channel
 from temba.orgs.models import Org, OrgRole
 from temba.orgs.views import switch_to_org
 from temba.users.models import User
@@ -151,7 +152,9 @@ class OrgCRUDL(SmartCRUDL):
 
         class Form(forms.ModelForm):
             features = forms.MultipleChoiceField(
-                choices=Org.FEATURES_CHOICES, widget=SelectMultipleWidget(), required=False
+                choices=Org.FEATURES_CHOICES + Channel.get_org_features_choices(),
+                widget=SelectMultipleWidget(),
+                required=False,
             )
 
             def __init__(self, org, *args, **kwargs):
@@ -287,6 +290,9 @@ class UserCRUDL(SmartCRUDL):
             else:
                 menu.add_url_post(_("Unverify"), f"{reverse('staff.user_update', args=[obj.id])}?action=unverify")
 
+            if obj.is_mfa_enabled:
+                menu.add_url_post(_("Disable MFA"), f"{reverse('staff.user_update', args=[obj.id])}?action=disable-mfa")
+
             menu.add_modax(
                 _("Delete"), "user-delete", reverse("staff.user_delete", args=[obj.id]), title=_("Delete User")
             )
@@ -294,6 +300,7 @@ class UserCRUDL(SmartCRUDL):
     class Update(StaffOnlyMixin, ModalFormMixin, ComponentFormMixin, ContextMenuMixin, SmartUpdateView):
         ACTION_VERIFY = "verify"
         ACTION_UNVERIFY = "unverify"
+        ACTION_DISABLE_MFA = "disable-mfa"
 
         class Form(forms.ModelForm):
             groups = forms.ModelMultipleChoiceField(
@@ -314,14 +321,20 @@ class UserCRUDL(SmartCRUDL):
         title = "Update User"
 
         def post(self, request, *args, **kwargs):
+            obj = self.get_object()
+            if "email" in request.POST:
+                if obj.email != request.POST["email"]:
+                    obj.emailaddress_set.all().delete()
+
             if "action" in request.POST:
                 action = request.POST["action"]
-                obj = self.get_object()
 
                 if action == self.ACTION_VERIFY:
                     obj.set_verified(True)
                 elif action == self.ACTION_UNVERIFY:
                     obj.set_verified(False)
+                elif action == self.ACTION_DISABLE_MFA:
+                    obj.disable_mfa()
 
                 return HttpResponseRedirect(reverse("staff.user_read", args=[obj.id]))
 
@@ -373,7 +386,6 @@ class UserCRUDL(SmartCRUDL):
 
         def derive_queryset(self, **kwargs):
             verified_email_qs = EmailAddress.objects.filter(verified=True)
-            mfa_enabled_qs = Authenticator.objects.all()
 
             qs = super().derive_queryset(**kwargs).filter(is_active=True)
 
@@ -385,7 +397,7 @@ class UserCRUDL(SmartCRUDL):
 
             return qs.prefetch_related(
                 Prefetch("emailaddress_set", queryset=verified_email_qs, to_attr="email_verified"),
-                Prefetch("authenticator_set", queryset=mfa_enabled_qs, to_attr="mfa_enabled"),
+                Prefetch("authenticator_set", queryset=Authenticator.objects.all()),
             )
 
         def get_context_data(self, **kwargs):
@@ -395,7 +407,7 @@ class UserCRUDL(SmartCRUDL):
             return context
 
         def get_2fa(self, obj):
-            return _("✓") if obj.mfa_enabled else _("")
+            return _("✓") if obj.is_mfa_enabled else _("")
 
         def get_verified(self, obj):
             return _("✓") if obj.email_verified else _("")

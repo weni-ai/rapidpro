@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from django_valkey import get_valkey_connection
 
+from django.apps import apps
 from django.conf import settings
 from django.core.management import BaseCommand, CommandError, call_command
 from django.db import connection
@@ -32,28 +33,12 @@ USER_PASSWORD = "Qwerty123"
 # database dump containing admin boundary records
 LOCATIONS_FILE = "test-data/nigeria.bin"
 
-# database id sequences to be reset to make ids predictable
-RESET_SEQUENCES = (
-    "ai_llm_id_seq",
-    "campaigns_campaign_id_seq",
-    "campaigns_campaignevent_id_seq",
-    "channels_channel_id_seq",
-    "contacts_contact_id_seq",
-    "contacts_contactgroup_id_seq",
-    "contacts_contacturn_id_seq",
-    "flows_flow_id_seq",
-    "flows_flowrevision_id_seq",
-    "msgs_label_id_seq",
-    "templates_template_id_seq",
-    "templates_templatetranslation_id_seq",
-    "triggers_trigger_id_seq",
-)
-
-PG_CONTAINER_NAME = "textit-postgres-1"
 MAILROOM_PORT = 8092
 MAILROOM_DB_NAME = "mailroom_test"
 MAILROOM_DB_USER = "mailroom_test"
-DUMP_FILE = "mailroom_test.dump"
+MAILROOM_DB_PASS = "temba"
+POSTGRES_PASS = "tembatemba"
+DUMP_FILE = "postgres.dump"
 
 
 class Command(BaseCommand):
@@ -72,7 +57,7 @@ class Command(BaseCommand):
         self._sql(f"DROP DATABASE IF EXISTS {db_name}")
         self._sql(f"CREATE DATABASE {db_name}")
         self._sql(f"DROP USER IF EXISTS {db_user}")
-        self._sql(f"CREATE USER {db_user} PASSWORD 'temba'")
+        self._sql(f"CREATE USER {db_user} PASSWORD '{MAILROOM_DB_PASS}'")
         self._sql(f"ALTER ROLE {db_user} WITH SUPERUSER")
 
         # always use test db as our db and override mailroom location
@@ -114,8 +99,9 @@ class Command(BaseCommand):
 
         # dump our file
         result = subprocess.run(
-            ["docker", "exec", "-i", PG_CONTAINER_NAME, "pg_dump", "-U", "postgres", "-Fc", db_name],
+            ["pg_dump", "-h", "postgres", "-U", "postgres", "-Fc", db_name],
             stdout=subprocess.PIPE,
+            env={"PGPASSWORD": POSTGRES_PASS},
             check=True,
         )
 
@@ -134,17 +120,16 @@ class Command(BaseCommand):
             try:
                 subprocess.run(
                     [
-                        "docker",
-                        "exec",
-                        "-i",
-                        PG_CONTAINER_NAME,
                         "pg_restore",
+                        "-h",
+                        "postgres",
                         "-d",
                         MAILROOM_DB_NAME,
                         "-U",
                         MAILROOM_DB_USER,
                     ],
                     input=f.read(),
+                    env={"PGPASSWORD": MAILROOM_DB_PASS},
                     check=True,
                 )
             except subprocess.CalledProcessError:
@@ -159,8 +144,14 @@ class Command(BaseCommand):
 
     def reset_id_sequences(self, start: int):
         with connection.cursor() as cursor:
-            for seq_name in RESET_SEQUENCES:
-                cursor.execute(f"ALTER SEQUENCE {seq_name} RESTART WITH {start}")
+            for mod in apps.get_models():
+                if hasattr(mod, "id") and (
+                    hasattr(mod, "org_id") or hasattr(mod, "flow_id") or hasattr(mod, "campaign_id")
+                ):
+                    seq_name = f"{mod._meta.db_table}_id_seq"
+                    cursor.execute(f"ALTER SEQUENCE {seq_name} RESTART WITH {start}")
+
+            cursor.execute(f"ALTER SEQUENCE contacts_contactgroup_contacts_id_seq RESTART WITH {start}")
 
     def create_org(self, spec, superuser, country):
         self._log(f"\nCreating org {spec['name']}...\n")
@@ -175,10 +166,11 @@ class Command(BaseCommand):
             created_by=superuser,
             modified_by=superuser,
         )
-        org.initialize(sample_flows=False)
 
         # set our sequences to make ids stable across orgs
         self.reset_id_sequences(spec["sequence_start"])
+
+        org.initialize(sample_flows=False)
 
         self.create_channels(spec, org, superuser)
         self.create_fields(spec, org, superuser)
@@ -494,8 +486,9 @@ class Command(BaseCommand):
     def _sql(self, sql: str):
         try:
             result = subprocess.run(
-                ["docker", "exec", "-i", PG_CONTAINER_NAME, "psql", "-U", "postgres"],
+                ["psql", "-h", "postgres", "-U", "postgres"],
                 input=sql.encode(),
+                env={"PGPASSWORD": POSTGRES_PASS},
                 stdout=subprocess.PIPE,
                 check=True,
             )

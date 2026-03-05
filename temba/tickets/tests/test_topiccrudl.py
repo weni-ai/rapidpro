@@ -61,7 +61,7 @@ class TopicCRUDLTest(TembaTest, CRUDLTestMixin):
     def test_update(self):
         topic = Topic.create(self.org, self.admin, "Hot Topic")
 
-        update_url = reverse("tickets.topic_update", args=[topic.id])
+        update_url = reverse("tickets.topic_update", args=[topic.uuid])
 
         self.assertRequestDisallowed(update_url, [None, self.agent, self.admin2])
 
@@ -82,16 +82,14 @@ class TopicCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual(topic.name, "Boring")
 
         # can't edit a system topic
-        self.assertRequestDisallowed(
-            reverse("tickets.topic_update", args=[self.org.default_ticket_topic.id]), [self.admin]
-        )
+        self.assertRequestDisallowed(reverse("tickets.topic_update", args=[self.org.default_topic.uuid]), [self.admin])
 
     def test_delete(self):
         topic1 = Topic.create(self.org, self.admin, "Planes")
         topic2 = Topic.create(self.org, self.admin, "Trains")
         ticket = self.create_ticket(self.create_contact("Bob", urns=["twitter:bobby"]), topic=topic1)
 
-        delete_url = reverse("tickets.topic_delete", args=[topic1.id])
+        delete_url = reverse("tickets.topic_delete", args=[topic1.uuid])
 
         self.assertRequestDisallowed(delete_url, [None, self.agent, self.admin2])
 
@@ -113,4 +111,4 @@ class TopicCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertTrue(topic2.is_active)
 
         # we should have been redirected to the default topic
-        self.assertEqual(f"/ticket/{self.org.default_ticket_topic.uuid}/open/", response.url)
+        self.assertEqual(f"/ticket/{self.org.default_topic.uuid}/open/", response.url)

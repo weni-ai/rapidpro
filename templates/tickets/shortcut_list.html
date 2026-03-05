@@ -18,7 +18,7 @@
   <table class="list lined scrolled">
     <tbody>
       {% for obj in object_list %}
-        <tr onclick="showUpdateShortcutModal({{ obj.id }})" class="hover-linked update">
+        <tr onclick="showUpdateShortcutModal({{ obj.uuid }})" class="hover-linked update">
           <td class="whitespace-nowrap"
               style="min-width: 50px;
                      max-width:150px;
@@ -38,7 +38,7 @@
               <temba-icon name="delete"
                           clickable="true"
                           style="--icon-color:#bbb"
-                          onclick="event.stopPropagation(); showDeleteShortcutModal({{ obj.id }});">
+                          onclick="event.stopPropagation(); showDeleteShortcutModal('{{ obj.uuid }}');">
               </temba-icon>
             {% endif %}
           </td>
@@ -57,15 +57,15 @@
     // refresh our cached shortcuts in case we just created one
     document.querySelector("temba-store").refreshShortcuts();
 
-    function showUpdateShortcutModal(id) {
+    function showUpdateShortcutModal(uuid) {
       var modax = document.querySelector('#update-shortcut');
-      modax.endpoint = `/shortcut/update/${id}/`;
+      modax.endpoint = `/shortcut/update/${uuid}/`;
       modax.open = true;
     }
 
-    function showDeleteShortcutModal(id) {
+    function showDeleteShortcutModal(uuid) {
       var modax = document.querySelector('#delete-shortcut');
-      modax.endpoint = `/shortcut/delete/${id}/`;
+      modax.endpoint = `/shortcut/delete/${uuid}/`;
       modax.open = true;
     }
   </script>

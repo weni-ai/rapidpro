@@ -4,6 +4,7 @@ from django.utils import timezone
 from temba.api.v2.serializers import format_datetime
 from temba.flows.models import FlowLabel, FlowRun
 from temba.tests import matchers
+from temba.utils.uuid import uuid7
 
 from . import APITest
 
@@ -19,7 +20,7 @@ class FlowsEndpointTest(APITest):
         survey = self.get_flow("media_survey")
         color = self.get_flow("color_v13")
         archived = self.get_flow("favorites")
-        archived.archive(self.admin)
+        archived.archive(self.admin, interrupt_sessions=False)
 
         # add a flow label
         reporting = FlowLabel.create(self.org, self.admin, "Reporting")
@@ -28,7 +29,12 @@ class FlowsEndpointTest(APITest):
         # make it look like joe completed the color flow
         joe = self.create_contact("Joe Blow", phone="+250788123123")
         FlowRun.objects.create(
-            org=self.org, flow=color, contact=joe, status=FlowRun.STATUS_COMPLETED, exited_on=timezone.now()
+            org=self.org,
+            flow=color,
+            contact=joe,
+            session_uuid=uuid7(),
+            status=FlowRun.STATUS_COMPLETED,
+            exited_on=timezone.now(),
         )
 
         # flow belong to other org
@@ -52,19 +58,19 @@ class FlowsEndpointTest(APITest):
                             "key": "color",
                             "name": "Color",
                             "categories": ["Red", "Green", "Blue", "Cyan", "Other"],
-                            "node_uuids": [matchers.UUID4String()],
+                            "node_uuids": [matchers.UUIDString(version=4)],
                         },
                         {
                             "key": "beer",
                             "name": "Beer",
                             "categories": ["Mutzig", "Primus", "Turbo King", "Skol", "Other"],
-                            "node_uuids": [matchers.UUID4String()],
+                            "node_uuids": [matchers.UUIDString(version=4)],
                         },
                         {
                             "key": "name",
                             "name": "Name",
                             "categories": ["All Responses"],
-                            "node_uuids": [matchers.UUID4String()],
+                            "node_uuids": [matchers.UUIDString(version=4)],
                         },
                     ],
                     "parent_refs": [],
@@ -84,7 +90,7 @@ class FlowsEndpointTest(APITest):
                             "key": "color",
                             "name": "Color",
                             "categories": ["Orange", "Blue", "Other", "Nothing"],
-                            "node_uuids": [matchers.UUID4String()],
+                            "node_uuids": [matchers.UUIDString(version=4)],
                         }
                     ],
                     "parent_refs": [],
@@ -104,25 +110,25 @@ class FlowsEndpointTest(APITest):
                             "key": "name",
                             "name": "Name",
                             "categories": ["All Responses"],
-                            "node_uuids": [matchers.UUID4String()],
+                            "node_uuids": [matchers.UUIDString(version=4)],
                         },
                         {
                             "key": "photo",
                             "name": "Photo",
                             "categories": ["All Responses"],
-                            "node_uuids": [matchers.UUID4String()],
+                            "node_uuids": [matchers.UUIDString(version=4)],
                         },
                         {
                             "key": "location",
                             "name": "Location",
                             "categories": ["All Responses"],
-                            "node_uuids": [matchers.UUID4String()],
+                            "node_uuids": [matchers.UUIDString(version=4)],
                         },
                         {
                             "key": "video",
                             "name": "Video",
                             "categories": ["All Responses"],
-                            "node_uuids": [matchers.UUID4String()],
+                            "node_uuids": [matchers.UUIDString(version=4)],
                         },
                     ],
                     "parent_refs": [],

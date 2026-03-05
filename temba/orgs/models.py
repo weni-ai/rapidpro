@@ -39,7 +39,7 @@ from temba.users.models import User
 from temba.utils import json, languages, on_transaction_commit
 from temba.utils.dates import datetime_to_str
 from temba.utils.email import EmailSender
-from temba.utils.models import JSONField, TembaUUIDMixin, delete_in_batches
+from temba.utils.models import TembaUUIDMixin, delete_in_batches
 from temba.utils.models.counts import BaseDailyCount, BaseScopedCount
 from temba.utils.text import generate_secret
 from temba.utils.timezones import timezone_to_country_code
@@ -313,8 +313,8 @@ class Org(SmartModel):
     )
 
     features = ArrayField(models.CharField(max_length=32), default=list)
-    limits = JSONField(default=dict)
-    api_rates = JSONField(default=dict)
+    limits = models.JSONField(default=dict)
+    api_rates = models.JSONField(default=dict)
 
     is_anon = models.BooleanField(
         default=False, help_text=_("Whether this organization anonymizes the phone numbers of contacts within it")
@@ -742,11 +742,11 @@ class Org(SmartModel):
         return sum(Contact.get_status_counts(self).values())
 
     @cached_property
-    def default_ticket_topic(self):
+    def default_topic(self):
         return self.topics.get(is_default=True)
 
     @cached_property
-    def default_ticket_team(self):
+    def default_team(self):
         return self.teams.get(is_default=True)
 
     def get_resthooks(self):
@@ -775,15 +775,12 @@ class Org(SmartModel):
 
         # first try the country boundary field
         if self.country:
-            country = pycountry.countries.get(name=self.country.name)
-            if country:
+            if country := pycountry.countries.get(name=self.country.name):
                 return country
 
         # next up try timezone
-        code = timezone_to_country_code(self.timezone)
-        if code:
-            country = pycountry.countries.get(alpha_2=code)
-            if country:
+        if code := timezone_to_country_code(self.timezone):
+            if country := pycountry.countries.get(alpha_2=code):
                 return country
 
         # if that didn't work (not all timezones have a country) look for channels with countries
@@ -795,8 +792,7 @@ class Org(SmartModel):
             .values_list("country", flat=True)
         )
         if len(codes) == 1:
-            country = pycountry.countries.get(alpha_2=codes[0])
-            if country:
+            if country := pycountry.countries.get(alpha_2=codes[0]):
                 return country
 
         return None
@@ -869,7 +865,7 @@ class Org(SmartModel):
             self.remove_user(user)
 
         if role == OrgRole.AGENT and not team:
-            team = self.default_ticket_team
+            team = self.default_team
 
         self._membership_cache[user] = OrgMembership.objects.create(org=self, user=user, role_code=role.code, team=team)
 
@@ -884,8 +880,7 @@ class Org(SmartModel):
     def get_owner(self) -> User:
         # look thru roles in order for the first added user
         for role in OrgRole:
-            user = self.users.filter(orgmembership__role_code=role.code).order_by("id").first()
-            if user:
+            if user := self.users.filter(orgmembership__role_code=role.code).order_by("id").first():
                 return user
 
         # default to user that created this org (converting to our User proxy model)
@@ -1045,15 +1040,6 @@ class Org(SmartModel):
         if sample_flows:
             on_transaction_commit(lambda: self.create_sample_flows(f"https://{self.get_brand_domain()}"))
 
-    def get_delete_date(self, *, archive_type=Archive.TYPE_MSG):
-        """
-        Gets the most recent date for which data hasn't been deleted yet or None if no deletion has been done
-        :return:
-        """
-        archive = self.archives.filter(needs_deletion=False, archive_type=archive_type).order_by("-start_date").first()
-        if archive:
-            return archive.get_end_date()
-
     def release(self, user, *, release_users=True):
         """
         Releases this org, marking it as inactive. Actual deletion of org data won't happen until after 7 days.
@@ -1138,7 +1124,6 @@ class Org(SmartModel):
 
         # delete contact-related data
         delete_in_batches(self.http_logs.all())
-        delete_in_batches(self.ticket_events.all())
         delete_in_batches(self.tickets.all())
         delete_in_batches(self.topics.all())
         delete_in_batches(self.teams.all())
@@ -1147,8 +1132,10 @@ class Org(SmartModel):
         # delete our contacts
         for contact in self.contacts.all():
             # release synchronously and don't deindex as that will happen for the whole org
-            contact.release(user, immediately=True, deindex=False)
+            counts_for_contact = contact.release(user, immediately=True, deindex=False)
             contact.delete()
+
+            counts.update(counts_for_contact)
             counts["contacts"] += 1
 
         # delete any remaining orphaned URNs
@@ -1245,8 +1232,10 @@ class OrgMembership(models.Model):
 
 
 def get_import_upload_path(instance: Any, filename: str):
+    assert instance.org_id and instance.uuid
+
     ext = Path(filename).suffix.lower()
-    return f"orgs/{instance.org_id}/org_imports/{uuid4()}{ext}"
+    return f"orgs/{instance.org_id}/org_imports/{instance.uuid}{ext}"
 
 
 class OrgImport(SmartModel):
@@ -1261,6 +1250,7 @@ class OrgImport(SmartModel):
         (STATUS_FAILED, "Failed"),
     )
 
+    uuid = models.UUIDField(unique=True, default=uuid4)
     org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="imports")
     file = models.FileField(upload_to=get_import_upload_path)
     status = models.CharField(max_length=1, default=STATUS_PENDING, choices=STATUS_CHOICES)
@@ -1576,7 +1566,7 @@ class Export(TembaUUIDMixin, models.Model):
 
         cols = [str(contact.uuid), contact.name, urn_scheme]
         if self.org.is_anon:
-            cols.append(contact.anon_display)
+            cols.append(contact.ref)
         else:
             cols.append(urn_path)
 
