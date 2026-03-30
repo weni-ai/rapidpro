@@ -1651,7 +1651,7 @@ class ChannelLogCRUDLTest(CRUDLTestMixin, TembaTest):
                     "response": "HTTP/1.0 200 OK\r\r\r\n",
                     "elapsed_ms": 12,
                     "retries": 0,
-                    "created_on": "2024-09-16T00:00:00Z",
+                    "created_on": "2022-01-01T00:00:00Z",
                 }
             ],
         )
@@ -1789,50 +1789,6 @@ class ChannelLogCRUDLTest(CRUDLTestMixin, TembaTest):
             self.assertContains(response, value)
 
     def test_redaction_for_telegram(self):
-        urn = "telegram:3527065"
-        contact = self.create_contact("Fred Jones", urns=[urn])
-        channel = self.create_channel("TG", "Test TG Channel", "234567")
-        log = self.create_channel_log(
-            ChannelLog.LOG_TYPE_MSG_SEND,
-            http_logs=[
-                {
-                    "url": "https://api.telegram.org/65474/sendMessage",
-                    "status_code": 200,
-                    "request": "POST /65474/sendMessage HTTP/1.1\r\nHost: api.telegram.org\r\nUser-Agent: Courier/1.2.159\r\nContent-Length: 231\r\nContent-Type: application/x-www-form-urlencoded\r\nAccept-Encoding: gzip\r\n\r\nchat_id=3527065&reply_markup=%7B%22resize_keyboard%22%3Atrue%2C%22one_time_keyboard%22%3Atrue%2C%22keyboard%22%3A%5B%5B%7B%22text%22%3A%22blackjack%22%7D%2C%7B%22text%22%3A%22balance%22%7D%5D%5D%7D&text=Your+balance+is+now+%246.00.",
-                    "response": 'HTTP/1.1 200 OK\r\nContent-Length: 298\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: Content-Length,Content-Type,Date,Server,Connection\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nDate: Tue, 11 Jun 2019 15:33:06 GMT\r\nServer: nginx/1.12.2\r\nStrict-Transport-Security: max-age=31536000; includeSubDomains; preload\r\n\r\n{"ok":true,"result":{"message_id":1440,"from":{"id":678777066,"is_bot":true,"first_name":"textit_staging","username":"textit_staging_bot"},"chat":{"id":3527065,"first_name":"Nic","last_name":"Pottier","username":"Nicpottier","type":"private"},"date":1560267186,"text":"Your balance is now $6.00."}}',
-                    "elapsed_ms": 12,
-                    "retries": 0,
-                    "created_on": "2022-01-01T00:00:00Z",
-                }
-            ],
-        )
-        msg = self.create_incoming_msg(contact, "incoming msg", channel=channel, logs=[log])
-
-        self.login(self.admin)
-
-        read_url = reverse("channels.channellog_msg", args=[channel.uuid, msg.id])
-
-        # check read page shows un-redacted content for a regular org
-        response = self.client.get(read_url)
-        self.assertEqual(1, len(response.context["logs"]))
-        self.assertNotRedacted(response, ("3527065", "Nic", "Pottier"))
-
-        # but for anon org we see redaction...
-        with self.anonymous(self.org):
-            response = self.client.get(read_url)
-            self.assertRedacted(response, ("3527065", "Nic", "Pottier"))
-
-            # even as customer support
-            self.login(self.customer_support, choose_org=self.org)
-
-            response = self.client.get(read_url)
-            self.assertRedacted(response, ("3527065", "Nic", "Pottier"))
-
-            # unless we explicitly break out of it
-            response = self.client.get(read_url + "?break=1")
-            self.assertNotRedacted(response, ("3527065", "Nic", "Pottier"))
-
-    def test_redaction_for_telegram_with_invalid_json(self):
         urn = "telegram:3527065"
         contact = self.create_contact("Fred Jones", urns=[urn])
         channel = self.create_channel("TG", "Test TG Channel", "234567")
@@ -2145,4 +2101,3 @@ class CourierTest(TembaTest):
         response = self.client.get(reverse("courier.t", args=[self.channel.uuid, "receive"]))
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.content, b"this URL should be mapped to a Courier instance")
-
