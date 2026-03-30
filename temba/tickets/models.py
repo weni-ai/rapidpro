@@ -21,7 +21,7 @@ from temba.utils.dates import date_range
 from temba.utils.db.functions import SplitPart
 from temba.utils.export import MultiSheetExporter
 from temba.utils.models import TembaModel
-from temba.utils.uuid import is_uuid, uuid4
+from temba.utils.uuid import is_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +166,7 @@ class Team(TembaModel):
         assert not (self.is_system and self.org.is_active), "can't release system teams"
 
         # re-assign agents in this team to the default team
-        OrgMembership.objects.filter(org=self.org, team=self).update(team=self.org.default_ticket_team)
+        OrgMembership.objects.filter(org=self.org, team=self).update(team=self.org.default_team)
 
         self.name = self._deleted_name()
         self.is_active = False
@@ -188,7 +188,7 @@ class Ticket(models.Model):
 
     MAX_NOTE_LENGTH = 10_000
 
-    uuid = models.UUIDField(unique=True, default=uuid4)
+    uuid = models.UUIDField(unique=True)
     org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="tickets", db_index=False)  # indexed below
     contact = models.ForeignKey(Contact, on_delete=models.PROTECT, related_name="tickets", db_index=False)
     topic = models.ForeignKey(Topic, on_delete=models.PROTECT, related_name="tickets")
@@ -213,35 +213,32 @@ class Ticket(models.Model):
     # when this ticket last had activity which includes messages being sent and received, and is used for ordering
     last_activity_on = models.DateTimeField(default=timezone.now)
 
-    def assign(self, user: User, *, assignee: User):
-        self.bulk_assign(self.org, user, [self], assignee=assignee)
-
     def add_note(self, user: User, *, note: str):
         self.bulk_add_note(self.org, user, [self], note=note)
 
     @classmethod
-    def bulk_assign(cls, org, user: User, tickets: list, assignee: User):
-        return cls._bulk_response(mailroom.get_client().ticket_assign(org, user, tickets, assignee), tickets)
+    def bulk_assign(cls, org, user: User, tickets: list, assignee: User) -> list[str]:
+        return cls._bulk_response(mailroom.get_client().ticket_change_assignee(org, user, tickets, assignee))
 
     @classmethod
-    def bulk_add_note(cls, org, user: User, tickets: list, note: str):
-        return cls._bulk_response(mailroom.get_client().ticket_add_note(org, user, tickets, note), tickets)
+    def bulk_add_note(cls, org, user: User, tickets: list, note: str) -> list[str]:
+        return cls._bulk_response(mailroom.get_client().ticket_add_note(org, user, tickets, note))
 
     @classmethod
-    def bulk_change_topic(cls, org, user: User, tickets: list, topic: Topic):
-        return cls._bulk_response(mailroom.get_client().ticket_change_topic(org, user, tickets, topic), tickets)
+    def bulk_change_topic(cls, org, user: User, tickets: list, topic: Topic) -> list[str]:
+        return cls._bulk_response(mailroom.get_client().ticket_change_topic(org, user, tickets, topic))
 
     @classmethod
-    def bulk_close(cls, org, user, tickets):
-        return cls._bulk_response(mailroom.get_client().ticket_close(org, user, tickets), tickets)
+    def bulk_close(cls, org, user, tickets) -> list[str]:
+        return cls._bulk_response(mailroom.get_client().ticket_close(org, user, tickets))
 
     @classmethod
-    def bulk_reopen(cls, org, user, tickets):
-        return cls._bulk_response(mailroom.get_client().ticket_reopen(org, user, tickets), tickets)
+    def bulk_reopen(cls, org, user, tickets) -> list[str]:
+        return cls._bulk_response(mailroom.get_client().ticket_reopen(org, user, tickets))
 
     @classmethod
-    def _bulk_response(self, resp: dict, tickets: list) -> list:
-        return [t for t in tickets if t.id in resp["changed_ids"]]
+    def _bulk_response(cls, resp: dict) -> list[str]:
+        return resp.get("changed_uuids", [])
 
     @classmethod
     def get_assignee_count(cls, org, user, topics, status: str) -> int:
@@ -274,11 +271,6 @@ class Ticket(models.Model):
         by_topic_id = {c[0]: c[1] for c in counts}
         return {t: by_topic_id.get(t.id, 0) for t in topics}
 
-    def delete(self):
-        self.events.all().delete()
-
-        super().delete()
-
     def __str__(self):
         return f"Ticket[uuid={self.uuid}, topic={self.topic.name}]"
 
@@ -291,53 +283,11 @@ class Ticket(models.Model):
                 name="tickets_org_assignee_status",
                 fields=["org", "assignee", "status", "-last_activity_on", "-id"],
             ),
-            # used by message handling to find open tickets for contact
-            models.Index(name="tickets_contact_open", fields=["contact", "-opened_on"], condition=Q(status="O")),
+            # used by engine to load a contact with its open tickets
+            models.Index(name="tickets_contact_open", fields=["contact", "opened_on"], condition=Q(status="O")),
             # used by API tickets endpoint hence the ordering, and general fetching by org or contact
             models.Index(name="tickets_api_by_org", fields=["org", "-modified_on", "-id"]),
             models.Index(name="tickets_api_by_contact", fields=["contact", "-modified_on", "-id"]),
-        ]
-
-
-class TicketEvent(models.Model):
-    """
-    Models the history of a ticket.
-    """
-
-    TYPE_OPENED = "O"
-    TYPE_ASSIGNED = "A"
-    TYPE_NOTE_ADDED = "N"
-    TYPE_TOPIC_CHANGED = "T"
-    TYPE_CLOSED = "C"
-    TYPE_REOPENED = "R"
-    TYPE_CHOICES = (
-        (TYPE_OPENED, "Opened"),
-        (TYPE_ASSIGNED, "Assigned"),
-        (TYPE_NOTE_ADDED, "Note Added"),
-        (TYPE_TOPIC_CHANGED, "Topic Changed"),
-        (TYPE_CLOSED, "Closed"),
-        (TYPE_REOPENED, "Reopened"),
-    )
-
-    org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="ticket_events")
-    ticket = models.ForeignKey(Ticket, on_delete=models.PROTECT, related_name="events")
-    contact = models.ForeignKey(Contact, on_delete=models.PROTECT, related_name="ticket_events")
-    event_type = models.CharField(max_length=1, choices=TYPE_CHOICES)
-    note = models.TextField(null=True, max_length=Ticket.MAX_NOTE_LENGTH)
-    topic = models.ForeignKey(Topic, on_delete=models.PROTECT, null=True, related_name="ticket_events")
-    assignee = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, related_name="ticket_assignee_events"
-    )
-
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, related_name="ticket_events"
-    )
-    created_on = models.DateTimeField(default=timezone.now)
-
-    class Meta:
-        indexes = [
-            # used for contact history
-            models.Index(name="ticketevents_contact_created", fields=["contact", "created_on"])
         ]
 
 
@@ -346,6 +296,7 @@ class TicketFolder(metaclass=ABCMeta):
     name = None
     icon = None
     verbose_name = None
+    restrict_topics = None
 
     def get_icon(self, count) -> str:
         return self.icon
@@ -353,7 +304,7 @@ class TicketFolder(metaclass=ABCMeta):
     def get_queryset(self, org, user, *, ordered: bool):
         qs = org.tickets.all()
 
-        if not user.is_staff:
+        if self.restrict_topics and not user.is_staff:
             membership = org.get_membership(user)
             if membership.team and not membership.team.all_topics:
                 qs = qs.filter(topic__in=list(membership.team.topics.all()))
@@ -385,6 +336,7 @@ class MineFolder(TicketFolder):
     slug = "mine"
     name = _("My Tickets")
     icon = "tickets_mine"
+    restrict_topics = False  # users can see tickets assigned to them even if they don't have access to the topic
 
     def get_icon(self, count) -> str:
         return self.icon if count else "tickets_mine_done"
@@ -402,6 +354,7 @@ class UnassignedFolder(TicketFolder):
     name = _("Unassigned")
     verbose_name = _("Unassigned Tickets")
     icon = "tickets_unassigned"
+    restrict_topics = True
 
     def get_queryset(self, org, user, *, ordered: bool):
         return super().get_queryset(org, user, ordered=ordered).filter(assignee=None)
@@ -416,6 +369,7 @@ class AllFolder(TicketFolder):
     name = _("All")
     verbose_name = _("All Tickets")
     icon = "tickets_all"
+    restrict_topics = True
 
 
 FOLDERS = {f.slug: f() for f in TicketFolder.__subclasses__()}
@@ -430,6 +384,7 @@ class TopicFolder(TicketFolder):
         self.slug = topic.uuid
         self.name = topic.name
         self.topic = topic
+        self.restrict_topics = False  # already filtered by a single topic
 
     def get_queryset(self, org, user, *, ordered: bool):
         return super().get_queryset(org, user, ordered=ordered).filter(topic=self.topic)

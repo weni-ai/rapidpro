@@ -18,6 +18,7 @@ from temba.flows.models import Flow, FlowRun, FlowStart
 from temba.globals.models import Global
 from temba.locations.models import AdminBoundary
 from temba.mailroom import modifiers
+from temba.mailroom.client.types import Exclusions
 from temba.msgs.models import Broadcast, Label, Media, Msg, OptIn, QuickReply
 from temba.orgs.models import Org, OrgRole
 from temba.tickets.models import Ticket, Topic
@@ -201,7 +202,7 @@ class BroadcastReadSerializer(ReadSerializer):
     class Meta:
         model = Broadcast
         fields = (
-            "id",
+            "uuid",
             "status",
             "progress",
             "urns",
@@ -212,6 +213,8 @@ class BroadcastReadSerializer(ReadSerializer):
             "quick_replies",
             "base_language",
             "created_on",
+            # deprecated fields
+            "id",
         )
 
 
@@ -574,15 +577,21 @@ class ContactReadSerializer(ReadSerializer):
     modified_on = serializers.DateTimeField(default_timezone=tzone.utc)
     last_seen_on = serializers.DateTimeField(default_timezone=tzone.utc)
 
-    blocked = serializers.SerializerMethodField()  # deprecated
-    stopped = serializers.SerializerMethodField()  # deprecated
+    # deprecated fields
+    anon_display = serializers.SerializerMethodField()
+    blocked = serializers.SerializerMethodField()
+    stopped = serializers.SerializerMethodField()
 
     def __init__(self, *args, context, **kwargs):
         super().__init__(*args, context=context, **kwargs)
 
-        # remove anon_display field if org isn't anon
+        # remove anon org only fields if org isn't anon
         if not context["org"].is_anon:
+            self.fields.pop("ref")
             self.fields.pop("anon_display")
+
+    def get_anon_display(self, obj):
+        return obj.ref
 
     def get_name(self, obj):
         return obj.name if obj.is_active else None
@@ -640,7 +649,8 @@ class ContactReadSerializer(ReadSerializer):
         fields = (
             "uuid",
             "name",
-            "anon_display",
+            "ref",
+            "anon_display",  # deprecated
             "status",
             "language",
             "urns",
@@ -911,6 +921,7 @@ class ContactGroupReadSerializer(ReadSerializer):
         ContactGroup.STATUS_INITIALIZING: "initializing",
         ContactGroup.STATUS_EVALUATING: "evaluating",
         ContactGroup.STATUS_READY: "ready",
+        ContactGroup.STATUS_INVALID: "invalid",
     }
 
     def get_status(self, obj):
@@ -998,7 +1009,7 @@ class ContactBulkActionSerializer(WriteSerializer):
         elif action == self.REMOVE:
             Contact.bulk_change_group(user, contacts, group, add=False)
         elif action == self.INTERRUPT:
-            mailroom.queue_interrupt(self.context["org"], contacts=contacts)
+            Contact.bulk_interrupt(user, contacts)
         elif action == self.ARCHIVE_MESSAGES or action == self.ARCHIVE:
             Msg.archive_all_for_contacts(contacts)
         elif action == self.BLOCK:
@@ -1114,7 +1125,6 @@ class FlowRunReadSerializer(ReadSerializer):
     class Meta:
         model = FlowRun
         fields = (
-            "id",
             "uuid",
             "flow",
             "contact",
@@ -1126,6 +1136,8 @@ class FlowRunReadSerializer(ReadSerializer):
             "modified_on",
             "exited_on",
             "exit_type",
+            # deprecated fields
+            "id",
         )
 
 
@@ -1226,10 +1238,10 @@ class FlowStartWriteSerializer(WriteSerializer):
         urns = self.validated_data.get("urns", [])
         contacts = self.validated_data.get("contacts", [])
         groups = self.validated_data.get("groups", [])
-        exclusions = {
-            FlowStart.EXCLUSION_STARTED_PREVIOUSLY: not self.validated_data.get("restart_participants", True),
-            FlowStart.EXCLUSION_IN_A_FLOW: self.validated_data.get("exclude_active", False),
-        }
+        exclude = Exclusions(
+            started_previously=not self.validated_data.get("restart_participants", True),
+            in_a_flow=self.validated_data.get("exclude_active", False),
+        )
         params = self.validated_data.get("params") or self.validated_data.get("extra")
 
         # ok, let's go create our flow start, the actual starting will happen in our view
@@ -1240,7 +1252,7 @@ class FlowStartWriteSerializer(WriteSerializer):
             contacts=contacts,
             groups=groups,
             urns=urns,
-            exclusions=exclusions,
+            exclude=exclude,
             params=params,
         )
 
@@ -1418,8 +1430,7 @@ class MsgReadSerializer(ReadSerializer):
     class Meta:
         model = Msg
         fields = (
-            "id",
-            "broadcast",
+            "uuid",
             "contact",
             "urn",
             "channel",
@@ -1436,7 +1447,10 @@ class MsgReadSerializer(ReadSerializer):
             "created_on",
             "sent_on",
             "modified_on",
+            # deprecated fields
             "media",
+            "id",
+            "broadcast",
         )
 
 
@@ -1447,7 +1461,7 @@ class MsgWriteSerializer(WriteSerializer):
     quick_replies = serializers.ListField(
         required=False, child=fields.QuickReplySerializer(), max_length=Msg.MAX_QUICK_REPLIES
     )
-    ticket = fields.TicketField(required=False)
+    ticket = fields.TicketField(required=False)  # deprecated and undocumented
 
     def validate(self, data):
         if not (data.get("text") or data.get("attachments")):
@@ -1467,18 +1481,24 @@ class MsgWriteSerializer(WriteSerializer):
         resp = mailroom.get_client().msg_send(org, user, contact, text or "", attachments, quick_replies, ticket)
 
         # to avoid fetching the new msg from the database, construct transient instances to pass to the serializer
-        channel = Channel(uuid=resp["channel"]["uuid"], name=resp["channel"]["name"]) if resp.get("channel") else None
+        channel = None
+        if channel_ref := resp["event"]["msg"].get("channel"):
+            channel = Channel(uuid=channel_ref["uuid"], name=channel_ref["name"])
+
         contact = Contact(uuid=resp["contact"]["uuid"], name=resp["contact"]["name"])
 
-        if resp.get("urn"):
-            urn_scheme, urn_path, _, urn_display = URN.to_parts(resp["urn"])
+        if urn := resp["event"]["msg"].get("urn"):
+            urn_scheme, urn_path, _, urn_display = URN.to_parts(urn)
             contact_urn = ContactURN(scheme=urn_scheme, path=urn_path, display=urn_display)
         else:
             contact_urn = None
 
-        msg_quick_replies = [str(QuickReply(qr["text"], qr.get("extra"))) for qr in resp.get("quick_replies")]
+        msg_quick_replies = [
+            str(QuickReply(qr["text"], qr.get("extra"))) for qr in resp["event"]["msg"].get("quick_replies", [])
+        ]
 
         return Msg(
+            uuid=resp["event"]["uuid"],
             id=resp["id"],
             org=org,
             contact=contact,
@@ -1488,8 +1508,8 @@ class MsgWriteSerializer(WriteSerializer):
             msg_type=Msg.TYPE_TEXT,
             status=resp["status"],
             visibility=Msg.VISIBILITY_VISIBLE,
-            text=resp.get("text"),
-            attachments=resp.get("attachments"),
+            text=resp["event"]["msg"].get("text"),
+            attachments=resp["event"]["msg"].get("attachments", []),
             quick_replies=msg_quick_replies,
             created_on=iso8601.parse_date(resp["created_on"]),
             modified_on=iso8601.parse_date(resp["modified_on"]),
@@ -1564,7 +1584,7 @@ class MsgBulkActionSerializer(WriteSerializer):
             if label:
                 label.toggle_label(messages, add=False)
         elif action == self.DELETE:
-            Msg.bulk_soft_delete(messages)
+            Msg.bulk_soft_delete(self.context["org"], self.context["user"], messages)
         else:
             for msg in messages:
                 if action == self.ARCHIVE and msg.visibility == Msg.VISIBILITY_VISIBLE:
@@ -1740,17 +1760,17 @@ class TicketBulkActionSerializer(WriteSerializer):
         topic = self.validated_data.get("topic")
 
         if action == self.ACTION_ASSIGN:
-            changed = Ticket.bulk_assign(org, user, tickets, assignee=assignee)
+            changed_uuids = Ticket.bulk_assign(org, user, tickets, assignee=assignee)
         elif action == self.ACTION_ADD_NOTE:
-            changed = Ticket.bulk_add_note(org, user, tickets, note=note)
+            changed_uuids = Ticket.bulk_add_note(org, user, tickets, note=note)
         elif action == self.ACTION_CHANGE_TOPIC:
-            changed = Ticket.bulk_change_topic(org, user, tickets, topic=topic)
+            changed_uuids = Ticket.bulk_change_topic(org, user, tickets, topic=topic)
         elif action == self.ACTION_CLOSE:
-            changed = Ticket.bulk_close(org, user, tickets)
+            changed_uuids = Ticket.bulk_close(org, user, tickets)
         elif action == self.ACTION_REOPEN:
-            changed = Ticket.bulk_reopen(org, user, tickets)
+            changed_uuids = Ticket.bulk_reopen(org, user, tickets)
 
-        failed = [t.uuid for t in tickets if t not in changed]
+        failed = [str(t.uuid) for t in tickets if str(t.uuid) not in changed_uuids]
         return BulkActionFailure(failed) if failed else None
 
 

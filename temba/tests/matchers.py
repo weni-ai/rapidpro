@@ -4,9 +4,10 @@ import regex
 
 from temba.tests.dates import FULL_ISO8601_REGEX, ISO_YYYY_MM_DD
 
-UUID4_REGEX = regex.compile(
-    r"[a-f0-9]{8}-?[a-f0-9]{4}-?4[a-f0-9]{3}-?[89ab][a-f0-9]{3}-?[a-f0-9]{12}", regex.IGNORECASE
-)
+UUID_REGEX = {
+    4: regex.compile(r"[a-f0-9]{8}-?[a-f0-9]{4}-?4[a-f0-9]{3}-?[89ab][a-f0-9]{3}-?[a-f0-9]{12}", regex.IGNORECASE),
+    7: regex.compile(r"[a-f0-9]{8}-?[a-f0-9]{4}-?7[a-f0-9]{3}-?[89ab][a-f0-9]{3}-?[a-f0-9]{12}", regex.IGNORECASE),
+}
 
 
 class MatcherMixin:
@@ -30,6 +31,9 @@ class String(MatcherMixin, str):
             return False
         return True
 
+    def __repr__(self):
+        return f"<Any:String:pattern={self.pattern}>" if self.pattern is not None else super().__repr__()
+
 
 class ISODate(String):
     """
@@ -49,13 +53,39 @@ class ISODatetime(String):
         return super().__new__(cls, pattern=FULL_ISO8601_REGEX)
 
 
-class UUID4String(String):
+class UUIDString(String):
     """
     Matches any UUID v4 string
     """
 
-    def __new__(cls):
-        return super().__new__(cls, pattern=UUID4_REGEX)
+    def __new__(cls, version: int):
+        v = super().__new__(cls, pattern=UUID_REGEX[version])
+        v.version = version
+        return v
+
+    def __repr__(self):
+        return f"<Any:UUIDString:version={self.version}>"
+
+
+class List(MatcherMixin, list):
+    """
+    Matches any list or any list of a given length
+    """
+
+    def __new__(cls, length=None):
+        v = list.__new__(cls, [])
+        v.length = length
+        return v
+
+    def __eq__(self, other):
+        if not isinstance(other, list):
+            return False
+        if self.length and not len(other) == self.length:
+            return False
+        return True
+
+    def __repr__(self):
+        return f"<Any:List:length={self.length}>" if self.length is not None else super().__repr__()
 
 
 class Dict(MatcherMixin, dict):

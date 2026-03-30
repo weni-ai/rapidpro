@@ -19,9 +19,10 @@ from temba.mailroom import modifiers
 from temba.msgs.models import Msg, MsgFolder
 from temba.orgs.models import Org
 from temba.schedules.models import Schedule
-from temba.tests import MockJsonResponse, TembaTest, mock_mailroom
+from temba.tests import MockJsonResponse, TembaTest, cleanup, mock_mailroom
 from temba.tests.engine import MockSessionWriter
 from temba.tickets.models import Ticket
+from temba.utils import dynamo
 
 
 class ContactTest(TembaTest):
@@ -46,6 +47,14 @@ class ContactTest(TembaTest):
 
         # create contact in other org
         self.other_org_contact = self.create_contact(name="Fred", phone="+250768111222", org=self.org2)
+
+    def test_ref(self):
+        self.assertEqual(6, len(self.joe.ref))  # test contact ids change
+        self.assertEqual("KZANEV", Contact(id=1000).ref)
+        self.assertEqual("KZANEV", Contact(id=1000).ref)
+        self.assertEqual("F6UQQW", Contact(id=2000).ref)
+        self.assertEqual("NVQ26R", Contact(id=1_073_741_823).ref)
+        self.assertEqual("GQENS3N", Contact(id=1_073_741_824).ref)
 
     def test_contact_notes(self):
         note_text = "This is note"
@@ -82,7 +91,7 @@ class ContactTest(TembaTest):
     def test_open_ticket(self, mock_post):
         mock_post.return_value = MockJsonResponse(200, {"modified": {self.joe.id: {"contact": {}, "events": []}}})
 
-        self.joe.open_ticket(self.admin, topic=self.org.default_ticket_topic, assignee=self.agent, note="Looks sus")
+        self.joe.open_ticket(self.admin, topic=self.org.default_topic, assignee=self.agent, note="Looks sus")
 
         mock_post.assert_called_once_with(
             "http://mailroom:8090/mr/contact/modify",
@@ -94,7 +103,7 @@ class ContactTest(TembaTest):
                 "modifiers": [
                     {
                         "type": "ticket",
-                        "topic": {"uuid": str(self.org.default_ticket_topic.uuid), "name": "General"},
+                        "topic": {"uuid": str(self.org.default_topic.uuid), "name": "General"},
                         "assignee": {"uuid": str(self.agent.uuid), "name": "Agnes"},
                         "note": "Looks sus",
                     }
@@ -105,13 +114,13 @@ class ContactTest(TembaTest):
     @mock_mailroom
     def test_interrupt(self, mr_mocks):
         # noop when contact not in a flow
-        self.assertFalse(self.joe.interrupt(self.admin))
+        self.joe.interrupt(self.admin)
 
-        flow = self.create_flow("Test")
-        MockSessionWriter(self.joe, flow).wait().save()
+        self.joe.current_flow = self.create_flow("Test Flow")
 
-        self.assertTrue(self.joe.interrupt(self.admin))
+        self.joe.interrupt(self.admin)
 
+    @cleanup(dynamodb=True)
     @mock_mailroom
     def test_release(self, mr_mocks):
         # create a contact with a message
@@ -195,6 +204,32 @@ class ContactTest(TembaTest):
         self.create_ticket(contact)
         self.create_ticket(contact, closed_on=timezone.now())
 
+        # create some chat events and one for another contact
+        dynamo.HISTORY.put_item(
+            Item={
+                "PK": f"con#{contact.uuid}",
+                "SK": "evt#01989b6c-ebd3-7c56-8e9d-3d94dad2eaed",
+                "OrgID": Decimal(1),
+                "Data": {"type": "test"},
+            }
+        )
+        dynamo.HISTORY.put_item(
+            Item={
+                "PK": f"con#{contact.uuid}",
+                "SK": "evt#01989b6d-c3e1-7148-94db-b0de10f402e2",
+                "OrgID": Decimal(1),
+                "Data": {"type": "test"},
+            }
+        )
+        dynamo.HISTORY.put_item(
+            Item={
+                "PK": "con#485e066b-757d-4257-ace9-226f0b131839",
+                "SK": "evt#01989b6d-e253-7e68-b56c-f95b02a2a5bd",
+                "OrgID": Decimal(1),
+                "Data": {"type": "test"},
+            }
+        )
+
         self.assertEqual(1, group.contacts.all().count())
         self.assertEqual(1, contact.calls.all().count())
         self.assertEqual(2, contact.addressed_broadcasts.all().count())
@@ -228,7 +263,8 @@ class ContactTest(TembaTest):
         self.assertEqual({contact, contact2}, set(bcast2.contacts.all()))
 
         # now lets go for a full release
-        contact.release(self.admin)
+        counts = contact.release(self.admin, immediately=True)
+        self.assertEqual({"events": 2, "messages": 7, "runs": 2}, dict(counts))
 
         contact.refresh_from_db()
         self.assertEqual(0, group.contacts.all().count())
@@ -454,7 +490,7 @@ class ContactTest(TembaTest):
         with self.anonymous(self.org):
             self.assertEqual("Joe Blow", self.joe.get_display(org=self.org, formatted=False))
             self.assertEqual("Joe Blow", self.joe.get_display())
-            self.assertEqual("%010d" % self.voldemort.pk, self.voldemort.get_display())
+            self.assertEqual(self.voldemort.ref, self.voldemort.get_display())
             self.assertEqual("Billy Nophone", self.billy.get_display())
 
             self.assertEqual(ContactURN.ANON_MASK, self.joe.get_urn_display(org=self.org, formatted=False))
@@ -464,7 +500,7 @@ class ContactTest(TembaTest):
             self.assertEqual("", self.billy.get_urn_display(scheme=URN.TEL_SCHEME))
 
             self.assertEqual("Joe Blow", str(self.joe))
-            self.assertEqual("%010d" % self.voldemort.pk, str(self.voldemort))
+            self.assertEqual(self.voldemort.ref, str(self.voldemort))
             self.assertEqual("Billy Nophone", str(self.billy))
 
     def test_bulk_urn_cache_initialize(self):
@@ -500,6 +536,16 @@ class ContactTest(TembaTest):
             },
             Contact.bulk_inspect([self.joe, self.billy]),
         )
+
+    @mock_mailroom
+    def test_bulk_interrupt(self, mr_mocks):
+        Contact.bulk_interrupt(self.admin, [])
+
+        self.assertEqual([], mr_mocks.calls["contact_interrupt"])
+
+        Contact.bulk_interrupt(self.admin, [self.joe, self.billy])
+
+        self.assertEqual([call(self.org, self.admin, [self.joe, self.billy])], mr_mocks.calls["contact_interrupt"])
 
     @mock_mailroom
     def test_omnibox(self, mr_mocks):
@@ -734,7 +780,7 @@ class ContactTest(TembaTest):
         self.assertEqual(Contact.STATUS_ACTIVE, self.joe.status)
 
         for status, _ in Contact.STATUS_CHOICES:
-            self.client.post(reverse("contacts.contact_update", args=[self.joe.id]), {"status": status})
+            self.client.post(reverse("contacts.contact_update", args=[self.joe.uuid]), {"status": status})
 
             self.joe.refresh_from_db()
             self.assertEqual(status, self.joe.status)

@@ -459,7 +459,6 @@ class ChannelCRUDL(SmartCRUDL):
     )
 
     class Read(SpaMixin, ContextMenuMixin, BaseReadView):
-        slug_url_kwarg = "uuid"
         exclude = ("id", "is_active", "created_by", "modified_by", "modified_on")
 
         def derive_menu_path(self):
@@ -561,7 +560,6 @@ class ChannelCRUDL(SmartCRUDL):
 
     class Chart(ChartViewMixin, BaseReadView):
         permission = "channels.channel_read"
-        slug_url_kwarg = "uuid"
         default_chart_period = (-timedelta(days=30), timedelta(days=1))
 
         def get_chart_data(self, since, until) -> tuple[list, list]:
@@ -737,6 +735,8 @@ class ChannelCRUDL(SmartCRUDL):
             types_by_category = defaultdict(list)
             recommended_channels = []
             for ch_type in list(Channel.get_types()):
+                if ch_type.claim_view is None:
+                    continue
                 region_aware_visible, region_ignore_visible = ch_type.is_available_to(org, user)
 
                 if ch_type.is_recommended_to(org, user):
@@ -769,6 +769,8 @@ class ChannelCRUDL(SmartCRUDL):
             types_by_category = defaultdict(list)
             recommended_channels = []
             for ch_type in list(Channel.get_types()):
+                if ch_type.claim_view is None:
+                    continue
                 _, region_ignore_visible = ch_type.is_available_to(org, user)
                 if ch_type.is_recommended_to(org, user):
                     recommended_channels.append(ch_type)
@@ -778,8 +780,6 @@ class ChannelCRUDL(SmartCRUDL):
             return recommended_channels, types_by_category, False
 
     class Configuration(SpaMixin, BaseReadView):
-        slug_url_kwarg = "uuid"
-
         def pre_process(self, request, *args, **kwargs):
             channel = self.get_object()
             if not channel.type.config_ui:
@@ -858,7 +858,7 @@ class ChannelCRUDL(SmartCRUDL):
 
         @classmethod
         def derive_url_pattern(cls, path, action):
-            return r"^%s/logs/(?P<uuid>[0-9a-f-]{36})/(?P<reftype>log|msg|call)/(?P<refid>[^/]{1,36})/$" % path
+            return r"^%s/logs/(?P<uuid>[0-9a-f-]{36})/(?P<reftype>log|msg|call)/(?P<refid>[0-9a-f-]{36})/$" % path
 
         def derive_menu_path(self):
             return f"/settings/channels/{self.kwargs['uuid']}"
@@ -866,9 +866,9 @@ class ChannelCRUDL(SmartCRUDL):
         @cached_property
         def owner(self) -> Msg | Call | None:
             if self.kwargs["reftype"] == "msg":
-                return get_object_or_404(Msg, id=int(self.kwargs["refid"]), org=self.request.org)
+                return get_object_or_404(Msg, uuid=UUID(self.kwargs["refid"]), org=self.request.org)
             elif self.kwargs["reftype"] == "call":
-                return get_object_or_404(Call, id=int(self.kwargs["refid"]), org=self.request.org)
+                return get_object_or_404(Call, uuid=UUID(self.kwargs["refid"]), org=self.request.org)
             return None
 
         def get_logs_and_urn(self) -> tuple:

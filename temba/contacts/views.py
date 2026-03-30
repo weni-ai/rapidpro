@@ -1,10 +1,9 @@
 import logging
 from collections import OrderedDict
-from datetime import timedelta
 from urllib.parse import quote_plus
+from uuid import UUID
 
-import iso8601
-from smartmin.views import SmartCreateView, SmartCRUDL, SmartListView, SmartReadView, SmartUpdateView, SmartView
+from smartmin.views import SmartCreateView, SmartCRUDL, SmartListView, SmartUpdateView, SmartView
 
 from django import forms
 from django.conf import settings
@@ -22,11 +21,11 @@ from django.utils.translation import gettext_lazy as _
 from django.views import View
 
 from temba import mailroom
-from temba.archives.models import Archive
 from temba.channels.models import Channel
-from temba.mailroom.events import Event
+from temba.orgs.models import Org
 from temba.orgs.views.base import (
     BaseCreateModal,
+    BaseDeleteModal,
     BaseDependencyDeleteModal,
     BaseExportModal,
     BaseListView,
@@ -39,26 +38,16 @@ from temba.orgs.views.mixins import BulkActionMixin, OrgObjPermsMixin, OrgPermsM
 from temba.tickets.models import Topic
 from temba.users.models import User
 from temba.utils import json, on_transaction_commit
-from temba.utils.dates import datetime_to_timestamp, timestamp_to_datetime
 from temba.utils.fields import CheckboxWidget, InputWidget, SelectWidget, TembaChoiceField
 from temba.utils.models import patch_queryset_count
 from temba.utils.models.es import IDSliceQuerySet
-from temba.utils.views.mixins import ComponentFormMixin, ContextMenuMixin, ModalFormMixin, NonAtomicMixin, SpaMixin
+from temba.utils.views.mixins import ContextMenuMixin, ModalFormMixin, NonAtomicMixin, SpaMixin
 
 from .forms import ContactGroupForm, CreateContactForm, UpdateContactForm
 from .models import URN, Contact, ContactExport, ContactField, ContactGroup, ContactImport
 from .omnibox import omnibox_query, omnibox_serialize
 
 logger = logging.getLogger(__name__)
-
-# events from sessions to include in contact history
-HISTORY_INCLUDE_EVENTS = {
-    Event.TYPE_CONTACT_LANGUAGE_CHANGED,
-    Event.TYPE_CONTACT_FIELD_CHANGED,
-    Event.TYPE_CONTACT_GROUPS_CHANGED,
-    Event.TYPE_CONTACT_NAME_CHANGED,
-    Event.TYPE_CONTACT_URNS_CHANGED,
-}
 
 
 class ContactListView(SpaMixin, BulkActionMixin, BaseListView):
@@ -187,7 +176,7 @@ class ContactCRUDL(SmartCRUDL):
         "interrupt",
         "delete",
         "scheduled",
-        "history",
+        "chat",
     )
 
     class Menu(BaseMenuView):
@@ -312,7 +301,6 @@ class ContactCRUDL(SmartCRUDL):
             return JsonResponse({"results": results, "more": False, "total": len(results), "err": "nil"})
 
     class Read(SpaMixin, ContextMenuMixin, BaseReadView):
-        slug_url_kwarg = "uuid"
         fields = ("name",)
         select_related = ("current_flow",)
 
@@ -329,7 +317,7 @@ class ContactCRUDL(SmartCRUDL):
                 menu.add_modax(
                     _("Edit"),
                     "edit-contact",
-                    f"{reverse('contacts.contact_update', args=[obj.id])}",
+                    f"{reverse('contacts.contact_update', args=[obj.uuid])}",
                     title=_("Edit Contact"),
                     on_submit="contactUpdated()",
                     as_button=True,
@@ -346,8 +334,13 @@ class ContactCRUDL(SmartCRUDL):
                     )
                 if self.has_org_perm("contacts.contact_open_ticket") and obj.ticket_count == 0:
                     menu.add_modax(
-                        _("Open Ticket"), "open-ticket", reverse("contacts.contact_open_ticket", args=[obj.id])
+                        _("Open Ticket"), "open-ticket", reverse("contacts.contact_open_ticket", args=[obj.uuid])
                     )
+
+        def get_context_data(self, **kwargs):
+            context = super().get_context_data(**kwargs)
+            context["msg_logs_after"] = (timezone.now() - settings.RETENTION_PERIODS["channellog"]).isoformat()
+            return context
 
     class Scheduled(BaseReadView):
         """
@@ -355,84 +348,63 @@ class ContactCRUDL(SmartCRUDL):
         """
 
         permission = "contacts.contact_read"
-        slug_url_kwarg = "uuid"
 
         def render_to_response(self, context, **response_kwargs):
             return JsonResponse({"results": self.object.get_scheduled()})
 
-    class History(BaseReadView):
-        slug_url_kwarg = "uuid"
+    class Chat(BaseReadView):
+        """
+        Returns chat history for a contact or sends a new message to the contact.
+        """
 
-        def get_context_data(self, *args, **kwargs):
-            context = super().get_context_data(*args, **kwargs)
-            contact = self.object
+        page_size = 50
 
-            # since we create messages with timestamps from external systems, always a chance a contact's initial
-            # message has a timestamp slightly earlier than the contact itself.
-            contact_creation = contact.created_on - timedelta(hours=1)
+        def get(self, request, *args, **kwargs):
+            before = self._get_uuid_param("before")
+            after = self._get_uuid_param("after")
+            ticket = self._get_uuid_param("ticket")
+            contact = self.get_object()
 
-            before = int(self.request.GET.get("before", 0))
-            after = int(self.request.GET.get("after", 0))
-            limit = int(self.request.GET.get("limit", 50))
-
-            ticket_uuid = self.request.GET.get("ticket")
-            ticket = contact.org.tickets.filter(uuid=ticket_uuid).first()
-
-            # if we want an expanding window, or just all the recent activity
-            recent_only = False
-            if not before:
-                recent_only = True
-                before = timezone.now()
+            if before:
+                # a before value means UI is scrolling back thru historical events
+                events = contact.get_history(request.user, before=before, ticket=ticket, limit=self.page_size + 1)
+                page, more = events[: self.page_size], events[self.page_size :]
+                return JsonResponse({"events": page, "next": page[-1]["uuid"] if more else None})
+            elif after:
+                # after value means UI is polling for new events
+                events = contact.get_history(request.user, after=after, ticket=ticket, limit=self.page_size + 1)
+                page, more = events[: self.page_size], events[self.page_size :]
+                return JsonResponse({"events": list(reversed(page)), "next": page[-1]["uuid"] if more else None})
             else:
-                before = timestamp_to_datetime(before)
+                return JsonResponse({"error": "must specify before or after parameter"}, status=400)
 
-            if not after:
-                after = before - timedelta(days=90)
-            else:
-                after = timestamp_to_datetime(after)
+        def post(self, request, *args, **kwargs):
+            payload = json.loads(request.body)
+            text = payload.get("text", "")
+            attachments = []
+            ticket = None
 
-            # keep looking further back until we get at least 20 items
-            history = []
-            fetch_before = before
-            while True:
-                history += contact.get_history(after, fetch_before, HISTORY_INCLUDE_EVENTS, ticket=ticket, limit=limit)
-                if recent_only or len(history) >= 20 or after == contact_creation:
-                    break
-                else:
-                    fetch_before = after
-                    after = max(after - timedelta(days=90), contact_creation)
+            if attachment_uuids := payload.get("attachments"):
+                attachments = request.org.media.filter(uuid__in=attachment_uuids)
 
-            # render as events
-            events = [Event.from_history_item(contact.org, self.request.user, i) for i in history]
+            if ticket_uuid := payload.get("ticket"):
+                ticket = request.org.tickets.filter(uuid=ticket_uuid).first()
 
-            if len(events) >= limit:
-                after = iso8601.parse_date(events[-1]["created_on"])
-
-            # check if there are more pages to fetch
-            context["has_older"] = False
-            if not recent_only and before > contact.created_on:
-                context["has_older"] = bool(
-                    contact.get_history(contact_creation, after, HISTORY_INCLUDE_EVENTS, ticket=ticket, limit=1)
-                )
-
-            context["recent_only"] = recent_only
-            context["next_before"] = datetime_to_timestamp(after)
-            context["next_after"] = datetime_to_timestamp(max(after - timedelta(days=90), contact_creation))
-            context["start_date"] = contact.org.get_delete_date(archive_type=Archive.TYPE_MSG)
-            context["events"] = events
-            return context
-
-        def render_to_response(self, context, **response_kwargs):
-            return JsonResponse(
-                {
-                    "has_older": context["has_older"],
-                    "recent_only": context["recent_only"],
-                    "next_before": context["next_before"],
-                    "next_after": context["next_after"],
-                    "start_date": context["start_date"],
-                    "events": context["events"],
-                }
+            resp = mailroom.get_client().msg_send(
+                request.org, request.user, self.get_object(), text, [str(a) for a in attachments], [], ticket
             )
+
+            # update user ref with avatar
+            if resp["event"].get("_user"):
+                resp["event"]["_user"] = request.user.as_chat_ref()
+
+            return JsonResponse({"event": resp["event"]})
+
+        def _get_uuid_param(self, name: str) -> UUID:
+            try:
+                return UUID(self.request.GET.get(name))
+            except (ValueError, TypeError):
+                return None
 
     class Search(ContactListView):
         template_name = "contacts/contact_list.html"
@@ -596,7 +568,7 @@ class ContactCRUDL(SmartCRUDL):
 
         def build_context_menu(self, menu):
             if not self.group.is_system and self.has_org_perm("contacts.contactgroup_update"):
-                menu.add_modax(_("Edit"), "edit-group", reverse("contacts.contactgroup_update", args=[self.group.id]))
+                menu.add_modax(_("Edit"), "edit-group", reverse("contacts.contactgroup_update", args=[self.group.uuid]))
 
             if self.has_org_perm("contacts.contact_export"):
                 menu.add_modax(_("Export"), "export-contacts", self.derive_export_url(), title=_("Export Contacts"))
@@ -680,7 +652,7 @@ class ContactCRUDL(SmartCRUDL):
 
             return self.render_modal_response(form)
 
-    class Update(ComponentFormMixin, NonAtomicMixin, ModalFormMixin, OrgObjPermsMixin, SmartUpdateView):
+    class Update(NonAtomicMixin, BaseUpdateModal):
         form_class = UpdateContactForm
         success_url = "hide"
 
@@ -693,11 +665,6 @@ class ContactCRUDL(SmartCRUDL):
                 exclude.append("groups")
 
             return exclude
-
-        def get_form_kwargs(self, *args, **kwargs):
-            kwargs = super().get_form_kwargs(*args, **kwargs)
-            kwargs["org"] = self.request.org
-            return kwargs
 
         def get_context_data(self, **kwargs):
             context = super().get_context_data(**kwargs)
@@ -758,7 +725,7 @@ class ContactCRUDL(SmartCRUDL):
 
             return self.render_modal_response(form)
 
-    class OpenTicket(ComponentFormMixin, ModalFormMixin, OrgObjPermsMixin, SmartUpdateView):
+    class OpenTicket(BaseUpdateModal):
         """
         Opens a new ticket for this contact.
         """
@@ -787,11 +754,6 @@ class ContactCRUDL(SmartCRUDL):
         form_class = Form
         submit_button_name = _("Open")
 
-        def get_form_kwargs(self):
-            kwargs = super().get_form_kwargs()
-            kwargs["org"] = self.request.org
-            return kwargs
-
         def save(self, obj):
             self.ticket = obj.open_ticket(
                 self.request.user,
@@ -817,18 +779,13 @@ class ContactCRUDL(SmartCRUDL):
             obj.interrupt(self.request.user)
             return obj
 
-    class Delete(ModalFormMixin, OrgObjPermsMixin, SmartUpdateView):
+    class Delete(BaseDeleteModal):
         """
-        Delete this contact (can't be undone)
+        Delete this contact
         """
 
-        fields = ()
-        success_url = "@contacts.contact_list"
-        submit_button_name = _("Delete")
-
-        def save(self, obj):
-            obj.release(self.request.user)
-            return obj
+        cancel_url = "@contacts.contact_list"
+        redirect_url = "@contacts.contact_list"
 
 
 class ContactGroupCRUDL(SmartCRUDL):
@@ -923,9 +880,17 @@ class ContactFieldForm(UniqueNameMixin, forms.ModelForm):
     def clean_value_type(self):
         value_type = self.cleaned_data["value_type"]
 
-        if self.instance and self.instance.id and self.instance.campaign_events.filter(is_active=True).exists():
-            if value_type != ContactField.TYPE_DATETIME:
+        if self.instance and self.instance.id:
+            if (
+                self.instance.campaign_events.filter(is_active=True).exists()
+                and value_type != ContactField.TYPE_DATETIME
+            ):
                 raise forms.ValidationError(_("Can't change type of date field being used by campaign events."))
+            if (
+                self.instance.dependent_groups.filter(is_active=True).exists()
+                and value_type != self.instance.value_type
+            ):
+                raise forms.ValidationError(_("Can't change type of field being used by a smart group."))
 
         return value_type
 
@@ -988,16 +953,11 @@ class ContactFieldCRUDL(SmartCRUDL):
             )
             return self.render_modal_response(form)
 
-    class Update(FieldLookupMixin, ModalFormMixin, OrgObjPermsMixin, SmartUpdateView):
+    class Update(FieldLookupMixin, BaseUpdateModal):
         queryset = ContactField.objects.filter(is_system=False)
         form_class = ContactFieldForm
         submit_button_name = _("Update")
         success_url = "hide"
-
-        def get_form_kwargs(self):
-            kwargs = super().get_form_kwargs()
-            kwargs["org"] = self.derive_org()
-            return kwargs
 
         def pre_save(self, obj):
             obj = super().pre_save(obj)
@@ -1121,8 +1081,8 @@ class ContactImportCRUDL(SmartCRUDL):
             )
             group_mode = forms.ChoiceField(
                 required=False,
-                choices=((GROUP_MODE_NEW, _("new group")), (GROUP_MODE_EXISTING, _("existing group"))),
-                initial=GROUP_MODE_NEW,
+                choices=(),
+                initial=None,
                 widget=SelectWidget(attrs={"widget_only": True}),
             )
             new_group_name = forms.CharField(
@@ -1141,14 +1101,43 @@ class ContactImportCRUDL(SmartCRUDL):
                 self.org = org
                 super().__init__(*args, **kwargs)
 
+                # Check if limits are reached
+                field_limit_reached = ContactField.is_limit_reached(org)
+                group_limit_reached = ContactGroup.is_limit_reached(org)
+
+                # Modify group mode choices and initial value if group limit reached
+                if group_limit_reached:
+                    # If group limit reached, only allow existing groups and default to that
+                    group_choices = [(self.GROUP_MODE_EXISTING, _("existing group"))]
+                    group_initial = self.GROUP_MODE_EXISTING
+                else:
+                    group_choices = [
+                        (self.GROUP_MODE_NEW, _("new group")),
+                        (self.GROUP_MODE_EXISTING, _("existing group")),
+                    ]
+                    group_initial = self.GROUP_MODE_NEW
+
+                # Update the group_mode field with potentially modified choices
+                self.fields["group_mode"].choices = group_choices
+                self.fields["group_mode"].initial = group_initial
+
                 self.columns = []
                 for i, item in enumerate(self.instance.mappings):
                     mapping = item["mapping"]
                     column = item.copy()
 
                     if mapping["type"] == "new_field":
+                        # If field limit is reached, auto-ignore new fields
+                        initial_include = not field_limit_reached
+                        widget_attrs = {"widget_only": True}
+                        if field_limit_reached:
+                            widget_attrs["disabled"] = True
+
                         include_field = forms.BooleanField(
-                            label=" ", required=False, initial=True, widget=CheckboxWidget(attrs={"widget_only": True})
+                            label=" ",
+                            required=False,
+                            initial=initial_include,
+                            widget=CheckboxWidget(attrs=widget_attrs),
                         )
                         name_field = forms.CharField(
                             label=" ", initial=mapping["name"], required=False, widget=InputWidget()
@@ -1198,7 +1187,9 @@ class ContactImportCRUDL(SmartCRUDL):
                 org_fields = self.org.fields.filter(is_system=False, is_active=True)
                 existing_field_keys = {f.key for f in org_fields}
                 used_field_keys = set()
+                new_fields_to_create = []  # Track new fields that will be created
                 form_values = self.get_form_values()
+
                 for data, item in zip(form_values, self.instance.mappings):
                     header, mapping = item["header"], item["mapping"]
 
@@ -1226,14 +1217,19 @@ class ContactImportCRUDL(SmartCRUDL):
                                 )
 
                             used_field_keys.add(field_key)
+                            new_fields_to_create.append(field_name)
+
+                # Check if adding new fields would exceed the field limit
+                if new_fields_to_create:
+                    current_field_count = org_fields.count()
+                    field_limit = self.org.get_limit(Org.LIMIT_FIELDS)
+                    if current_field_count + len(new_fields_to_create) > field_limit:
+                        raise forms.ValidationError(_("This workspace has reached its limit of fields."))
 
                 add_to_group = self.cleaned_data["add_to_group"]
                 if add_to_group:
                     group_mode = self.cleaned_data["group_mode"]
                     if group_mode == self.GROUP_MODE_NEW:
-                        if ContactGroup.is_limit_reached(self.org):
-                            raise forms.ValidationError(_("This workspace has reached its limit of groups."))
-
                         new_group_name = self.cleaned_data.get("new_group_name")
                         if not new_group_name:
                             self.add_error("new_group_name", _("Required."))
@@ -1253,7 +1249,7 @@ class ContactImportCRUDL(SmartCRUDL):
                 fields = ("id",)
 
         form_class = Form
-        success_url = "id@contacts.contactimport_read"
+        success_url = "uuid@contacts.contactimport_read"
 
         def get_form_kwargs(self):
             kwargs = super().get_form_kwargs()
@@ -1265,7 +1261,7 @@ class ContactImportCRUDL(SmartCRUDL):
 
             # can't preview an import which has already started
             if obj.started_on:
-                return HttpResponseRedirect(reverse("contacts.contactimport_read", args=[obj.id]))
+                return HttpResponseRedirect(reverse("contacts.contactimport_read", args=[obj.uuid]))
 
             return super().pre_process(request, *args, **kwargs)
 
@@ -1305,7 +1301,7 @@ class ContactImportCRUDL(SmartCRUDL):
             obj.start_async()
             return obj
 
-    class Read(SpaMixin, OrgObjPermsMixin, SmartReadView):
+    class Read(SpaMixin, BaseReadView):
         menu_path = "/contact/import"
         title = _("Contact Import")
 

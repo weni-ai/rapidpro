@@ -2,6 +2,7 @@ from datetime import date, datetime, timezone as tzone
 
 from temba.msgs.models import Msg
 from temba.tests import TembaTest
+from temba.utils.uuid import uuid7
 
 from ..models import ChannelCount
 from ..tasks import squash_channel_counts
@@ -28,6 +29,7 @@ class ChannelCountTest(TembaTest):
         Msg.objects.bulk_create(
             [
                 Msg(
+                    uuid=uuid7(),
                     org=self.org,
                     channel=self.channel,
                     contact=contact,
@@ -39,6 +41,7 @@ class ChannelCountTest(TembaTest):
                     modified_on=datetime(2023, 6, 1, 13, 0, 30, 0, tzone.utc),
                 ),
                 Msg(
+                    uuid=uuid7(),
                     org=self.org,
                     channel=self.channel,
                     contact=contact,
@@ -50,6 +53,7 @@ class ChannelCountTest(TembaTest):
                     modified_on=datetime(2023, 6, 1, 13, 0, 30, 0, tzone.utc),
                 ),
                 Msg(
+                    uuid=uuid7(),
                     org=self.org,
                     channel=self.channel,
                     contact=contact,
@@ -91,7 +95,7 @@ class ChannelCountTest(TembaTest):
         )
 
         # soft deleting a message doesn't decrement the count
-        Msg.bulk_soft_delete([Msg.objects.get(text="A")])
+        Msg.objects.filter(text="A").update(visibility=Msg.VISIBILITY_DELETED_BY_USER)
 
         self.assertEqual(
             {

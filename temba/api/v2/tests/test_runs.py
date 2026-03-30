@@ -3,7 +3,6 @@ import iso8601
 from django.urls import reverse
 
 from temba.api.v2.serializers import format_datetime
-from temba.flows.models import FlowStart
 from temba.tests.engine import MockSessionWriter
 
 from . import APITest
@@ -27,7 +26,7 @@ class RunsEndpointTest(APITest):
 
         joe = self.create_contact("Joe Blow", phone="+250788123123")
         frank = self.create_contact("Frank", urns=["tel:123456"])
-        start1 = FlowStart.create(flow1, self.admin, contacts=[joe])
+        start1 = self.create_flowstart(flow1, self.admin, contacts=[joe])
         joe_msg = self.create_incoming_msg(joe, "it is blue")
         frank_msg = self.create_incoming_msg(frank, "Indigo")
 
@@ -94,11 +93,11 @@ class RunsEndpointTest(APITest):
                 "path": [
                     {
                         "node": color_prompt["uuid"],
-                        "time": format_datetime(iso8601.parse_date(frank_run2.path[0]["arrived_on"])),
+                        "time": format_datetime(frank_run2.path_times[0]),
                     },
                     {
                         "node": color_split["uuid"],
-                        "time": format_datetime(iso8601.parse_date(frank_run2.path[1]["arrived_on"])),
+                        "time": format_datetime(frank_run2.path_times[1]),
                     },
                 ],
                 "values": {},
@@ -125,15 +124,15 @@ class RunsEndpointTest(APITest):
                 "path": [
                     {
                         "node": color_prompt["uuid"],
-                        "time": format_datetime(iso8601.parse_date(joe_run1.path[0]["arrived_on"])),
+                        "time": format_datetime(joe_run1.path_times[0]),
                     },
                     {
                         "node": color_split["uuid"],
-                        "time": format_datetime(iso8601.parse_date(joe_run1.path[1]["arrived_on"])),
+                        "time": format_datetime(joe_run1.path_times[1]),
                     },
                     {
                         "node": blue_reply["uuid"],
-                        "time": format_datetime(iso8601.parse_date(joe_run1.path[2]["arrived_on"])),
+                        "time": format_datetime(joe_run1.path_times[2]),
                     },
                 ],
                 "values": {
@@ -202,20 +201,21 @@ class RunsEndpointTest(APITest):
                     "contact": {
                         "uuid": frank.uuid,
                         "name": frank.name,
+                        "ref": frank.ref,
                         "urn": "tel:********",
                         "urn_display": None,
-                        "anon_display": f"{frank.id:010}",
+                        "anon_display": frank.ref,  # deprecated
                     },
                     "start": None,
                     "responded": False,
                     "path": [
                         {
                             "node": color_prompt["uuid"],
-                            "time": format_datetime(iso8601.parse_date(frank_run2.path[0]["arrived_on"])),
+                            "time": format_datetime(frank_run2.path_times[0]),
                         },
                         {
                             "node": color_split["uuid"],
-                            "time": format_datetime(iso8601.parse_date(frank_run2.path[1]["arrived_on"])),
+                            "time": format_datetime(frank_run2.path_times[1]),
                         },
                     ],
                     "values": {},
@@ -250,7 +250,10 @@ class RunsEndpointTest(APITest):
         flow1.save()
 
         # filter by invalid flow
-        self.assertGet(endpoint_url + "?flow=invalid", [self.admin], results=[])
+        self.assertGet(
+            endpoint_url + "?flow=invalid", [self.admin], errors={None: "Param 'flow': invalid is not a valid UUID."}
+        )
+        self.assertGet(endpoint_url + "?flow=5fb61ca5-bdb1-4a05-af8d-274127f8186f", [self.admin], results=[])
 
         # filter by flow + responded
         self.assertGet(

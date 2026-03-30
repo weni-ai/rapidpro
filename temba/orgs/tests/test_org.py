@@ -223,9 +223,8 @@ class OrgTest(TembaTest):
 
         self.assertIsNone(self.org.default_country)
 
-    @patch("temba.flows.models.FlowStart.async_start")
     @mock_mailroom
-    def test_org_flagging_and_suspending(self, mr_mocks, mock_async_start):
+    def test_org_flagging_and_suspending(self, mr_mocks):
         self.login(self.admin)
 
         mark = self.create_contact("Mark", phone="+12065551212")
@@ -300,7 +299,7 @@ class OrgTest(TembaTest):
 
         # still no messages or flow starts
         self.assertEqual(Msg.objects.all().count(), 0)
-        mock_async_start.assert_not_called()
+        self.assertEqual(mr_mocks.calls["flow_start"], [])
 
         # unsuspend our org and start a flow
         self.org.is_suspended = False
@@ -311,7 +310,7 @@ class OrgTest(TembaTest):
             {"flow": flow.id, "contact_search": get_contact_search(query='uuid="{mark.uuid}"')},
         )
 
-        mock_async_start.assert_called_once()
+        self.assertEqual(len(mr_mocks.calls["flow_start"]), 1)
 
     def test_resthooks(self):
         resthook_url = reverse("orgs.org_resthooks")
@@ -530,14 +529,12 @@ class OrgDeleteTest(TembaTest):
                 groups=groups,
             )
         )
-        session1 = add(
-            FlowSession.objects.create(
-                uuid=uuid4(),
-                contact=contacts[0],
-                current_flow=flow1,
-                status=FlowSession.STATUS_WAITING,
-                output_url="http://sessions.com/123.json",
-            )
+        session1 = FlowSession.objects.create(
+            uuid=uuid4(),
+            contact_uuid=contacts[0].uuid,
+            current_flow_uuid=flow1.uuid,
+            status=FlowSession.STATUS_WAITING,
+            output_url="http://sessions.com/123.json",
         )
         add(
             FlowRun.objects.create(
@@ -619,6 +616,8 @@ class OrgDeleteTest(TembaTest):
         )
         ContactImportBatch.objects.create(contact_import=imp, specs={}, record_start=0, record_end=0)
 
+        contact1.set_note(self.admin, "this guy for real?")
+
         return (contact1, contact2), (field1, field2), (group1, group2, group3)
 
     def _create_message_content(self, org, user, channels, contacts, groups, add) -> tuple:
@@ -667,9 +666,7 @@ class OrgDeleteTest(TembaTest):
 
     def _create_ticket_content(self, org, user, contacts, flows, add):
         topic = add(Topic.create(org, user, "Spam"))
-        ticket1 = add(self.create_ticket(contacts[0], topic))
-        ticket1.events.create(org=org, contact=contacts[0], event_type="N", note="spam", created_by=user)
-
+        add(self.create_ticket(contacts[0], topic))
         add(self.create_ticket(contacts[0], opened_in=flows[0]))
         team = add(Team.create(org, user, "Spam Only", topics=[topic]))
         Invitation.create(org, user, "newagent@textit.com", OrgRole.AGENT, team=team)
@@ -847,15 +844,13 @@ class AnonOrgTest(TembaTest):
         contact = self.create_contact(None, phone="+250788123123")
         self.login(self.admin)
 
-        anon_id = f"{contact.id:010}"
-
         response = self.client.get(reverse("contacts.contact_list"))
 
         # phone not in the list
         self.assertNotContains(response, "788 123 123")
 
-        # but the id is
-        self.assertContains(response, anon_id)
+        # but the ref value is
+        self.assertContains(response, contact.ref)
 
         # create an outgoing message, check number doesn't appear in outbox
         msg1 = self.create_outgoing_msg(contact, "hello", status="Q")
@@ -864,7 +859,7 @@ class AnonOrgTest(TembaTest):
 
         self.assertEqual(set(response.context["object_list"]), {msg1})
         self.assertNotContains(response, "788 123 123")
-        self.assertContains(response, anon_id)
+        self.assertContains(response, contact.ref)
 
         # create an incoming message, check number doesn't appear in inbox
         msg2 = self.create_incoming_msg(contact, "ok")
@@ -873,7 +868,7 @@ class AnonOrgTest(TembaTest):
 
         self.assertEqual(set(response.context["object_list"]), {msg2})
         self.assertNotContains(response, "788 123 123")
-        self.assertContains(response, anon_id)
+        self.assertContains(response, contact.ref)
 
         # create an incoming flow message, check number doesn't appear in inbox
         flow = self.create_flow("Test")
@@ -883,9 +878,9 @@ class AnonOrgTest(TembaTest):
 
         self.assertEqual(set(response.context["object_list"]), {msg3})
         self.assertNotContains(response, "788 123 123")
-        self.assertContains(response, anon_id)
+        self.assertContains(response, contact.ref)
 
         # check contact detail page
         response = self.client.get(reverse("contacts.contact_read", args=[contact.uuid]))
         self.assertNotContains(response, "788 123 123")
-        self.assertContains(response, anon_id)
+        self.assertContains(response, contact.ref)

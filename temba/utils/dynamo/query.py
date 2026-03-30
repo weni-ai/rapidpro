@@ -11,7 +11,7 @@ def batch_get(table, keys: list[tuple]) -> list:
     items = []
 
     for key_batch in itertools.batched(keys, 100):
-        key_attrs = [{"PK": pk, "SK": sk} for pk, sk in keys]
+        key_attrs = [{"PK": pk, "SK": sk} for pk, sk in key_batch]
         response = table.meta.client.batch_get_item(RequestItems={table.name: {"Keys": key_attrs}})
 
         items.extend(response.get("Responses", {}).get(table.name, []))
@@ -19,7 +19,7 @@ def batch_get(table, keys: list[tuple]) -> list:
     return items
 
 
-def merged_page_query(table, pks: list, *, desc=False, limit=50, after_sk=None) -> tuple[list, str | None]:
+def merged_page_query(table, pks: list, *, desc=False, limit=50, after_sk=None) -> tuple[list, str | None, str | None]:
     """
     Performs a paginated query across multiple partition keys merging the results into a single page. Returns a tuple
     of the results for the page, the previous page's after SK (if any), and the next page's after SK (if any).
@@ -67,3 +67,35 @@ def _merged_partition_query(table, pks: list, *, limit: int, desc: bool, after_s
 
     merged.sort(key=lambda x: x["SK"], reverse=desc)
     return merged[:limit]
+
+
+def delete_partition(table, pk: str) -> int:
+    """
+    Deletes all items from the DynamoDB table with the given partition key.
+    """
+
+    num_deleted = 0
+    last_sk = None
+
+    while True:
+        kwargs = dict(
+            KeyConditionExpression="PK = :pk",
+            ExpressionAttributeValues={":pk": pk},
+            ProjectionExpression="SK",
+            Limit=100,
+        )
+        if last_sk:
+            kwargs["ExclusiveStartKey"] = {"PK": pk, "SK": last_sk}
+
+        response = table.query(**kwargs)
+
+        with table.batch_writer() as batch:
+            for item in response.get("Items", []):
+                batch.delete_item(Key={"PK": pk, "SK": item["SK"]})
+                num_deleted += 1
+
+        last_sk = response.get("LastEvaluatedKey", {}).get("SK")
+        if not last_sk:
+            break
+
+    return num_deleted

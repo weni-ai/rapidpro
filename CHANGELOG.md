@@ -1,3 +1,548 @@
+v26.0.0 (2026-01-05)
+-------------------------
+ * Update to a recent FB graph API version
+
+v10.3.121 (2025-12-18)
+-------------------------
+ * Make import uuid fields non-null and use for read views
+ * Data migrations to backfill ContactImport.uuid and OrgImport.uuid fields.
+
+v10.3.120 (2025-12-18)
+-------------------------
+ * Add new uuid fields to ContactImport and OrgImport models
+ * Stop checking and sending X-Temba-Org header in middleware
+ * Remove never used ProfilerMiddleware
+
+v10.3.119 (2025-12-18)
+-------------------------
+ * Update to latest components
+ * Fix pagination link
+ * Stop sending and checking X-Temba-Org headers
+ * Make Archive.uuid non-null and use it in archive read URLs
+
+v10.3.118 (2025-12-17)
+-------------------------
+ * Bump django-allauth from 65.8.1 to 65.13.0
+ * Data migration to backfill archive UUIDs
+
+v10.3.117 (2025-12-16)
+-------------------------
+ * Data migration to delete rolled up archives that have been purged or are empty.
+
+v10.3.116 (2025-12-15)
+-------------------------
+ * Include org uuid in session data
+ * Start replace X-Temba-Org with X-Temba-Workspace
+
+v10.3.115 (2025-12-12)
+-------------------------
+ * Convert more views to use UUID urls
+ * Use pg_dump and pg_restore directly instead of via docker exec
+
+v10.3.114 (2025-12-11)
+-------------------------
+ * Rework more views to use uuids in URLs instead of ids
+
+v10.3.113 (2025-12-11)
+-------------------------
+ * Update django to 5.2.9
+ * Switch to localstack for local dev and testing
+ * Bump urllib3 from 2.5.0 to 2.6.0
+
+v10.3.112 (2025-12-03)
+-------------------------
+ * Update temba-components
+ * Revert removing ID from ext channel example payload
+
+v10.3.111 (2025-12-02)
+-------------------------
+ * Update temba-components
+
+v10.3.110 (2025-12-02)
+-------------------------
+ * Update temba-components
+ * Add Archive.uuid
+ * Adjust archives endpoint to handle archives without uploads
+
+v10.3.109 (2025-12-02)
+-------------------------
+ * Migration to let Archive.location be nullable.
+ * Display empty archives that don't have uploads
+ * Show message logs on ticket page too
+
+v10.3.108 (2025-12-01)
+-------------------------
+ * Update temba-components
+
+v10.3.104 (2025-11-28)
+-------------------------
+ * Update temba-components
+ * Fix deleting of contacts with notes
+
+v10.3.103 (2025-11-26)
+-------------------------
+ * Update to event-based message history
+
+v10.3.102 (2025-11-26)
+-------------------------
+ * Use mtime=0 when creating gzip files to ensure deterministic output
+ * Add Src attribute to items created by import from archives
+ * Make date range optional for archives_to_history command
+
+v10.3.101 (2025-11-26)
+-------------------------
+ * Remove Archive.url
+ * Add archives_to_history management command to rewrite archives and import msg events from them
+
+v10.3.100 (2025-11-25)
+-------------------------
+ * Fix bug in Archive.rewrite when deleting old archive
+ * Include uuid in Msg.as_archive_json() for completeness
+
+v10.3.99 (2025-11-25)
+-------------------------
+ * Make sure to show channel field on inbound call trigger update form
+ * Start reading from Archive.location instead of Archive.url
+
+v10.3.98 (2025-11-24)
+-------------------------
+ * Data migration to backfill Archive.location field.
+
+v10.3.97 (2025-11-24)
+-------------------------
+ * Add new Archive.location field
+ * Allow editor role to interrupt flow starts
+ * Remove old timestamp based contact history endpoint
+
+v10.3.96 (2025-11-21)
+-------------------------
+ * Update temba-components
+
+v10.3.95 (2025-11-20)
+-------------------------
+ * Tweak rewriting of archive JSONL to not add spaces
+
+v10.3.94 (2025-11-19)
+-------------------------
+ * Add new simpler chat history endpoint
+
+v10.3.93 (2025-11-19)
+-------------------------
+ * Update to latest temba-components
+ * Add Chat endpoint for sending messages to a contact
+ * Update messages API endpoint to use event field in mailroom response
+
+v10.3.92 (2025-11-18)
+-------------------------
+ * Read message events from DynamoDB history table
+ * Update to latest temba-components
+
+v10.3.89 (2025-11-14)
+-------------------------
+ * Tweak constants used for msg event unsendable_reason
+ * Update temba-components
+ * Tweak format of contact history events
+
+v10.3.88 (2025-11-14)
+-------------------------
+ * Tweak format of message event tags
+
+v10.3.87 (2025-11-13)
+-------------------------
+ * Reduce periodic task frequencly for refresh templates
+ * Adjust Turn claim fields and task discovery
+ * Add data migration to backfill msg events to DynamoDB
+
+v10.3.86 (2025-11-12)
+-------------------------
+ * Add support for TRN channel type
+ * Remove some unused channel types and remove claim views for others
+ * Update django
+
+v10.3.85 (2025-11-06)
+-------------------------
+ * Convert Org.api_rates and Org.limits to use real JSONField
+ * Update infobip channel type UI
+ * Increase API rate limits by ~50%
+
+v10.3.84 (2025-10-27)
+-------------------------
+ * Update EX channel to use msg UUID
+
+v10.3.83 (2025-10-15)
+-------------------------
+ * Fix checking the email for invite join accept to be case insensitive
+ * Tweak format of reconstructed msg events
+
+v10.3.82 (2025-10-10)
+-------------------------
+ * Use BIGINT for count field on all squashable count models
+
+v10.3.81 (2025-10-09)
+-------------------------
+ * Support filter by UUID on broadcast API endpoint
+
+v10.3.80 (2025-10-08)
+-------------------------
+ * More cleanup of API docs and explorer to depublicize filtering that we don't want to support
+ * Include detailed status information in reconstructed message events
+ * Include deleted information in reconstructed message events
+ * Rework fetching contact history to support/ignore event tags
+
+v10.3.79 (2025-10-08)
+-------------------------
+ * For msg/resend and delete mailroom calls, include user
+ * Add UUID to Broadcast and Message API representations and depublicize ID
+
+v10.3.78 (2025-10-06)
+-------------------------
+ * Send msgs by UUID to msg/resend endpoint
+ * Use mailroom endpoint to soft delete messages
+
+v10.3.77 (2025-10-02)
+-------------------------
+ * Update comps with omnibox fix
+ * Bump django from 5.2.6 to 5.2.7
+
+v10.3.76 (2025-09-30)
+-------------------------
+ * Update temba-components
+
+v10.3.75 (2025-09-29)
+-------------------------
+ * Add index on Msg.uuid and remove indexes on Msg.status and Msg.created_on
+
+v10.3.74 (2025-09-29)
+-------------------------
+ * Remove support for filtering messages on API by 'incoming' which was only used by CasePro
+
+v10.3.73 (2025-09-25)
+-------------------------
+ * Replace Msg.ticket_id with ticket_uuid
+ * Make Broadcast.uuid non-null
+
+v10.3.72 (2025-09-24)
+-------------------------
+ * Update temba-components
+
+v10.3.71 (2025-09-24)
+-------------------------
+ * Data migration to backfill broadcast UUIDs
+
+v10.3.70 (2025-09-24)
+-------------------------
+ * Send ticket by UUID in mailroom client message sends
+
+v10.3.69 (2025-09-24)
+-------------------------
+ * Add uuid field to Broadcast model
+
+v10.3.68 (2025-09-23)
+-------------------------
+ * Add apply_manual hook to migration
+
+v10.3.67 (2025-09-23)
+-------------------------
+ * Tweak migration to be non-atomic
+
+v10.3.66 (2025-09-23)
+-------------------------
+ * Update message folders to include IVR messages
+
+v10.3.65 (2025-09-23)
+-------------------------
+ * Change inbox folder indexes to not filter out IVR msgs
+ * Drop TicketEvent
+
+v10.3.64 (2025-09-23)
+-------------------------
+ * Update temba-components
+ * Refresh users on events fetched from DynamoDB
+
+v10.3.63 (2025-09-22)
+-------------------------
+ * Read ticket events from DynamoDB
+
+v10.3.62 (2025-09-22)
+-------------------------
+ * Update temba components
+
+v10.3.61 (2025-09-22)
+-------------------------
+ * Add create_buckets management command
+ * Users assigned to a ticket should be able to access it even if they've lost access to the topic
+
+v10.3.57 (2025-09-18)
+-------------------------
+ * Add menu option to disable a user's MFA
+ * Remove no longer used FlowRun.path and make session_uuid non-nullable
+ * Change ticket event backfill migration to save full user references
+ * Use minio/minio docker image for CI
+
+v10.3.56 (2025-09-16)
+-------------------------
+ * Read optin_requested events from DynamoDB instead of recreating from messages
+
+v10.3.55 (2025-09-15)
+-------------------------
+ * Update flow editor
+ * Fix flow start list page when start is pending
+ * Update mailroom_db command contacts
+ * Data migration to backfill ticket events to DynamoDB
+
+v10.3.54 (2025-09-10)
+-------------------------
+ * Use ticket/change_topic endpoint instead ticket/assign
+ * Pass topic by UUID to mailroom change_topic endpoint
+
+v10.3.53 (2025-09-10)
+-------------------------
+ * Update django
+ * Tweak index used to load a contact with its open tickets
+
+v10.3.52 (2025-09-09)
+-------------------------
+ * Pass tickets by UUID to Mailroom endpoints and read UUIDs from responses
+
+v10.3.51 (2025-09-08)
+-------------------------
+ * Tweak order of columns in contact exports for anon orgs to deemphasize id value
+ * Add new ref identifier to contact exports
+
+v10.3.50 (2025-09-08)
+-------------------------
+ * Update id obfuscation code to match changes in go code
+
+v10.3.49 (2025-09-04)
+-------------------------
+ * Update flow editor as well
+ * Fixes for allowCreate Selects
+ * Switch exports for anon orgs to use ref instead of anon_display
+ * Update API and templatetags to use contact ref instead of anon_display
+
+v10.3.48 (2025-09-04)
+-------------------------
+ * Adjust unfinished flows starts to consider last 7 days period
+
+v10.3.47 (2025-08-29)
+-------------------------
+ * Read all channel events from DynamoDB
+
+v10.3.46 (2025-08-28)
+-------------------------
+ * Update to latest temba components
+
+v10.3.45 (2025-08-28)
+-------------------------
+ * Remove time gating from channel event migration
+ * Start reading most channel event types from DynamoDB
+
+v10.3.44 (2025-08-28)
+-------------------------
+ * Data migration to backfill channel events into DynamoDB
+ * Update temba-components
+
+v10.3.43 (2025-08-25)
+-------------------------
+ * Limit types of channel events included in contact history
+ * Replace old v4 ticket UUIDs with v7 UUIDs based on opened_on timestamp
+
+v10.3.42 (2025-08-25)
+-------------------------
+ * Read call events from DynamoDB
+
+v10.3.41 (2025-08-25)
+-------------------------
+ * Backfill call_created and call_received events to DynamoDB
+
+v10.3.40 (2025-08-25)
+-------------------------
+ * Make TicketEvent.uuid non-nullable and unique
+
+v10.3.39 (2025-08-25)
+-------------------------
+ * Data migration to backfill TicketEvent.uuid
+
+v10.3.38 (2025-08-25)
+-------------------------
+ * Update temba components
+ * Add uuid field to TicketEvent
+ * Remove custom backfill logic from run event migration
+
+v10.3.37 (2025-08-21)
+-------------------------
+ * Return run_started and run_ended events from dynamo instead of faking flow_entered and flow_exited events
+
+v10.3.36 (2025-08-21)
+-------------------------
+ * Exclude system and deleted flows from run event migration too
+
+v10.3.35 (2025-08-21)
+-------------------------
+ * Tweak mailroom.contact_interrupt to not expect a return value.
+ * Validate UUIDs on API delete requests
+ * Data migration to backfill run_started and run_ended events.
+
+v10.3.34 (2025-08-20)
+-------------------------
+ * Update temba-components
+ * Update to latest flow editor
+
+v10.3.33 (2025-08-19)
+-------------------------
+ * Update flow editor
+ * Remove view to download session blobs
+
+v10.3.32 (2025-08-14)
+-------------------------
+ * Drop remaining unused FK fields on FlowSession
+
+v10.3.31 (2025-08-13)
+-------------------------
+ * Update temba-components
+
+v10.3.30 (2025-08-13)
+-------------------------
+ * Fetch airtime events for contact chat history from Dynamo instead of transfers table
+
+v10.3.29 (2025-08-13)
+-------------------------
+ * Data migration to write airtime transfer events to DynamoDB
+
+v10.3.28 (2025-08-13)
+-------------------------
+ * Make Call.uuid non-null and unique
+
+v10.3.27 (2025-08-13)
+-------------------------
+ * Data migration to backfill IVR call UUIDs
+
+v10.3.26 (2025-08-13)
+-------------------------
+ * Add Session.call_uuid to replace call_id
+
+v10.3.25 (2025-08-12)
+-------------------------
+ * Add data migration to backfill `FlowSession.current_flow_uuid`
+
+v10.3.24 (2025-08-12)
+-------------------------
+ * Add Session.current_flow_uuid to replace Session.current_flow_id
+
+v10.3.23 (2025-08-12)
+-------------------------
+ * Delete events from history table when releasing contacts
+ * Use JSON data to submit flows export form
+
+v10.3.22 (2025-08-12)
+-------------------------
+ * Update temba components
+ * Use uuid7 function pinched from CPython source
+ * Replace older v4 UUIDs on airtime transfers with v7 UUIDs
+
+v10.3.21 (2025-08-12)
+-------------------------
+ * Temporarily put ids back on message chat events
+
+v10.3.20 (2025-08-11)
+-------------------------
+ * Revert temba components update
+ * Add migration to backfill FlowSession.contact_uuid
+
+v10.3.19 (2025-08-11)
+-------------------------
+ * Update temba components
+ * Filter fetched DynamoDB events by type
+ * Remove some unused fields on contact chat events
+
+v10.3.18 (2025-08-08)
+-------------------------
+ * Fix parsing of events which don't have Data field in DynamoDB item
+
+v10.3.17 (2025-08-07)
+-------------------------
+ * Add FlowSession.contact_uuid to replace FlowSession.contact foreign key
+
+v10.3.16 (2025-08-07)
+-------------------------
+ * Always fetch engine events for contact history from DynamoDB
+
+v10.3.15 (2025-08-06)
+-------------------------
+ * Add dynamo flag to contact history retrieval
+ * Add Event.get_by_contact to fetch contact events from DynamoDB
+
+v10.3.14 (2025-08-01)
+-------------------------
+ * Add mailroom client method for system/queues
+
+v10.3.13 (2025-07-30)
+-------------------------
+ * Fix import preview group selection
+
+v10.3.12 (2025-07-30)
+-------------------------
+ * Update flow editor
+
+v10.3.11 (2025-07-29)
+-------------------------
+ * Fix schedule trigger update contact list
+
+v10.3.10 (2025-07-28)
+-------------------------
+ * Honor redirection url on history push
+
+v10.3.9 (2025-07-28)
+-------------------------
+ * Alignment tweaks on contact import preview
+ * Don't populate URL history until page is fetched
+ * Add response count chart grouped by team for ticket analytics
+
+v10.3.8 (2025-07-25)
+-------------------------
+ * Do not allow changing field type for fields used in groups
+ * Adjust alert for invalid query groups
+ * Implement field and group limit enforcement in import preview
+
+v10.3.7 (2025-07-24)
+-------------------------
+ * Clear field dependencies for deleted groups
+ * Add INVALID(X) status to contact group
+
+v10.3.6 (2025-07-23)
+-------------------------
+ * Update to latest floweditor
+
+v10.3.5 (2025-07-23)
+-------------------------
+ * Perform contact imports by calling mailroom endpoint
+ * Tweak mailroom_db to reset more db sequences
+
+v10.3.4 (2025-07-22)
+-------------------------
+ * Call mailroom endpoints to interrupt by flow, contacts or channel
+
+v10.3.3 (2025-07-21)
+-------------------------
+ * Fix flow starting
+
+v10.3.2 (2025-07-21)
+-------------------------
+ * Call mailroom endpoint to create flow starts
+
+v10.3.1 (2025-07-17)
+-------------------------
+ * Bump aiohttp from 3.11.11 to 3.12.14
+ * Email update by staff should be reverified
+ * Populate dynamic groups via endpoint instead of queueing task
+ * Remove no longer used User.last_auth_on field
+
+v10.3.0 (2025-07-17)
+-------------------------
+ * Remove no longer needed POSTGIS env var
+ * Remove no longer used TranslatableField type
+ * Replace placeholder migrations with real squashed migrations
+
 v10.2.4 (2025-07-04)
 -------------------------
  * Make SSO invite accept buttons more clear

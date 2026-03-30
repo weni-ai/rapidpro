@@ -4,8 +4,11 @@ from datetime import timedelta
 from smartmin.views import SmartCRUDL, SmartListView, SmartTemplateView, SmartUpdateView
 
 from django import forms
+from django.conf import settings
+from django.db import models
+from django.db.models import F, Sum, Value
 from django.db.models.aggregates import Max
-from django.db.models.functions import Lower
+from django.db.models.functions import Cast, Lower
 from django.http import Http404, JsonResponse
 from django.urls import reverse
 from django.utils import timezone
@@ -24,6 +27,7 @@ from temba.orgs.views.base import (
 )
 from temba.orgs.views.mixins import OrgObjPermsMixin, OrgPermsMixin, RequireFeatureMixin
 from temba.utils.dates import datetime_to_timestamp, timestamp_to_datetime
+from temba.utils.db.functions import SplitPart
 from temba.utils.export import response_from_workbook
 from temba.utils.fields import InputWidget
 from temba.utils.uuid import UUID_REGEX
@@ -105,7 +109,7 @@ class TopicCRUDL(SmartCRUDL):
             return context
 
         def get_redirect_url(self, **kwargs):
-            return f"/ticket/{self.request.org.default_ticket_topic.uuid}/open/"
+            return f"/ticket/{self.request.org.default_topic.uuid}/open/"
 
 
 class TeamCRUDL(SmartCRUDL):
@@ -270,28 +274,22 @@ class TicketCRUDL(SmartCRUDL):
                 raise Http404()
 
             status = Ticket.STATUS_OPEN if self.kwargs.get("status", "open") == "open" else Ticket.STATUS_CLOSED
-            ticket = None
-            in_page = False
 
             # is the request for a specific ticket?
             if uuid := self.kwargs.get("uuid"):
                 # is the ticket in the first page from of current folder?
-                for t in list(folder.get_queryset(org, user, ordered=True).filter(status=status)[:25]):
-                    if str(t.uuid) == uuid:
-                        ticket = t
-                        in_page = True
-                        break
+                for ticket in list(folder.get_queryset(org, user, ordered=True).filter(status=status)[:25]):
+                    if str(ticket.uuid) == uuid:
+                        return folder, status, ticket, True
 
-                # if not, see if we can access it in the All tickets folder and if so switch to that
-                if not in_page:
-                    all_folder = TicketFolder.from_slug(org, user, AllFolder.slug)
-                    ticket = all_folder.get_queryset(org, user, ordered=False).filter(uuid=uuid).first()
+                # if not, see if we can access it in the All or Mine tickets folders and if so switch to that
+                mine_folder = TicketFolder.from_slug(org, user, MineFolder.slug)
+                all_folder = TicketFolder.from_slug(org, user, AllFolder.slug)
+                for folder in (mine_folder, all_folder):
+                    if ticket := folder.get_queryset(org, user, ordered=False).filter(uuid=uuid).first():
+                        return folder, ticket.status, ticket, False
 
-                    if ticket:
-                        folder = all_folder
-                        status = ticket.status
-
-            return folder, status, ticket, in_page
+            return folder, status, None, False
 
         def get_context_data(self, **kwargs):
             context = super().get_context_data(**kwargs)
@@ -302,6 +300,7 @@ class TicketCRUDL(SmartCRUDL):
             context["folder"] = str(folder.slug)
             context["status"] = "open" if status == Ticket.STATUS_OPEN else "closed"
             context["has_tickets"] = self.request.org.tickets.exists()
+            context["msg_logs_after"] = (timezone.now() - settings.RETENTION_PERIODS["channellog"]).isoformat()
 
             if ticket:
                 context["nextUUID" if in_page else "uuid"] = str(ticket.uuid)
@@ -356,7 +355,7 @@ class TicketCRUDL(SmartCRUDL):
                     menu.add_modax(
                         _("Edit"),
                         "edit-topic",
-                        f"{reverse('tickets.topic_update', args=[self.folder.topic.id])}",
+                        f"{reverse('tickets.topic_update', args=[self.folder.topic.uuid])}",
                         title=_("Edit Topic"),
                         on_submit="handleTopicUpdated()",
                     )
@@ -364,7 +363,7 @@ class TicketCRUDL(SmartCRUDL):
                     menu.add_modax(
                         _("Delete"),
                         "delete-topic",
-                        f"{reverse('tickets.topic_delete', args=[self.folder.topic.id])}",
+                        f"{reverse('tickets.topic_delete', args=[self.folder.topic.uuid])}",
                         title=_("Delete Topic"),
                     )
 
@@ -432,7 +431,13 @@ class TicketCRUDL(SmartCRUDL):
                 return {"uuid": str(t.uuid), "name": t.name}
 
             def user_as_json(u):
-                return {"id": u.id, "first_name": u.first_name, "last_name": u.last_name, "email": u.email}
+                return {
+                    "id": u.id,
+                    "first_name": u.first_name,
+                    "last_name": u.last_name,
+                    "email": u.email,
+                    "uuid": str(u.uuid),
+                }
 
             def msg_as_json(m):
                 return {
@@ -525,7 +530,7 @@ class TicketCRUDL(SmartCRUDL):
 
         @classmethod
         def derive_url_pattern(cls, path, action):
-            return r"^%s/%s/(?P<chart>(opened|resptime))/$" % (path, action)
+            return r"^%s/%s/(?P<chart>(opened|resptime|replies))/$" % (path, action)
 
         def get_opened_chart(self, org, since, until) -> tuple:
             topics_by_id = {t.id: t.name for t in org.topics.filter(is_active=True)}
@@ -575,12 +580,51 @@ class TicketCRUDL(SmartCRUDL):
 
             return [d.strftime("%Y-%m-%d") for d in labels], [{"label": "Response Time", "data": data}]
 
+        def get_replies_chart(self, org, since, until) -> tuple:
+            teams_by_id = {t.id: t.name for t in org.teams.filter(is_active=True)}
+            # Add default team (id=0) for users not assigned to specific teams
+            teams_by_id[0] = "No Team"
+
+            # Follow the pattern from get_topic_counts - use database aggregation to extract team_id
+            # scope format: msgs:ticketreplies:{team_id}:{user_id} - team_id is at position 3 (1-indexed)
+            daily_counts = org.daily_counts.period(since, until).prefix("msgs:ticketreplies:")
+
+            counts = (
+                daily_counts.annotate(
+                    team_id=Cast(SplitPart(F("scope"), Value(":"), Value(3)), output_field=models.IntegerField())
+                )
+                .values_list("day", "team_id")
+                .annotate(count_sum=Sum("count"))
+            )
+
+            # collect all dates and values by team
+            dates_set = set()
+            values_by_team = defaultdict(lambda: defaultdict(int))
+
+            for day, team_id, count_sum in counts:
+                team_name = teams_by_id.get(team_id, f"Team {team_id}")
+                dates_set.add(day)
+                values_by_team[team_name][day] += count_sum
+
+            # create sorted list of dates
+            labels = sorted(list(dates_set))
+
+            # create arrays of values for each team, using 0 for missing dates
+            datasets = []
+            for team_name in sorted(values_by_team.keys()):
+                date_counts = values_by_team[team_name]
+                datasets.append({"label": team_name, "data": [date_counts.get(date, 0) for date in labels]})
+
+            return [d.strftime("%Y-%m-%d") for d in labels], datasets
+
         def get_chart_data(self, since, until) -> tuple[list, list]:
             chart = self.kwargs["chart"]
             if chart == "opened":
                 return self.get_opened_chart(self.request.org, since, until)
             elif chart == "resptime":
                 return self.get_resptime_chart(self.request.org, since, until)
+            elif chart == "replies":
+                return self.get_replies_chart(self.request.org, since, until)
 
     class ExportStats(OrgPermsMixin, SmartTemplateView):
         permission = "tickets.ticket_analytics"
