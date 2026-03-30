@@ -1,3 +1,8 @@
+1.8.5-rapidpro-10.2.4
+----------
+* Add Microsoft SSO
+* Make sure beta only channels cannot be enabled/disabled by admin unless staff or beta user
+
 1.8.4-rapidpro-10.2.4
 ----------
 * Get back with bothub
