@@ -1,13 +1,13 @@
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from django.utils import timezone
 
 from temba.flows.models import Flow
 from temba.msgs.models import Msg, MsgFolder
 from temba.msgs.tasks import fail_old_android_messages
-from temba.tests import CRUDLTestMixin, TembaTest
-from temba.tickets.models import Ticket
+from temba.tests import CRUDLTestMixin, TembaTest, mock_mailroom
+from temba.utils.uuid import uuid7
 
 
 class MsgTest(TembaTest, CRUDLTestMixin):
@@ -26,6 +26,7 @@ class MsgTest(TembaTest, CRUDLTestMixin):
         msg1 = self.create_incoming_msg(self.joe, "i'm having a problem", flow=flow)
         self.assertEqual(
             {
+                "uuid": str(msg1.uuid),
                 "id": msg1.id,
                 "contact": {"uuid": str(self.joe.uuid), "name": "Joe Blow"},
                 "channel": {"uuid": str(self.channel.uuid), "name": "Test Channel"},
@@ -50,6 +51,7 @@ class MsgTest(TembaTest, CRUDLTestMixin):
 
         self.assertEqual(
             {
+                "uuid": str(msg1.uuid),
                 "id": msg1.id,
                 "contact": {"uuid": str(self.joe.uuid), "name": "Joe Blow"},
                 "channel": {"uuid": str(self.channel.uuid), "name": "Test Channel"},
@@ -74,6 +76,7 @@ class MsgTest(TembaTest, CRUDLTestMixin):
 
         self.assertEqual(
             {
+                "uuid": str(msg2.uuid),
                 "id": msg2.id,
                 "contact": {"uuid": str(self.joe.uuid), "name": "Joe Blow"},
                 "channel": {"uuid": str(self.channel.uuid), "name": "Test Channel"},
@@ -93,7 +96,8 @@ class MsgTest(TembaTest, CRUDLTestMixin):
         )
 
     @patch("django.core.files.storage.default_storage.delete")
-    def test_bulk_soft_delete(self, mock_storage_delete):
+    @mock_mailroom
+    def test_bulk_soft_delete(self, mr_mocks, mock_storage_delete):
         # create some messages
         msg1 = self.create_incoming_msg(
             self.joe,
@@ -108,20 +112,14 @@ class MsgTest(TembaTest, CRUDLTestMixin):
 
         # can't soft delete outgoing messages
         with self.assertRaises(AssertionError):
-            Msg.bulk_soft_delete([out1])
+            Msg.bulk_soft_delete(self.org, self.admin, [out1])
 
-        Msg.bulk_soft_delete([msg1, msg2])
-
-        # soft delete should clear text and attachments
-        for msg in (msg1, msg2):
-            msg.refresh_from_db()
-
-            self.assertEqual("", msg.text)
-            self.assertEqual([], msg.attachments)
-            self.assertEqual(Msg.VISIBILITY_DELETED_BY_USER, msg1.visibility)
+        Msg.bulk_soft_delete(self.org, self.admin, [msg1, msg2])
 
         mock_storage_delete.assert_any_call("/attachments/1/a/b.jpg")
         mock_storage_delete.assert_any_call("/attachments/1/c/d e.jpg")
+
+        self.assertEqual([call(self.org, self.admin, [msg1, msg2])], mr_mocks.calls["msg_delete"])
 
     @patch("django.core.files.storage.default_storage.delete")
     def test_bulk_delete(self, mock_storage_delete):
@@ -227,6 +225,7 @@ class MsgTest(TembaTest, CRUDLTestMixin):
         # create an incoming message with big id
         msg = Msg.objects.create(
             id=3_000_000_000,
+            uuid=uuid7(),
             org=self.org,
             direction="I",
             contact=self.joe,
@@ -245,21 +244,17 @@ class MsgTest(TembaTest, CRUDLTestMixin):
         msg.labels.add(spam)
 
     def test_foreign_keys(self):
-        # create a message which references a flow and a ticket
+        # create a message which references a flow
         flow = self.create_flow("Flow")
         contact = self.create_contact("Ann", phone="+250788000001")
-        ticket = self.create_ticket(contact)
-        msg = self.create_outgoing_msg(contact, "Hi", flow=flow, ticket=ticket)
+        msg = self.create_outgoing_msg(contact, "Hi", flow=flow)
 
-        # both Msg.flow and Msg.ticket are unconstrained so we shuld be able to delete these
-        flow.release(self.admin)
+        # Msg.flow is unconstrained so we should be able to delete these
+        flow.release(self.admin, interrupt_sessions=False)
         flow.delete()
-        ticket.delete()
 
         msg.refresh_from_db()
 
         # but then accessing them blows up
         with self.assertRaises(Flow.DoesNotExist):
             print(msg.flow)
-        with self.assertRaises(Ticket.DoesNotExist):
-            print(msg.ticket)

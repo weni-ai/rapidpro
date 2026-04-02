@@ -214,8 +214,8 @@ function spaRequest(url, options) {
     }
   });
 
-  if (!omitted && window.org_id) {
-    headers['X-Temba-Org'] = window.org_id;
+  if (!omitted && window.workspace) {
+    headers['X-Temba-Workspace'] = window.workspace.uuid;
   }
 
   const ajaxOptions = {
@@ -284,10 +284,6 @@ function fetchAjax(url, options, fullPage = false) {
         return;
       }
 
-      if (!options.ignoreHistory) {
-        addToHistory(url);
-      }
-
       const toasts = response.headers.get('X-Temba-Toasts');
       if (toasts) {
         const toastEle = document.querySelector('temba-toast');
@@ -303,9 +299,13 @@ function fetchAjax(url, options, fullPage = false) {
 
       // if we have a version mismatch, reload the page
       var version = response.headers.get('X-Temba-Version');
-      var org = response.headers.get('X-Temba-Org');
+      var orgUUID = response.headers.get('X-Temba-Workspace');
 
-      if (response.type !== 'cors' && org && org != org_id) {
+      if (
+        response.type !== 'cors' &&
+        orgUUID &&
+        orgUUID != window.workspace?.uuid
+      ) {
         if (response.redirected) {
           document.location.href = response.url;
         } else {
@@ -327,17 +327,6 @@ function fetchAjax(url, options, fullPage = false) {
       }
 
       if (container) {
-        // if we got redirected when updating our container, make sure reflect it in the url
-        if (response.redirected) {
-          if (response.url) {
-            window.history.replaceState(
-              { url: response.url },
-              '',
-              response.url
-            );
-          }
-        }
-
         // special case for spa content, break out into a full page load
         if (
           container === '.spa-content' &&
@@ -351,6 +340,15 @@ function fetchAjax(url, options, fullPage = false) {
           if (body.startsWith('<!DOCTYPE HTML>')) {
             document.location.href = response.url;
             return;
+          }
+
+          // honor rederict respones urls
+          if (response.redirected && response.url) {
+            url = response.url;
+          }
+
+          if (!options.ignoreHistory) {
+            addToHistory(url);
           }
 
           var containerEle = document.querySelector(container);

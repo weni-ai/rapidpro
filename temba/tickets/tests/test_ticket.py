@@ -5,7 +5,8 @@ from temba.contacts.models import Contact
 from temba.orgs.models import OrgRole
 from temba.orgs.tasks import squash_item_counts
 from temba.tests import TembaTest, mock_mailroom
-from temba.tickets.models import Team, Ticket, TicketEvent, Topic, export_ticket_stats
+from temba.tickets.models import Team, Ticket, Topic, export_ticket_stats
+from temba.utils.uuid import uuid7
 
 
 class TicketTest(TembaTest):
@@ -15,9 +16,10 @@ class TicketTest(TembaTest):
         contact = self.create_contact("Bob", urns=["twitter:bobby"])
 
         ticket = Ticket.objects.create(
+            uuid=uuid7(),
             org=self.org,
             contact=contact,
-            topic=self.org.default_ticket_topic,
+            topic=self.org.default_topic,
             status="O",
         )
 
@@ -34,7 +36,7 @@ class TicketTest(TembaTest):
                 call(self.org, self.admin, [ticket], self.agent),
                 call(self.org, self.admin, [ticket], None),
             ],
-            mr_mocks.calls["ticket_assign"],
+            mr_mocks.calls["ticket_change_assignee"],
         )
 
         # test bulk adding a note
@@ -59,13 +61,13 @@ class TicketTest(TembaTest):
 
     @mock_mailroom
     def test_counts(self, mr_mocks):
-        general = self.org.default_ticket_topic
+        general = self.org.default_topic
         cats = Topic.create(self.org, self.admin, "Cats")
 
         contact1 = self.create_contact("Bob", urns=["twitter:bobby"])
         contact2 = self.create_contact("Jim", urns=["twitter:jimmy"])
 
-        org2_general = self.org2.default_ticket_topic
+        org2_general = self.org2.default_topic
         org2_contact = self.create_contact("Bob", urns=["twitter:bobby"], org=self.org2)
 
         t1 = self.create_ticket(contact1, topic=general)
@@ -196,7 +198,6 @@ class TicketTest(TembaTest):
             contacts={contact1: 2, contact2: 2},
         )
 
-        TicketEvent.objects.all().delete()
         t1.delete()
         t2.delete()
         t6.delete()

@@ -9,7 +9,6 @@ from smartmin.views import (
     SmartDeleteView,
     SmartFormView,
     SmartListView,
-    SmartReadView,
     SmartTemplateView,
     SmartUpdateView,
 )
@@ -31,8 +30,9 @@ from django.views.generic import FormView
 from temba import mailroom
 from temba.channels.models import Channel
 from temba.contacts.models import URN
-from temba.flows.models import Flow, FlowSession, FlowStart
+from temba.flows.models import Flow, FlowStart
 from temba.ivr.models import Call
+from temba.mailroom.client.types import Exclusions
 from temba.orgs.models import IntegrationType, Org
 from temba.orgs.views.base import (
     BaseDependencyDeleteModal,
@@ -122,25 +122,6 @@ class BaseFlowForm(UniqueNameMixin, forms.ModelForm):
     class Meta:
         model = Flow
         fields = "__all__"
-
-
-class FlowSessionCRUDL(SmartCRUDL):
-    actions = ("json",)
-    model = FlowSession
-
-    class Json(StaffOnlyMixin, SmartReadView):
-        slug_url_kwarg = "uuid"
-
-        def get(self, request, *args, **kwargs):
-            session = self.get_object()
-            output = session.output_json
-            output["_metadata"] = dict(
-                session_id=session.id,
-                org=session.contact.org.name,
-                org_id=session.contact.org_id,
-                site=f"https://{session.contact.org.get_brand_domain()}",
-            )
-            return JsonResponse(output, json_dumps_params=dict(indent=2))
 
 
 class FlowCRUDL(SmartCRUDL):
@@ -238,7 +219,6 @@ class FlowCRUDL(SmartCRUDL):
         """
 
         permission = "flows.flow_editor"
-        slug_url_kwarg = "uuid"
 
         @classmethod
         def derive_url_pattern(cls, path, action):
@@ -255,7 +235,6 @@ class FlowCRUDL(SmartCRUDL):
         """
 
         permission = "flows.flow_editor"
-        slug_url_kwarg = "uuid"
 
         @classmethod
         def derive_url_pattern(cls, path, action):
@@ -731,8 +710,6 @@ class FlowCRUDL(SmartCRUDL):
             return qs.filter(org=self.request.org, labels=self.label, is_archived=False).order_by("-created_on")
 
     class Editor(SpaMixin, ContextMenuMixin, BaseReadView):
-        slug_url_kwarg = "uuid"
-
         def derive_menu_path(self):
             if self.object.is_archived:
                 return "/flow/archived"
@@ -758,7 +735,7 @@ class FlowCRUDL(SmartCRUDL):
 
             context["active_start"] = flow.get_active_start()
             context["feature_filters"] = json.dumps(self.get_features(flow.org))
-            context["default_topic"] = json.dumps(flow.org.default_ticket_topic.as_engine_ref())
+            context["default_topic"] = json.dumps(flow.org.default_topic.as_engine_ref())
 
             return context
 
@@ -805,7 +782,7 @@ class FlowCRUDL(SmartCRUDL):
                 menu.add_modax(
                     _("Edit"),
                     "edit-flow",
-                    f"{reverse('flows.flow_update', args=[obj.id])}",
+                    f"{reverse('flows.flow_update', args=[obj.uuid])}",
                     title=_("Edit Flow"),
                 )
 
@@ -1094,7 +1071,6 @@ class FlowCRUDL(SmartCRUDL):
 
     class BaseResultsView(BaseReadView):
         permission = "flows.flow_results"
-        slug_url_kwarg = "uuid"
 
     class EngagementTimeline(BaseResultsView):
         def render_to_response(self, context, **response_kwargs):
@@ -1250,7 +1226,6 @@ class FlowCRUDL(SmartCRUDL):
         """
 
         permission = "flows.flow_editor"
-        slug_url_kwarg = "uuid"
 
         def get(self, request, *args, **kwargs):
             flow = self.get_object(self.get_queryset())
@@ -1335,6 +1310,7 @@ class FlowCRUDL(SmartCRUDL):
     class PreviewStart(BaseReadView):
         permission = "flows.flow_start"
         readonly_servicing = False
+        slug_url_kwarg = None  # TODO switch to uuid
 
         blockers = {
             "no_send_channel": _(
@@ -1563,13 +1539,12 @@ class FlowCRUDL(SmartCRUDL):
             recipients = contact_search.get("recipients", [])
             groups, contacts = ContactSearchWidget.parse_recipients(self.request.org, recipients)
 
-            # queue the flow start to be started by mailroom
-            flow.async_start(
+            flow.start(
                 self.request.user,
                 groups=groups,
                 contacts=contacts,
                 query=contact_search["parsed_query"] if "parsed_query" in contact_search else None,
-                exclusions=contact_search.get("exclusions", {}),
+                exclude=Exclusions(**contact_search.get("exclusions", {})),
             )
             return super().form_valid(form)
 

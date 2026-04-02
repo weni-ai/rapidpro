@@ -10,7 +10,7 @@ from temba.contacts.models import URN
 from temba.request_logs.models import HTTPLog
 
 from ...models import ChannelType
-from .views import ClaimView, ClearSessionToken, Connect, RequestCode, VerifyCode
+from .views import ClaimView, ClearSessionToken, Connect, RequestCode, SelectWABA, VerifyCode
 
 
 class WhatsAppType(ChannelType):
@@ -48,6 +48,7 @@ class WhatsAppType(ChannelType):
             ),
             re_path(r"^(?P<uuid>[a-z0-9\-]+)/verify_code/$", VerifyCode.as_view(channel_type=self), name="verify_code"),
             re_path(r"^connect/$", Connect.as_view(channel_type=self), name="connect"),
+            re_path(r"^select_waba/$", SelectWABA.as_view(channel_type=self), name="select_waba"),
         ]
 
     def activate(self, channel):
@@ -57,14 +58,14 @@ class WhatsAppType(ChannelType):
         headers = {"Authorization": f"Bearer {settings.WHATSAPP_ADMIN_SYSTEM_USER_TOKEN}"}
 
         # Subscribe to events
-        url = f"https://graph.facebook.com/v18.0/{waba_id}/subscribed_apps"
+        url = f"https://graph.facebook.com/v22.0/{waba_id}/subscribed_apps"
         resp = requests.post(url, headers=headers)
 
         if resp.status_code != 200:  # pragma: no cover
             raise ValidationError(_("Unable to subscribe to app to WABA with ID %s" % waba_id))
 
         # register numbers
-        url = f"https://graph.facebook.com/v18.0/{channel.address}/register"
+        url = f"https://graph.facebook.com/v22.0/{channel.address}/register"
         data = {"messaging_product": "whatsapp", "pin": wa_pin}
 
         resp = requests.post(url, data=data, headers=headers)
@@ -76,7 +77,7 @@ class WhatsAppType(ChannelType):
 
     def fetch_templates(self, channel) -> list:
         waba_id = channel.config["wa_waba_id"]
-        url = f"https://graph.facebook.com/v18.0/{waba_id}/message_templates"
+        url = f"https://graph.facebook.com/v22.0/{waba_id}/message_templates"
         headers = {"Authorization": f"Bearer {settings.WHATSAPP_ADMIN_SYSTEM_USER_TOKEN}"}
         templates = []
 

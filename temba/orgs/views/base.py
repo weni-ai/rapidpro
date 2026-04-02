@@ -45,17 +45,20 @@ class BaseReadView(OrgObjPermsMixin, SmartReadView):
     Base detail view for an object that belong to the current org
     """
 
+    slug_url_kwarg = "uuid"
+    model_org_lookup = "org"
+
     def derive_queryset(self, **kwargs):
         qs = super().derive_queryset(**kwargs)
 
         # filter by allowed org as we'll let OrgObjPermsMixin provide a redirect
         if not self.request.user.is_staff:
-            qs = qs.filter(org__in=self.request.user.orgs.all())
+            qs = qs.filter(**{f"{self.model_org_lookup}__in": self.request.user.orgs.all()})
 
         if hasattr(self.model, "is_active"):
             qs = qs.filter(is_active=True)
 
-        return qs.select_related("org")
+        return qs.select_related(self.model_org_lookup)
 
 
 class BaseCreateModal(ComponentFormMixin, ModalFormMixin, LimitAwareMixin, OrgPermsMixin, SmartCreateView):
@@ -79,6 +82,8 @@ class BaseUpdateModal(ComponentFormMixin, ModalFormMixin, OrgObjPermsMixin, Smar
     Base update modal view
     """
 
+    slug_url_kwarg = "uuid"
+
     def get_form_kwargs(self):
         kwargs = super().get_form_kwargs()
         kwargs["org"] = self.request.org
@@ -97,7 +102,12 @@ class BaseUpdateModal(ComponentFormMixin, ModalFormMixin, OrgObjPermsMixin, Smar
 
 
 class BaseDeleteModal(OrgObjPermsMixin, SmartDeleteView):
-    fields = ("id",)
+    """
+    Base delete modal view
+    """
+
+    slug_url_kwarg = "uuid"
+    fields = ("uuid",)
     submit_button_name = _("Delete")
 
     def get_context_data(self, **kwargs):

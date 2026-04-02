@@ -16,6 +16,9 @@ OUTGOING_REQUEST_HEADERS = {"User-agent": "RapidPro"}
 # Make this unique, and don't share it with anybody.
 SECRET_KEY = "your own secret key"
 
+# used to obfuscate IDs - i.e. contact ids in anonymous workspaces
+ID_OBFUSCATION_KEY = (0xA3B1C, 0xD2E3F, 0x1A2B3, 0xC0FFEE)
+
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 2500  # needed for exports of big workspaces
 
 # -----------------------------------------------------------------------------------
@@ -27,16 +30,9 @@ if TESTING:
     PASSWORD_HASHERS = ("django.contrib.auth.hashers.MD5PasswordHasher",)
     DEBUG = False
 
-if os.getenv("REMOTE_CONTAINERS") == "true":
-    _db_host = "postgres"
-    _valkey_host = "valkey"
-    _minio_host = "minio"
-    _dynamo_host = "dynamo"
-else:
-    _db_host = "localhost"
-    _valkey_host = "localhost"
-    _minio_host = "localhost"
-    _dynamo_host = "localhost"
+_db_host = "postgres"
+_valkey_host = "valkey"
+_localstack_host = "localstack"
 
 # -----------------------------------------------------------------------------------
 # AWS
@@ -46,7 +42,7 @@ AWS_ACCESS_KEY_ID = "root"
 AWS_SECRET_ACCESS_KEY = "tembatemba"
 AWS_REGION = "us-east-1"
 
-DYNAMO_ENDPOINT_URL = f"http://{_dynamo_host}:6000"
+DYNAMO_ENDPOINT_URL = f"http://{_localstack_host}:4566"
 DYNAMO_TABLE_PREFIX = "Test" if TESTING else "Temba"
 DYNAMO_AWS_REGION = os.environ.get("DYNAMO_AWS_REGION", default=AWS_REGION)
 
@@ -54,24 +50,24 @@ DYNAMO_AWS_REGION = os.environ.get("DYNAMO_AWS_REGION", default=AWS_REGION)
 # Storage
 # -----------------------------------------------------------------------------------
 
-_bucket_prefix = "test" if TESTING else "temba"
+BUCKET_PREFIX = "test" if TESTING else "temba"
 
 STORAGES = {
     # default storage for things like exports, imports
     "default": {
         "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
-        "OPTIONS": {"bucket_name": f"{_bucket_prefix}-default"},
+        "OPTIONS": {"bucket_name": f"{BUCKET_PREFIX}-default"},
     },
     # wherever rp-archiver writes archive files
     "archives": {
         "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
-        "OPTIONS": {"bucket_name": f"{_bucket_prefix}-archives"},
+        "OPTIONS": {"bucket_name": f"{BUCKET_PREFIX}-archives"},
     },
     # media file uploads that need to be publicly accessible
     "public": {
         "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
         "OPTIONS": {
-            "bucket_name": f"{_bucket_prefix}-default",
+            "bucket_name": f"{BUCKET_PREFIX}-default",
             "signature_version": "s3v4",
             "default_acl": "public-read",
             "querystring_auth": False,
@@ -81,13 +77,13 @@ STORAGES = {
     "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
 }
 
-# settings used by django-storages (defaults to local Minio server)
+# settings used by django-storages (defaults to localstack)
 AWS_S3_REGION_NAME = AWS_REGION
-AWS_S3_ENDPOINT_URL = f"http://{_minio_host}:9000"
-AWS_S3_ADDRESSING_STYLE = os.environ.get("AWS_S3_ADDRESSING_STYLE", "path")
+AWS_S3_ENDPOINT_URL = f"http://{_localstack_host}:4566"
+AWS_S3_ADDRESSING_STYLE = "path"
 AWS_S3_FILE_OVERWRITE = False
 
-STORAGE_URL = f"{AWS_S3_ENDPOINT_URL}/{_bucket_prefix}-default"
+STORAGE_URL = f"{AWS_S3_ENDPOINT_URL}/{BUCKET_PREFIX}-default"
 
 # -----------------------------------------------------------------------------------
 # Localization
@@ -343,13 +339,12 @@ PERMISSIONS = {
     "campaigns.campaign": ("archive", "activate", "menu"),
     "channels.channel": ("chart", "claim", "configuration", "logs", "facebook_whitelist"),
     "classifiers.classifier": ("connect", "sync"),
-    "contacts.contact": ("export", "history", "interrupt", "menu", "omnibox", "open_ticket", "start"),
+    "contacts.contact": ("export", "chat", "interrupt", "menu", "omnibox", "open_ticket", "start"),
     "contacts.contactfield": ("update_priority",),
     "contacts.contactgroup": ("menu",),
     "contacts.contactimport": ("preview",),
     "flows.flow": ("assets", "copy", "editor", "export", "menu", "next", "results", "start"),
     "flows.flowstart": ("interrupt", "status"),
-    "flows.flowsession": ("json",),
     "globals.global": ("unused",),
     "locations.adminboundary": ("alias", "boundaries", "geometry"),
     "msgs.broadcast": ("scheduled", "scheduled_delete"),
@@ -421,10 +416,10 @@ GROUP_PERMISSIONS = {
         "classifiers.classifier_list",
         "classifiers.classifier_read",
         "classifiers.classifier_sync",
+        "contacts.contact_chat",
         "contacts.contact_create",
         "contacts.contact_delete",
         "contacts.contact_export",
-        "contacts.contact_history",
         "contacts.contact_interrupt",
         "contacts.contact_list",
         "contacts.contact_menu",
@@ -518,10 +513,10 @@ GROUP_PERMISSIONS = {
         "channels.channelevent_list",
         "classifiers.classifier_list",
         "classifiers.classifier_read",
+        "contacts.contact_chat",
         "contacts.contact_create",
         "contacts.contact_delete",
         "contacts.contact_export",
-        "contacts.contact_history",
         "contacts.contact_interrupt",
         "contacts.contact_list",
         "contacts.contact_menu",
@@ -537,6 +532,7 @@ GROUP_PERMISSIONS = {
         "flows.flowrun_list",
         "flows.flowstart_create",
         "flows.flowstart_list",
+        "flows.flowstart_update",
         "globals.global.*",
         "ivr.call_list",
         "locations.adminboundary_alias",
@@ -579,7 +575,7 @@ GROUP_PERMISSIONS = {
         "triggers.trigger.*",
     ),
     "Agents": (
-        "contacts.contact_history",
+        "contacts.contact_chat",
         "contacts.contact_interrupt",
         "notifications.notification_list",
         "orgs.org_languages",
@@ -638,11 +634,8 @@ if os.getenv("REMOTE_CONTAINERS") == "true":
 # Database
 # -----------------------------------------------------------------------------------
 
-# temp workaround to allow running migrations without PostGIS
-POSTGIS = os.getenv("POSTGIS", "") != "off"
-
 _default_database_config = {
-    "ENGINE": "django.contrib.gis.db.backends.postgis" if POSTGIS else "django.db.backends.postgresql",
+    "ENGINE": "django.db.backends.postgresql",
     "NAME": "temba",
     "USER": "temba",
     "PASSWORD": "temba",
@@ -692,7 +685,8 @@ CELERY_BEAT_SCHEDULE = {
     "expire-invitations": {"task": "expire_invitations", "schedule": crontab(hour=0, minute=10)},
     "fail-old-android-messages": {"task": "fail_old_android_messages", "schedule": crontab(hour=0, minute=0)},
     "refresh-whatsapp-tokens": {"task": "refresh_whatsapp_tokens", "schedule": crontab(hour=6, minute=0)},
-    "refresh-templates": {"task": "refresh_templates", "schedule": timedelta(minutes=30)},
+    "refresh-turn-whatsapp-tokens": {"task": "refresh_turn_whatsapp_tokens", "schedule": crontab(hour=6, minute=0)},
+    "refresh-templates": {"task": "refresh_templates", "schedule": timedelta(hours=6)},
     "send-notification-emails": {"task": "send_notification_emails", "schedule": timedelta(seconds=60)},
     "squash-channel-counts": {"task": "squash_channel_counts", "schedule": timedelta(seconds=60)},
     "squash-group-counts": {"task": "squash_group_counts", "schedule": timedelta(seconds=60)},
@@ -720,11 +714,10 @@ CELERY_BEAT_SCHEDULE = {
 
 REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
-        "v2": "2500/hour",
-        "v2.contacts": "2500/hour",
-        "v2.messages": "2500/hour",
-        "v2.broadcasts": "2500/hour",
-        "v2.runs": "2500/hour",
+        "v2": "3600/hour",
+        "v2.contacts": "3600/hour",
+        "v2.messages": "3600/hour",
+        "v2.runs": "3600/hour",
     },
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.LimitOffsetPagination",
     "PAGE_SIZE": 250,
@@ -778,7 +771,6 @@ CHANNEL_TYPES = [
     "temba.channels.types.dartmedia.DartMediaType",
     "temba.channels.types.dialog360_legacy.Dialog360LegacyType",
     "temba.channels.types.dialog360.Dialog360Type",
-    "temba.channels.types.discord.DiscordType",
     "temba.channels.types.dmark.DMarkType",
     "temba.channels.types.external.ExternalType",
     "temba.channels.types.facebook_legacy.FacebookLegacyType",
@@ -808,7 +800,6 @@ CHANNEL_TYPES = [
     "temba.channels.types.novo.NovoType",
     "temba.channels.types.playmobile.PlayMobileType",
     "temba.channels.types.plivo.PlivoType",
-    "temba.channels.types.redrabbit.RedRabbitType",
     "temba.channels.types.rocketchat.RocketChatType",
     "temba.channels.types.shaqodoon.ShaqodoonType",
     "temba.channels.types.signalwire.SignalWireType",
@@ -819,10 +810,10 @@ CHANNEL_TYPES = [
     "temba.channels.types.telegram.TelegramType",
     "temba.channels.types.telesom.TelesomType",
     "temba.channels.types.thinq.ThinQType",
+    "temba.channels.types.turn.TurnType",
     "temba.channels.types.twilio_messaging_service.TwilioMessagingServiceType",
     "temba.channels.types.twilio_whatsapp.TwilioWhatsappType",
     "temba.channels.types.twilio.TwilioType",
-    "temba.channels.types.verboice.VerboiceType",
     "temba.channels.types.viber.ViberType",
     "temba.channels.types.vk.VKType",
     "temba.channels.types.vonage.VonageType",

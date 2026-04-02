@@ -1,5 +1,6 @@
 from collections import OrderedDict
 from datetime import timedelta
+from json import JSONDecodeError
 
 from allauth.account.models import EmailAddress
 from allauth.mfa.models import Authenticator
@@ -57,7 +58,7 @@ from temba.utils.views.mixins import (
 )
 
 from ..models import DefinitionExport, Export, IntegrationType, Invitation, Org, OrgImport, OrgMembership, OrgRole, User
-from .base import BaseDeleteModal, BaseListView, BaseMenuView
+from .base import BaseDeleteModal, BaseListView, BaseMenuView, BaseReadView
 from .forms import SignupForm, SMTPForm
 from .mixins import InferOrgMixin, InferUserMixin, OrgObjPermsMixin, OrgPermsMixin, RequireFeatureMixin
 from .utils import switch_to_org
@@ -184,7 +185,7 @@ class UserCRUDL(SmartCRUDL):
                     menu.add_modax(
                         _("Edit"),
                         "update-team",
-                        reverse("tickets.team_update", args=[self.team.id]),
+                        reverse("tickets.team_update", args=[self.team.uuid]),
                         title=_("Edit Team"),
                         as_button=True,
                     )
@@ -192,7 +193,7 @@ class UserCRUDL(SmartCRUDL):
                     menu.add_modax(
                         _("Delete"),
                         "delete-team",
-                        reverse("tickets.team_delete", args=[self.team.id]),
+                        reverse("tickets.team_delete", args=[self.team.uuid]),
                         title=_("Delete Team"),
                     )
 
@@ -250,7 +251,7 @@ class UserCRUDL(SmartCRUDL):
         def save(self, obj):
             role = OrgRole.from_code(self.form.cleaned_data["role"])
             team = self.form.cleaned_data.get("team")
-            team = (team or self.request.org.default_ticket_team) if role == OrgRole.AGENT else None
+            team = (team or self.request.org.default_team) if role == OrgRole.AGENT else None
 
             # don't update if user is the last administrator and role is being changed to something else
             has_other_admins = self.request.org.get_admins().exclude(id=obj.id).exists()
@@ -727,9 +728,36 @@ class OrgCRUDL(SmartCRUDL):
             org = self.get_object()
             user = self.request.user
 
-            flow_ids = [elt for elt in self.request.POST.getlist("flows") if elt]
-            campaign_ids = [elt for elt in self.request.POST.getlist("campaigns") if elt]
+            try:
+                json_body = json.loads(request.body.decode("utf-8"))
+            except JSONDecodeError:
+                return JsonResponse({"error": _("Invalid JSON format.")}, status=400)
 
+            # Validate the structure and content of the JSON
+            if not isinstance(json_body, dict):
+                return JsonResponse({"error": _("JSON body must be an object.")}, status=400)
+
+            flows = json_body.get("flows", [])
+            campaigns = json_body.get("campaigns", [])
+
+            if not isinstance(flows, list):
+                return JsonResponse({"error": _("'flows' must be a list.")}, status=400)
+
+            try:
+                flows = [int(elt) for elt in flows]
+            except (ValueError, TypeError):
+                return JsonResponse({"error": _("'flows' must be a list of integers.")}, status=400)
+
+            if not isinstance(campaigns, list):
+                return JsonResponse({"error": _("'campaigns' must be a list.")}, status=400)
+
+            try:
+                campaigns = [int(elt) for elt in campaigns]
+            except (ValueError, TypeError):
+                return JsonResponse({"error": _("'campaigns' must contain only integers.")}, status=400)
+
+            flow_ids = [elt for elt in flows if elt]
+            campaign_ids = [elt for elt in campaigns if elt]
             # fetch the selected flows and campaigns
             flows = Flow.objects.filter(id__in=flow_ids, org=org, is_active=True)
             campaigns = Campaign.objects.filter(id__in=campaign_ids, org=org, is_active=True)
@@ -1174,7 +1202,7 @@ class OrgCRUDL(SmartCRUDL):
 
             # if user doesn't already exist or we're logged in as a different user, we shouldn't be here
             user = User.get_by_email(self.invitation.email)
-            if not user or self.invitation.email != request.user.email:
+            if not user or self.invitation.email.lower() != request.user.email.lower():
                 return HttpResponseRedirect(reverse("orgs.org_join", args=[self.kwargs["secret"]]))
 
             return super().pre_process(request, *args, **kwargs)
@@ -1629,7 +1657,7 @@ class InvitationCRUDL(SmartCRUDL):
 
         def save(self, obj):
             role = OrgRole.from_code(self.form.cleaned_data["role"])
-            team = (obj.team or self.request.org.default_ticket_team) if role == OrgRole.AGENT else None
+            team = (obj.team or self.request.org.default_team) if role == OrgRole.AGENT else None
 
             self.object = Invitation.create(self.request.org, self.request.user, obj.email, role, team=team)
 
@@ -1639,6 +1667,7 @@ class InvitationCRUDL(SmartCRUDL):
             return super().post_save(obj)
 
     class Delete(RequireFeatureMixin, BaseDeleteModal):
+        slug_url_kwarg = None  # TODO switch to uuid
         require_feature = Org.FEATURE_USERS
         cancel_url = "@orgs.invitation_list"
         redirect_url = "@orgs.invitation_list"
@@ -1681,7 +1710,7 @@ class OrgImportCRUDL(SmartCRUDL):
                 fields = ("file",)
 
         success_message = _("Import started")
-        success_url = "id@orgs.orgimport_read"
+        success_url = "uuid@orgs.orgimport_read"
         form_class = Form
 
         def derive_title(self):
@@ -1701,7 +1730,7 @@ class OrgImportCRUDL(SmartCRUDL):
             obj.start()
             return obj
 
-    class Read(SpaMixin, OrgPermsMixin, SmartReadView):
+    class Read(SpaMixin, BaseReadView):
         menu_path = "/settings/import"
 
         def derive_title(self):

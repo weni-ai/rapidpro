@@ -11,12 +11,12 @@ from temba.contacts.models import ContactField, ContactGroup
 from temba.flows.models import Flow
 from temba.msgs.models import Label
 from temba.orgs.models import DefinitionExport, Export, Org, OrgImport
-from temba.tests import TembaTest, matchers, mock_mailroom
+from temba.tests import CRUDLTestMixin, TembaTest, matchers, mock_mailroom
 from temba.triggers.models import Trigger
 from temba.utils import json
 
 
-class DefinitionExportTest(TembaTest):
+class DefinitionExportTest(TembaTest, CRUDLTestMixin):
     def _export(self, flows=[], campaigns=[]):
         export = DefinitionExport.create(self.org, self.admin, flows=flows, campaigns=campaigns)
         export.perform()
@@ -107,8 +107,10 @@ class DefinitionExportTest(TembaTest):
         org_import = OrgImport.objects.filter(org=self.org).get()
         self.assertEqual(org_import.status, OrgImport.STATUS_COMPLETE)
 
-        response = self.client.get(reverse("orgs.orgimport_read", args=(org_import.id,)))
-        self.assertEqual(200, response.status_code)
+        read_url = reverse("orgs.orgimport_read", args=[org_import.uuid])
+
+        self.assertRequestDisallowed(read_url, [None, self.agent, self.admin2])
+        response = self.assertReadFetch(read_url, [self.admin, self.editor], context_object=org_import)
         self.assertContains(response, "Finished successfully")
 
         flow = self.org.flows.filter(name="Favorites").get()
@@ -498,13 +500,28 @@ class DefinitionExportTest(TembaTest):
         confirm_appointment.expires_after_minutes = 60
         confirm_appointment.save(update_fields=("expires_after_minutes",))
 
+        invalid_cases = [
+            "}",
+            "[]",
+            '{"flows": ["foo"], "campaigns": []}',
+            '{"flows": [], "campaigns": ["foo"]}',
+            '{"flows": [], "campaigns": ""}',
+            '{"flows": "", "campaigns": []}',
+        ]
+        for data in invalid_cases:
+            response = self.client.post(reverse("orgs.org_export"), data, content_type="application/json", follow=True)
+            self.assertEqual(0, Export.objects.count())
+            self.assertEqual(400, response.status_code)
+
         # now let's export!
         post_data = dict(
             flows=[f.pk for f in Flow.objects.filter(flow_type="M", is_system=False)],
             campaigns=[c.pk for c in Campaign.objects.all()],
         )
 
-        response = self.client.post(reverse("orgs.org_export"), post_data, follow=True)
+        response = self.client.post(
+            reverse("orgs.org_export"), json.dumps(post_data), content_type="application/json", follow=True
+        )
 
         self.assertEqual(1, Export.objects.count())
 
@@ -536,9 +553,9 @@ class DefinitionExportTest(TembaTest):
         self.assertEqual(
             exported["groups"],
             [
-                {"uuid": matchers.UUID4String(), "name": "Delay Notification", "query": None},
-                {"uuid": matchers.UUID4String(), "name": "Pending Appointments", "query": None},
-                {"uuid": matchers.UUID4String(), "name": "Unsatisfied Customers", "query": None},
+                {"uuid": matchers.UUIDString(version=4), "name": "Delay Notification", "query": None},
+                {"uuid": matchers.UUIDString(version=4), "name": "Pending Appointments", "query": None},
+                {"uuid": matchers.UUIDString(version=4), "name": "Unsatisfied Customers", "query": None},
             ],
         )
 
@@ -609,7 +626,7 @@ class DefinitionExportTest(TembaTest):
         self.assertContains(response, "Register Patient")
 
         # delete our flow, and reimport
-        confirm_appointment.release(self.admin)
+        confirm_appointment.release(self.admin, interrupt_sessions=False)
         self.org.import_app(exported, self.admin, site="https://app.rapidpro.io")
 
         # make sure we have the previously exported expiration

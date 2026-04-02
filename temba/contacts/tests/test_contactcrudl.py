@@ -1,30 +1,24 @@
-import io
-from datetime import timedelta, timezone as tzone
-from decimal import Decimal
+from datetime import datetime, timedelta, timezone as tzone
 from unittest.mock import call, patch
 
-import iso8601
-
+from django.conf import settings
 from django.urls import reverse
 from django.utils import timezone
 
 from temba import mailroom
-from temba.airtime.models import AirtimeTransfer
 from temba.campaigns.models import Campaign, CampaignEvent
-from temba.channels.models import ChannelEvent
-from temba.contacts.models import URN, Contact, ContactExport, ContactField, ContactFire
-from temba.flows.models import FlowSession, FlowStart
-from temba.ivr.models import Call
+from temba.contacts.models import Contact, ContactExport, ContactField, ContactFire
 from temba.locations.models import AdminBoundary
-from temba.msgs.models import Msg
+from temba.mailroom.client.types import Exclusions
+from temba.msgs.models import Media
 from temba.orgs.models import Export, OrgRole
 from temba.schedules.models import Schedule
-from temba.tests import CRUDLTestMixin, MockResponse, TembaTest, mock_mailroom
+from temba.tests import CRUDLTestMixin, MockResponse, TembaTest, matchers, mock_mailroom
 from temba.tests.engine import MockSessionWriter
-from temba.tickets.models import Topic
+from temba.tickets.models import Ticket
 from temba.triggers.models import Trigger
-from temba.utils import json, s3
-from temba.utils.dates import datetime_to_timestamp
+from temba.utils import json
+from temba.utils.uuid import uuid7
 from temba.utils.views.mixins import TEMBA_MENU_SELECTION
 
 
@@ -510,317 +504,200 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         response = self.client.get(reverse("contacts.contact_read", args=["invalid-uuid"]))
         self.assertEqual(response.status_code, 404)
 
-    def test_history(self):
-        joe = self.create_contact(name="Joe Blow", urns=["twitter:blow80", "tel:+250781111111"])
-        joe.created_on = timezone.now() - timedelta(days=1000)
-        joe.save(update_fields=("created_on",))
-        kurt = self.create_contact("Kurt", phone="123123")
+    @patch("django.utils.timezone.now")
+    @mock_mailroom
+    def test_chat_sending(self, mr_mocks, mock_now):
+        mock_now.return_value = datetime(2025, 11, 17, 16, 15, tzinfo=tzone.utc)
 
-        history_url = reverse("contacts.contact_history", args=[joe.uuid])
-
-        self.create_broadcast(self.editor, {"eng": {"text": "A beautiful broadcast"}}, contacts=[joe])
-        self.create_campaign(joe)
-
-        # add a message with some attachments
-        self.create_incoming_msg(
-            joe,
-            "Message caption",
-            created_on=timezone.now(),
-            attachments=[
-                "audio/mp3:http://blah/file.mp3",
-                "video/mp4:http://blah/file.mp4",
-                "geo:47.5414799,-122.6359908",
-            ],
-        )
-
-        # create some messages
-        for i in range(95):
-            self.create_incoming_msg(
-                joe, "Inbound message %d" % i, created_on=timezone.now() - timedelta(days=(100 - i))
-            )
-
-        # because messages are stored with timestamps from external systems, possible to have initial message
-        # which is little bit older than the contact itself
-        self.create_incoming_msg(joe, "Very old inbound message", created_on=joe.created_on - timedelta(seconds=10))
-
-        flow = self.get_flow("color_v13")
-        nodes = flow.get_definition()["nodes"]
-        color_prompt = nodes[0]
-        color_split = nodes[4]
-
-        (
-            MockSessionWriter(joe, flow)
-            .visit(color_prompt)
-            .send_msg("What is your favorite color?", self.channel)
-            .call_webhook("POST", "https://example.com/", "1234")  # pretend that flow run made a webhook request
-            .visit(color_split)
-            .set_result("Color", "green", "Green", "I like green")
-            .wait()
-            .save()
-        )
-        (
-            MockSessionWriter(kurt, flow)
-            .visit(color_prompt)
-            .send_msg("What is your favorite color?", self.channel)
-            .visit(color_split)
-            .wait()
-            .save()
-        )
-
-        # mark an outgoing message as failed
-        failed = Msg.objects.filter(direction="O", contact=joe).last()
-        failed.status = "F"
-        failed.save(update_fields=("status",))
-
-        # create an airtime transfer
-        AirtimeTransfer.objects.create(
+        contact = self.create_contact("Joe Blow", urns=["tel:+250781111111"])
+        ticket = Ticket.objects.create(
+            uuid="019a9935-022e-7bb3-9d6f-03d773be623e",
             org=self.org,
-            status="S",
-            contact=joe,
-            currency="RWF",
-            desired_amount=Decimal("100"),
-            actual_amount=Decimal("100"),
+            contact=contact,
+            topic=self.org.default_topic,
+            status="O",
         )
 
-        # two tickets for joe
-        sales = Topic.create(self.org, self.admin, "Sales")
-        self.create_ticket(joe, opened_on=timezone.now(), closed_on=timezone.now())
-        ticket = self.create_ticket(joe, topic=sales)
-
-        # create missed incoming and outgoing calls
-        self.create_channel_event(
-            self.channel, str(joe.get_urn(URN.TEL_SCHEME)), ChannelEvent.TYPE_CALL_OUT_MISSED, extra={}
-        )
-        self.create_channel_event(
-            self.channel, str(joe.get_urn(URN.TEL_SCHEME)), ChannelEvent.TYPE_CALL_IN_MISSED, extra={}
-        )
-
-        # and a referral event
-        self.create_channel_event(
-            self.channel, str(joe.get_urn(URN.TEL_SCHEME)), ChannelEvent.TYPE_NEW_CONVERSATION, extra={}
-        )
-
-        # add a failed call
-        Call.objects.create(
-            contact=joe,
-            status=Call.STATUS_ERRORED,
-            error_reason=Call.ERROR_NOANSWER,
-            channel=self.channel,
-            org=self.org,
-            contact_urn=joe.urns.all().first(),
-            error_count=0,
-        )
-
-        # add a note to our open ticket
-        ticket.events.create(
-            org=self.org,
-            contact=ticket.contact,
-            event_type="N",
-            note="I have a bad feeling about this",
-            created_by=self.admin,
-        )
-
-        # create an assignment
-        ticket.events.create(
-            org=self.org,
-            contact=ticket.contact,
-            event_type="A",
-            created_by=self.admin,
-            assignee=self.admin,
-        )
-
-        # set an output URL on our session so we fetch from there
-        s = FlowSession.objects.get(contact=joe)
-        s3.client().put_object(
-            Bucket="test-sessions", Key="c/session.json", Body=io.BytesIO(json.dumps(s.output).encode())
-        )
-        FlowSession.objects.filter(id=s.id).update(output_url="http://minio:9000/test-sessions/c/session.json")
-
-        # fetch our contact history
-        self.login(self.admin)
-        with self.assertNumQueries(22):
-            response = self.client.get(history_url + "?limit=100")
-
-        # history should include all messages in the last 90 days, the channel event, the call, and the flow run
-        history = response.json()["events"]
-        self.assertEqual(96, len(history))
-
-        def assertHistoryEvent(events, index, expected_type, **kwargs):
-            item = events[index]
-            self.assertEqual(expected_type, item["type"], f"event type mismatch for item {index}")
-            self.assertTrue(iso8601.parse_date(item["created_on"]))  # check created_on exists and is ISO string
-
-            for path, expected in kwargs.items():
-                self.assertPathValue(item, path, expected, f"item {index}")
-
-        assertHistoryEvent(history, 0, "call_started", status="E", status_display="Errored (No Answer)")
-        assertHistoryEvent(history, 1, "channel_event", channel_event_type="new_conversation")
-        assertHistoryEvent(history, 2, "channel_event", channel_event_type="mo_miss")
-        assertHistoryEvent(history, 3, "channel_event", channel_event_type="mt_miss")
-        assertHistoryEvent(history, 4, "ticket_opened", ticket__topic__name="Sales")
-        assertHistoryEvent(history, 5, "ticket_closed", ticket__topic__name="General")
-        assertHistoryEvent(history, 6, "ticket_opened", ticket__topic__name="General")
-        assertHistoryEvent(history, 7, "airtime_transferred", actual_amount="100.00")
-        assertHistoryEvent(history, 8, "msg_created", msg__text="What is your favorite color?")
-        assertHistoryEvent(history, 9, "flow_entered", flow__name="Colors")
-        assertHistoryEvent(history, 10, "msg_received", msg__text="Message caption")
-        assertHistoryEvent(
-            history, 11, "msg_created", msg__text="A beautiful broadcast", created_by__email="editor@textit.com"
-        )
-        assertHistoryEvent(history, -1, "msg_received", msg__text="Inbound message 11")
-
-        # revert back to reading only from DB
-        FlowSession.objects.filter(id=s.id).update(output_url=None)
-
-        # can filter by ticket to only all ticket events from that ticket rather than some events from all tickets
-        response = self.client.get(history_url + f"?ticket={ticket.uuid}&limit=100")
-        history = response.json()["events"]
-        assertHistoryEvent(history, 0, "ticket_assigned", assignee__id=self.admin.id)
-        assertHistoryEvent(history, 1, "ticket_note_added", note="I have a bad feeling about this")
-        assertHistoryEvent(history, 5, "channel_event", channel_event_type="mt_miss")
-        assertHistoryEvent(history, 6, "ticket_opened", ticket__topic__name="Sales")
-        assertHistoryEvent(history, 7, "airtime_transferred", actual_amount="100.00")
-
-        # fetch next page
-        before = datetime_to_timestamp(timezone.now() - timedelta(days=90))
-        response = self.requestView(history_url + "?limit=100&before=%d" % before, self.admin)
-        self.assertFalse(response.json()["has_older"])
-
-        # activity should include 11 remaining messages and the event fire
-        history = response.json()["events"]
-        self.assertEqual(12, len(history))
-        assertHistoryEvent(history, 0, "msg_received", msg__text="Inbound message 10")
-        assertHistoryEvent(history, 10, "msg_received", msg__text="Inbound message 0")
-        assertHistoryEvent(history, 11, "msg_received", msg__text="Very old inbound message")
-
-        response = self.requestView(history_url + "?limit=100", self.admin)
-        history = response.json()["events"]
-
-        self.assertEqual(96, len(history))
-        assertHistoryEvent(history, 8, "msg_created", msg__text="What is your favorite color?")
-
-        # if a new message comes in
-        self.create_incoming_msg(joe, "Newer message")
-        response = self.requestView(history_url, self.admin)
-
-        # now we'll see the message that just came in first, followed by the call event
-        history = response.json()["events"]
-        assertHistoryEvent(history, 0, "msg_received", msg__text="Newer message")
-        assertHistoryEvent(history, 1, "call_started", status="E", status_display="Errored (No Answer)")
-
-        recent_start = datetime_to_timestamp(timezone.now() - timedelta(days=1))
-        response = self.requestView(history_url + "?limit=100&after=%s" % recent_start, self.admin)
-
-        # with our recent flag on, should not see the older messages
-        events = response.json()["events"]
-        self.assertEqual(13, len(events))
-        self.assertContains(response, "file.mp4")
-
-        # add a new run
-        (
-            MockSessionWriter(joe, flow)
-            .visit(color_prompt)
-            .send_msg("What is your favorite color?", self.channel)
-            .visit(color_split)
-            .wait()
-            .save()
-        )
-
-        response = self.requestView(history_url + "?limit=200", self.admin)
-        history = response.json()["events"]
-        self.assertEqual(100, len(history))
-
-        # before date should not match our last activity, that only happens when we truncate
-        resp_json = response.json()
-        self.assertNotEqual(
-            resp_json["next_before"],
-            datetime_to_timestamp(iso8601.parse_date(resp_json["events"][-1]["created_on"])),
-        )
-
-        assertHistoryEvent(history, 0, "msg_created", msg__text="What is your favorite color?")
-        assertHistoryEvent(history, 1, "flow_entered")
-        assertHistoryEvent(history, 2, "flow_exited")
-        assertHistoryEvent(history, 3, "msg_received", msg__text="Newer message")
-        assertHistoryEvent(history, 4, "call_started")
-        assertHistoryEvent(history, 5, "channel_event")
-        assertHistoryEvent(history, 6, "channel_event")
-        assertHistoryEvent(history, 7, "channel_event")
-        assertHistoryEvent(history, 8, "ticket_opened")
-        assertHistoryEvent(history, 9, "ticket_closed")
-        assertHistoryEvent(history, 10, "ticket_opened")
-        assertHistoryEvent(history, 11, "airtime_transferred")
-        assertHistoryEvent(history, 12, "msg_created", msg__text="What is your favorite color?")
-        assertHistoryEvent(history, 13, "flow_entered")
-
-        # now try the proper max history to test truncation
-        response = self.requestView(history_url + "?before=%d" % datetime_to_timestamp(timezone.now()), self.admin)
-
-        # our before should be the same as the last item
-        resp_json = response.json()
-        last_item_date = datetime_to_timestamp(iso8601.parse_date(resp_json["events"][-1]["created_on"]))
-        self.assertEqual(resp_json["next_before"], last_item_date)
-
-        # and our after should be 90 days earlier
-        self.assertEqual(resp_json["next_after"], last_item_date - (90 * 24 * 60 * 60 * 1000 * 1000))
-        self.assertEqual(50, len(resp_json["events"]))
-
-        # and we should have a marker for older items
-        self.assertTrue(resp_json["has_older"])
-
-        # can't view history of contact in other org
-        other_org_contact = self.create_contact("Fred", phone="+250768111222", org=self.org2)
-        response = self.client.get(reverse("contacts.contact_history", args=[other_org_contact.uuid]))
-        self.assertEqual(response.status_code, 404)
-
-        # invalid UUID should return 404
-        response = self.client.get(reverse("contacts.contact_history", args=["837d0842-4f6b-4751-bf21-471df75ce786"]))
-        self.assertEqual(response.status_code, 404)
-
-    def test_history_session_events(self):
-        joe = self.create_contact(name="Joe Blow", urns=["twitter:blow80", "tel:+250781111111"])
-
-        history_url = reverse("contacts.contact_history", args=[joe.uuid])
-
-        flow = self.get_flow("color_v13")
-        nodes = flow.get_definition()["nodes"]
-        (
-            MockSessionWriter(joe, flow)
-            .visit(nodes[0])
-            .add_contact_urn("twitter", "joey")
-            .set_contact_field("gender", "Gender", "M")
-            .set_contact_field("age", "Age", "")
-            .set_contact_language("spa")
-            .set_contact_language("")
-            .set_contact_name("Joe")
-            .set_contact_name("")
-            .set_result("Color", "red", "Red", "it's red")
-            .send_email(["joe@textit.com"], "Test", "Hello there Joe")
-            .error("unable to send email")
-            .fail("this is a failure")
-            .save()
-        )
+        chat_url = reverse("contacts.contact_chat", args=[contact.uuid])
 
         self.login(self.editor)
 
-        response = self.client.get(history_url)
+        # send a simple text message
+        response = self.client.post(chat_url, {"text": "Hello"}, content_type="application/json")
         self.assertEqual(200, response.status_code)
-
-        resp_json = response.json()
-        self.assertEqual(9, len(resp_json["events"]))
         self.assertEqual(
-            [
-                "flow_exited",
-                "contact_name_changed",
-                "contact_name_changed",
-                "contact_language_changed",
-                "contact_language_changed",
-                "contact_field_changed",
-                "contact_field_changed",
-                "contact_urns_changed",
-                "flow_entered",
-            ],
-            [e["type"] for e in resp_json["events"]],
+            {
+                "event": {
+                    "uuid": matchers.UUIDString(version=7),
+                    "type": "msg_created",
+                    "created_on": matchers.ISODatetime(),
+                    "msg": {
+                        "text": "Hello",
+                        "urn": "tel:+250781111111",
+                        "channel": {"uuid": str(self.channel.uuid), "name": "Test Channel"},
+                    },
+                    "_user": {"uuid": str(self.editor.uuid), "name": "Ed", "avatar": None},
+                }
+            },
+            response.json(),
         )
+        self.assertEqual(
+            call(
+                self.org,
+                self.editor,
+                contact,
+                "Hello",
+                [],
+                [],
+                None,
+            ),
+            mr_mocks.calls["msg_send"][-1],
+        )
+
+        # send a message with attachments and in the context of a ticket
+        media = Media.from_upload(
+            self.org,
+            self.admin,
+            self.upload(f"{settings.MEDIA_ROOT}/test_media/steve marten.jpg", "image/jpeg"),
+            process=False,
+        )
+        response = self.client.post(
+            chat_url, {"attachments": [str(media.uuid)], "ticket": str(ticket.uuid)}, content_type="application/json"
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            {
+                "event": {
+                    "uuid": matchers.String(),
+                    "type": "msg_created",
+                    "created_on": matchers.ISODatetime(),
+                    "msg": {
+                        "text": "",
+                        "attachments": [matchers.String()],
+                        "urn": "tel:+250781111111",
+                        "channel": {"uuid": str(self.channel.uuid), "name": "Test Channel"},
+                    },
+                    "_user": {"uuid": str(self.editor.uuid), "name": "Ed", "avatar": None},
+                }
+            },
+            response.json(),
+        )
+        self.assertEqual(
+            call(
+                self.org,
+                self.editor,
+                contact,
+                "",
+                [str(media)],
+                [],
+                ticket,
+            ),
+            mr_mocks.calls["msg_send"][-1],
+        )
+
+        # can't send to contact in a different org
+        self.login(self.admin2)
+
+        response = self.client.post(chat_url, {"text": "Hello"}, content_type="application/json")
+        self.assertEqual(404, response.status_code)
+
+    @patch("temba.mailroom.events.Event.get_by_contact")
+    @patch("django.utils.timezone.now")
+    def test_chat_fetching(self, mock_now, mock_get_by_contact):
+        mock_now.return_value = datetime(2025, 11, 17, 16, 15, tzinfo=tzone.utc)
+        mock_get_by_contact.return_value = []
+
+        contact = self.create_contact(name="Joe Blow", urns=["tel:+250781111111"])
+
+        chat_url = reverse("contacts.contact_chat", args=[contact.uuid])
+
+        def mock_events(count: int, start_time: datetime, end_time: datetime):
+            events = []
+            delta = (end_time - start_time) / count
+            for i in range(count):
+                when = start_time + delta * i
+                events.append({"uuid": str(uuid7(when=when)), "type": "test", "created_on": when.isoformat()})
+            return events
+
+        self.login(self.editor)
+
+        # error if we don't specify before or after
+        response = self.client.get(chat_url)
+        self.assertEqual(400, response.status_code)
+
+        # providing a before value fetches older history
+        response = self.client.get(chat_url + "?before=019a9299-1fa0-7124-82dc-716e856f293e")  # 2025-11-17T16:15
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"events": [], "next": None}, response.json())
+
+        # if there are less than a page of events, next is empty
+        mock_get_by_contact.return_value = mock_events(
+            2, datetime(2025, 11, 17, 16, 1, tzinfo=tzone.utc), datetime(2025, 11, 17, 16, 0, tzinfo=tzone.utc)
+        )
+
+        response = self.client.get(chat_url + "?before=019a9299-1fa0-7124-82dc-716e856f293e")  # 2025-11-17T16:15
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            {
+                "events": [
+                    {"uuid": matchers.UUIDString(version=7), "type": "test", "created_on": "2025-11-17T16:01:00+00:00"},
+                    {"uuid": matchers.UUIDString(version=7), "type": "test", "created_on": "2025-11-17T16:00:30+00:00"},
+                ],
+                "next": None,
+            },
+            response.json(),
+        )
+
+        # but if fetching returns more than a page, we get a next value
+        mock_get_by_contact.return_value = mock_events(
+            51, datetime(2025, 11, 17, 16, 1, tzinfo=tzone.utc), datetime(2025, 11, 17, 16, 0, tzinfo=tzone.utc)
+        )
+
+        response = self.client.get(chat_url + "?before=019a9299-1fa0-7124-82dc-716e856f293e")  # 2025-11-17T16:15
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            {"events": matchers.List(length=50), "next": matchers.UUIDString(version=7)},
+            response.json(),
+        )
+        self.assertEqual(response.json()["events"][-1]["uuid"], response.json()["next"])
+
+        mock_get_by_contact.return_value = []
+
+        # providing a after value fetches newer history
+        response = self.client.get(chat_url + "?after=019a9299-1fa0-7124-82dc-716e856f293e")  # 2025-11-17T16:15
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"events": [], "next": None}, response.json())
+
+        # if there are less than a page of events, next is empty
+        mock_get_by_contact.return_value = mock_events(
+            2, datetime(2025, 11, 17, 16, 0, tzinfo=tzone.utc), datetime(2025, 11, 17, 16, 1, tzinfo=tzone.utc)
+        )
+
+        response = self.client.get(chat_url + "?after=019a9299-1fa0-7124-82dc-716e856f293e")  # 2025-11-17T16:15
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            {
+                "events": [
+                    {"uuid": matchers.UUIDString(version=7), "type": "test", "created_on": "2025-11-17T16:00:30+00:00"},
+                    {"uuid": matchers.UUIDString(version=7), "type": "test", "created_on": "2025-11-17T16:00:00+00:00"},
+                ],
+                "next": None,
+            },
+            response.json(),
+        )
+
+        # but if fetching returns more than a page, we get a next value
+        mock_get_by_contact.return_value = mock_events(
+            51, datetime(2025, 11, 17, 16, 0, tzinfo=tzone.utc), datetime(2025, 11, 17, 16, 1, tzinfo=tzone.utc)
+        )
+
+        response = self.client.get(chat_url + "?after=019a9299-1fa0-7124-82dc-716e856f293e")  # 2025-11-17T16:15
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            {"events": matchers.List(length=50), "next": matchers.UUIDString(version=7)},
+            response.json(),
+        )
+        self.assertEqual(response.json()["events"][0]["uuid"], response.json()["next"])
 
     @mock_mailroom
     def test_update(self, mr_mocks):
@@ -837,7 +714,7 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         testers = self.create_group("Testers", contacts=[contact])
         self.create_contact("Ann", urns=["tel:+593979444444"])
 
-        update_url = reverse("contacts.contact_update", args=[contact.id])
+        update_url = reverse("contacts.contact_update", args=[contact.uuid])
 
         self.assertRequestDisallowed(update_url, [None, self.agent, self.admin2])
         self.assertUpdateFetch(
@@ -1022,7 +899,7 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
     def test_update_urns_field(self):
         contact = self.create_contact("Bob", urns=[])
 
-        update_url = reverse("contacts.contact_update", args=[contact.id])
+        update_url = reverse("contacts.contact_update", args=[contact.uuid])
 
         # we have a field to add new urns
         response = self.requestView(update_url, self.admin)
@@ -1042,7 +919,7 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         self.login(self.admin)
 
         response = self.client.post(
-            reverse("contacts.contact_update", args=[contact.id]),
+            reverse("contacts.contact_update", args=[contact.uuid]),
             {"name": "Joe", "status": Contact.STATUS_ACTIVE, "language": "eng"},
         )
 
@@ -1236,8 +1113,8 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
     @mock_mailroom
     def test_open_ticket(self, mr_mocks):
         contact = self.create_contact("Joe", phone="+593979000111")
-        general = self.org.default_ticket_topic
-        open_url = reverse("contacts.contact_open_ticket", args=[contact.id])
+        general = self.org.default_topic
+        open_url = reverse("contacts.contact_open_ticket", args=[contact.uuid])
 
         self.assertRequestDisallowed(open_url, [None, self.agent, self.admin2])
         self.assertUpdateFetch(open_url, [self.editor, self.admin], form_fields=("topic", "assignee", "note"))
@@ -1301,21 +1178,21 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         contact = self.create_contact("Joe", phone="+593979000111")
         other_org_contact = self.create_contact("Hans", phone="+593979123456", org=self.org2)
 
-        delete_url = reverse("contacts.contact_delete", args=[contact.id])
+        delete_url = reverse("contacts.contact_delete", args=[contact.uuid])
 
         # can't delete if not logged in
-        response = self.client.post(delete_url, {"id": contact.id})
+        response = self.client.post(delete_url, {"uuid": contact.uuid})
         self.assertLoginRedirect(response)
 
         self.login(self.agent)
 
         # can't delete if just agent
-        response = self.client.post(delete_url, {"id": contact.id})
+        response = self.client.post(delete_url, {"uuid": contact.uuid})
         self.assertLoginRedirect(response)
 
         self.login(self.admin)
 
-        response = self.client.post(delete_url, {"id": contact.id})
+        response = self.client.post(delete_url, {"uuid": contact.uuid})
         self.assertEqual(302, response.status_code)
 
         contact.refresh_from_db()
@@ -1324,8 +1201,8 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         self.assertEqual([call(self.org, [contact])], mr_mocks.calls["contact_deindex"])
 
         # can't delete contact in other org
-        delete_url = reverse("contacts.contact_delete", args=[other_org_contact.id])
-        response = self.client.post(delete_url, {"id": other_org_contact.id})
+        delete_url = reverse("contacts.contact_delete", args=[other_org_contact.uuid])
+        response = self.client.post(delete_url, {"uuid": other_org_contact.uuid})
         self.assertLoginRedirect(response)
 
         # contact should be unchanged
@@ -1362,11 +1239,20 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
             start_url, self.admin, {"flow": background_flow.id, "contact_search": json.dumps(contact_search)}
         )
 
-        # should now have a flow start
-        start = FlowStart.objects.get()
-        self.assertEqual(background_flow, start.flow)
-        self.assertEqual(contact_search["query"], start.query)
-        self.assertEqual({}, start.exclusions)
-
-        # that has been queued to mailroom
-        self.assertEqual("start_flow", mr_mocks.queued_batch_tasks[-1]["type"])
+        self.assertEqual(
+            mr_mocks.calls["flow_start"],
+            [
+                call(
+                    self.org,
+                    self.admin,
+                    typ="M",
+                    flow=background_flow,
+                    groups=[],
+                    contacts=[],
+                    urns=[],
+                    query=f"uuid='{contact.uuid}'",
+                    exclude=Exclusions(),
+                    params={},
+                )
+            ],
+        )
