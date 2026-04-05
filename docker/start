@@ -25,6 +25,7 @@ exec gunicorn temba.wsgi:application \
   --user=$PROJECT_USER \
   --chdir=$PROJECT_PATH \
   --bind=0.0.0.0:8001 \
+  --worker-tmp-dir /dev/shm \
   --timeout=120 \
   --log-level=info \
   --log-config=$PROJECT_PATH/docker/gunicorn/gunicorn-logging.conf \
