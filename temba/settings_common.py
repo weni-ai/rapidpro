@@ -623,13 +623,6 @@ AUTH_PASSWORD_VALIDATORS = [
 
 INVITATION_VALIDITY = timedelta(days=30)
 
-_db_host = "localhost"
-_redis_host = "localhost"
-
-if os.getenv("REMOTE_CONTAINERS") == "true":
-    _db_host = "postgres"
-    _redis_host = "redis"
-
 # -----------------------------------------------------------------------------------
 # Database
 # -----------------------------------------------------------------------------------
