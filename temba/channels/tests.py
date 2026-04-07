@@ -1534,6 +1534,7 @@ class ChannelLogTest(TembaTest):
             log.get_display(anonymize=True, urn=msg_out.contact_urn),
         )
 
+
 class ChannelLogCRUDLTest(CRUDLTestMixin, TembaTest):
     def test_msg(self):
         contact = self.create_contact("Fred", phone="+12067799191")
