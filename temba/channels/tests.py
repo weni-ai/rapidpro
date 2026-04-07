@@ -33,7 +33,7 @@ from temba.utils.models import generate_uuid
 from temba.utils.views.mixins import TEMBA_MENU_SELECTION
 
 from .models import Channel, ChannelCount, ChannelEvent, ChannelLog, SyncEvent
-from .tasks import (  # isort: skip
+from .tasks import (
     check_android_channels,
     squash_channel_counts,
     trim_channel_events,
