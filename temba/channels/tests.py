@@ -1323,7 +1323,6 @@ class ChannelCountTest(TembaTest):
         self.assertDailyCount(self.channel, 1, ChannelCount.OUTGOING_IVR_TYPE, msg5.created_on.date())
 
 
-
 class ChannelEventTest(TembaTest):
     def test_trim_task(self):
         contact = self.create_contact("Joe", phone="+250788111222")

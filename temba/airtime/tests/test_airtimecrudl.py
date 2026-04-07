@@ -72,5 +72,3 @@ class AirtimeCRUDLTest(TembaTest, CRUDLTestMixin):
             self.assertContains(response, "Ben Haggerty")
             self.assertNotContains(response, "+250 700 000 003")
             self.assertFalse(response.context["show_logs"])
-
-
