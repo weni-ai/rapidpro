@@ -95,6 +95,48 @@ ACCOUNT_EMAIL_VERIFICATION = env("ACCOUNT_EMAIL_VERIFICATION", default="mandator
 HOSTNAME = DEFAULT_BRAND
 BRAND = BRANDS[0]
 
+# -----------------------------------------------------------------------------------
+# Allauth: OpenID Connect (generic) provider configuration via environment variables
+# - Use when the IdP expects OIDC generic (not the Microsoft-specific provider)
+# - Callback URL pattern (must be registered at the IdP):
+#     https://<domain>/accounts/oidc/{PROVIDER_ID}/login/callback/
+# - Expected env vars (staging/prod):
+#     SOCIAL_OIDC_PROVIDER_ID   e.g. "microsoft-staging" (defines {PROVIDER_ID})
+#     SOCIAL_OIDC_PROVIDER_NAME e.g. "Microsoft Entra (Staging)"
+#     SOCIAL_OIDC_TENANT        e.g. "77410195-14e1-4fb8-904b-ab1892023667" (optional helper)
+#     SOCIAL_OIDC_SERVER_URL    e.g. "https://login.microsoftonline.com/<tenant>/v2.0"
+#     SOCIAL_OIDC_CLIENT_ID
+#     SOCIAL_OIDC_CLIENT_SECRET
+#     SOCIAL_OIDC_TOKEN_AUTH_METHOD (default: client_secret_post)
+#     SOCIAL_OIDC_PKCE          (bool, default: True)
+# -----------------------------------------------------------------------------------
+SOCIAL_OIDC_PROVIDER_ID = env("SOCIAL_OIDC_PROVIDER_ID", default="unicef")
+SOCIAL_OIDC_PROVIDER_NAME = env("SOCIAL_OIDC_PROVIDER_NAME", default="Microsoft Entra")
+SOCIAL_OIDC_TENANT = env("SOCIAL_OIDC_TENANT", default=None)
+SOCIAL_OIDC_SERVER_URL = env(
+    "SOCIAL_OIDC_SERVER_URL",
+    default=(f"https://login.microsoftonline.com/{SOCIAL_OIDC_TENANT}/v2.0" if SOCIAL_OIDC_TENANT else ""),
+)
+SOCIAL_OIDC_CLIENT_ID = env("SOCIAL_OIDC_CLIENT_ID", default="")
+SOCIAL_OIDC_CLIENT_SECRET = env("SOCIAL_OIDC_CLIENT_SECRET", default="")
+SOCIAL_OIDC_TOKEN_AUTH_METHOD = env("SOCIAL_OIDC_TOKEN_AUTH_METHOD", default="client_secret_post")
+SOCIAL_OIDC_PKCE = env.bool("SOCIAL_OIDC_PKCE", default=True)
+
+SOCIALACCOUNT_PROVIDERS.setdefault("openid_connect", {})
+SOCIALACCOUNT_PROVIDERS["openid_connect"]["OAUTH_PKCE_ENABLED"] = SOCIAL_OIDC_PKCE
+SOCIALACCOUNT_PROVIDERS["openid_connect"]["APPS"] = [
+    {
+        "provider_id": SOCIAL_OIDC_PROVIDER_ID,
+        "name": SOCIAL_OIDC_PROVIDER_NAME,
+        "client_id": SOCIAL_OIDC_CLIENT_ID,
+        "secret": SOCIAL_OIDC_CLIENT_SECRET,
+        "settings": {
+            "server_url": SOCIAL_OIDC_SERVER_URL,
+            "token_auth_method": SOCIAL_OIDC_TOKEN_AUTH_METHOD,
+        },
+    }
+]
+
 # VARIABLES TO API REQUISITIONS
 # ------------------------------------------------------------------------------
 

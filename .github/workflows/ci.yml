@@ -54,6 +54,7 @@ jobs:
 
       - name: Initialize environment
         run: |
+          poetry lock --no-interaction
           poetry install --no-root
           corepack enable
           yarn install
