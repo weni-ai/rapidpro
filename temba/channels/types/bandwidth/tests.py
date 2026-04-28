@@ -22,11 +22,6 @@ class BandwidthTypeTest(TembaTest):
 
         self.login(self.admin)
 
-        response = self.client.get(reverse("channels.channel_claim"))
-        self.assertNotContains(response, url)
-
-        self.make_beta(self.admin)
-
         # check that claim page URL appears on claim list page
         response = self.client.get(reverse("channels.channel_claim"))
         self.assertContains(response, url)
@@ -74,7 +69,7 @@ class BandwidthTypeTest(TembaTest):
 
         with patch("requests.delete") as mock_delete:
             mock_delete.side_effect = [MockResponse(200, "")]
-            channel.release(self.admin)
+            channel.release(self.admin, interrupt=False)
 
             self.assertEqual(
                 mock_delete.call_args[0][0],
@@ -93,11 +88,6 @@ class BandwidthTypeTest(TembaTest):
         url = reverse("channels.types.bandwidth.claim")
 
         self.login(self.admin)
-
-        response = self.client.get(reverse("channels.channel_claim"))
-        self.assertNotContains(response, url)
-
-        self.make_beta(self.admin)
 
         # check that claim page URL appears on claim list page
         response = self.client.get(reverse("channels.channel_claim"))
@@ -146,7 +136,7 @@ class BandwidthTypeTest(TembaTest):
 
         with patch("requests.delete") as mock_delete:
             mock_delete.side_effect = [MockResponse(200, "")]
-            channel.release(self.admin)
+            channel.release(self.admin, interrupt=False)
 
             self.assertEqual(
                 mock_delete.call_args[0][0],

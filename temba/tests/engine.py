@@ -258,9 +258,10 @@ class MockSessionWriter:
         if not self.session:
             interrupted_on = self.output["trigger"]["triggered_on"]  # which would have happened at trigger time
 
-            self.contact.sessions.filter(status=FlowSession.STATUS_WAITING).update(
-                status=FlowSession.STATUS_INTERRUPTED, ended_on=timezone.now()
-            )
+            if self.contact.current_session_uuid:
+                FlowSession.objects.filter(uuid=self.contact.current_session_uuid).update(
+                    status=FlowSession.STATUS_INTERRUPTED, ended_on=timezone.now()
+                )
             self.contact.runs.filter(status__in=(FlowRun.STATUS_ACTIVE, FlowRun.STATUS_WAITING)).update(
                 status=FlowRun.STATUS_INTERRUPTED,
                 modified_on=interrupted_on,
@@ -281,7 +282,7 @@ class MockSessionWriter:
         else:
             self.session = FlowSession.objects.create(
                 uuid=self.output["uuid"],
-                contact=self.contact,
+                contact_uuid=self.contact.uuid,
                 session_type=db_flow_types[self.output["type"]],
                 output=self.output,
                 status=SESSION_STATUSES[self.output["status"]],
@@ -296,7 +297,8 @@ class MockSessionWriter:
                 current_flow = Flow.objects.get(uuid=run["flow"]["uuid"])
 
             db_state = dict(
-                path=run["path"],
+                path_nodes=[p["node_uuid"] for p in run["path"]],
+                path_times=[p["arrived_on"] for p in run["path"]],
                 results=run["results"],
                 status=RUN_STATUSES[run["status"]],
                 current_node_uuid=run["path"][-1]["node_uuid"] if run["path"] else None,
@@ -323,8 +325,9 @@ class MockSessionWriter:
             runs.append(FlowRun.objects.get(uuid=run["uuid"]))
 
         self.contact.current_flow = current_flow
+        self.contact.current_session_uuid = self.session.uuid
         self.contact.modified_on = timezone.now()
-        self.contact.save(update_fields=("current_flow", "modified_on"))
+        self.contact.save(update_fields=("current_flow", "current_session_uuid", "modified_on"))
 
         self._handle_events()
         return runs

@@ -202,6 +202,7 @@ class Broadcast(models.Model):
         (STATUS_INTERRUPTED, "Interrupted"),
     )
 
+    uuid = models.UUIDField(unique=True)
     org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="broadcasts")
     status = models.CharField(max_length=1, choices=STATUS_CHOICES, default=STATUS_PENDING)
     contact_count = models.IntegerField(default=0, null=True)  # null until status is QUEUED
@@ -506,12 +507,12 @@ class Msg(models.Model):
     TYPE_VOICE = "V"
     TYPE_CHOICES = ((TYPE_TEXT, "Text"), (TYPE_OPTIN, "Opt-In Request"), (TYPE_VOICE, "Interactive Voice Response"))
 
-    FAILED_SUSPENDED = "S"
+    FAILED_NO_DESTINATION = "D"
     FAILED_CONTACT = "C"
+    FAILED_SUSPENDED = "S"
     FAILED_LOOPING = "L"
     FAILED_ERROR_LIMIT = "E"
     FAILED_TOO_OLD = "O"
-    FAILED_NO_DESTINATION = "D"
     FAILED_CHANNEL_REMOVED = "R"
     FAILED_CHOICES = (
         (FAILED_SUSPENDED, _("Workspace suspended")),
@@ -534,7 +535,7 @@ class Msg(models.Model):
     MAX_QUICK_REPLIES = 10  # max quick replies allowed on a message
 
     id = models.BigAutoField(primary_key=True)
-    uuid = models.UUIDField(default=uuid4)
+    uuid = models.UUIDField(unique=True)
     org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="msgs", db_index=False)
 
     # message destination
@@ -545,9 +546,7 @@ class Msg(models.Model):
     # message origin (note that we don't index or constrain flow/ticket so accessing by these is not supported)
     broadcast = models.ForeignKey(Broadcast, on_delete=models.PROTECT, null=True, related_name="msgs")
     flow = models.ForeignKey("flows.Flow", on_delete=models.DO_NOTHING, null=True, db_index=False, db_constraint=False)
-    ticket = models.ForeignKey(
-        "tickets.Ticket", on_delete=models.DO_NOTHING, null=True, db_index=False, db_constraint=False
-    )
+    ticket_uuid = models.UUIDField(null=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, db_index=False)
 
     # message content
@@ -558,13 +557,13 @@ class Msg(models.Model):
     locale = models.CharField(max_length=6, null=True)  # eng, eng-US, por-BR, und etc
     templating = models.JSONField(null=True)
 
-    created_on = models.DateTimeField(db_index=True)  # for flow messages this uses event time to keep histories ordered
+    created_on = models.DateTimeField()
     modified_on = models.DateTimeField()
     sent_on = models.DateTimeField(null=True)
 
     msg_type = models.CharField(max_length=1, choices=TYPE_CHOICES)
     direction = models.CharField(max_length=1, choices=DIRECTION_CHOICES)
-    status = models.CharField(max_length=1, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
+    status = models.CharField(max_length=1, choices=STATUS_CHOICES, default=STATUS_PENDING)
     visibility = models.CharField(max_length=1, choices=VISIBILITY_CHOICES, default=VISIBILITY_VISIBLE)
     is_android = models.BooleanField()
     labels = models.ManyToManyField("Label", related_name="msgs")
@@ -583,6 +582,11 @@ class Msg(models.Model):
 
     log_uuids = ArrayField(models.UUIDField(), null=True)
 
+    # TODO remove
+    ticket = models.ForeignKey(
+        "tickets.Ticket", on_delete=models.DO_NOTHING, null=True, db_index=False, db_constraint=False
+    )
+
     def as_archive_json(self):
         """
         Returns this message in the same format as archived by rp-archiver which is based on the API format
@@ -592,6 +596,7 @@ class Msg(models.Model):
         serializer = MsgReadSerializer()
 
         return {
+            "uuid": str(self.uuid),
             "id": self.id,
             "contact": {"uuid": str(self.contact.uuid), "name": self.contact.name},
             "channel": {"uuid": str(self.channel.uuid), "name": self.channel.name} if self.channel else None,
@@ -683,15 +688,16 @@ class Msg(models.Model):
 
     @classmethod
     def apply_action_delete(cls, user, msgs):
-        cls.bulk_soft_delete(msgs)
+        if msgs := list(msgs):
+            cls.bulk_soft_delete(msgs[0].org, user, msgs)
 
     @classmethod
     def apply_action_resend(cls, user, msgs):
-        if msgs:
-            mailroom.get_client().msg_resend(msgs[0].org, list(msgs))
+        if msgs := list(msgs):
+            mailroom.get_client().msg_resend(msgs[0].org, user, msgs)
 
     @classmethod
-    def bulk_soft_delete(cls, msgs: list):
+    def bulk_soft_delete(cls, org, user, msgs: list):
         """
         Bulk soft deletes the given incoming messages, i.e. clears content and updates its visibility to deleted.
         """
@@ -703,14 +709,9 @@ class Msg(models.Model):
 
             attachments_to_delete.extend(msg.get_attachments())
 
-        Attachment.bulk_delete(attachments_to_delete)
+        Attachment.bulk_delete(attachments_to_delete)  # TODO move to mailroom as well
 
-        for msg in msgs:
-            msg.labels.clear()
-
-        cls.objects.filter(id__in=[m.id for m in msgs]).update(
-            text="", attachments=[], visibility=Msg.VISIBILITY_DELETED_BY_USER
-        )
+        mailroom.get_client().msg_delete(org, user, list(msgs))
 
     @classmethod
     def bulk_delete(cls, msgs: list):
@@ -758,19 +759,19 @@ class Msg(models.Model):
             models.Index(
                 name="msgs_inbox",
                 fields=["org", "-created_on", "-id"],
-                condition=Q(direction="I", visibility="V", status="H", flow__isnull=True, msg_type="T"),
+                condition=Q(direction="I", visibility="V", status="H", flow__isnull=True),
             ),
             # used for Flows view and API folder
             models.Index(
                 name="msgs_flows",
                 fields=["org", "-created_on", "-id"],
-                condition=Q(direction="I", visibility="V", status="H", flow__isnull=False, msg_type="T"),
+                condition=Q(direction="I", visibility="V", status="H", flow__isnull=False),
             ),
             # used for Archived view and API folder
             models.Index(
                 name="msgs_archived",
                 fields=["org", "-created_on", "-id"],
-                condition=Q(direction="I", visibility="A", status="H", msg_type="T"),
+                condition=Q(direction="I", visibility="A", status="H"),
             ),
             # used for Outbox and Failed views and API folders
             models.Index(
@@ -783,10 +784,6 @@ class Msg(models.Model):
                 name="msgs_sent",
                 fields=["org", "-sent_on", "-id"],
                 condition=Q(direction="O", visibility="V", status__in=("W", "S", "D", "R")),
-            ),
-            # used for API incoming folder (unpublicized as could be dropped when CasePro is retired)
-            models.Index(
-                name="msgs_api_incoming", fields=["org", "-modified_on", "-id"], condition=Q(direction="I", status="H")
             ),
         ]
         constraints = [
@@ -841,9 +838,8 @@ class MsgFolder(Enum):
             visibility=Msg.VISIBILITY_VISIBLE,
             status=Msg.STATUS_HANDLED,
             flow__isnull=True,
-            msg_type=Msg.TYPE_TEXT,
         ),
-        dict(direction="in", visibility="visible", status="handled", flow__isnull=True, type__ne="voice"),
+        dict(direction="in", visibility="visible", status="handled", flow__isnull=True),
     )
     HANDLED = (
         "W",
@@ -852,9 +848,8 @@ class MsgFolder(Enum):
             visibility=Msg.VISIBILITY_VISIBLE,
             status=Msg.STATUS_HANDLED,
             flow__isnull=False,
-            msg_type=Msg.TYPE_TEXT,
         ),
-        dict(direction="in", visibility="visible", status="handled", flow__isnull=False, type__ne="voice"),
+        dict(direction="in", visibility="visible", status="handled", flow__isnull=False),
     )
     ARCHIVED = (
         "A",
@@ -862,9 +857,8 @@ class MsgFolder(Enum):
             direction=Msg.DIRECTION_IN,
             visibility=Msg.VISIBILITY_ARCHIVED,
             status=Msg.STATUS_HANDLED,
-            msg_type=Msg.TYPE_TEXT,
         ),
-        dict(direction="in", visibility="archived", status="handled", type__ne="voice"),
+        dict(direction="in", visibility="archived", status="handled"),
     )
     OUTBOX = (
         "O",
@@ -923,6 +917,9 @@ class MsgFolder(Enum):
         by_folder["calls"] = max(counts.get("msgs:folder:C", 0), 0)
 
         return by_folder
+
+    def __repr__(self):  # pragma: no cover
+        return f"<MsgFolder.{self.name} code={self.code}>"
 
 
 class Label(TembaModel, DependencyMixin):

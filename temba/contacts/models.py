@@ -1,15 +1,15 @@
 import itertools
 import logging
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone as tzone
 from decimal import Decimal
-from itertools import chain
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import iso8601
 import phonenumbers
 import regex
-from django_valkey import get_valkey_connection
 from openpyxl import load_workbook
 from smartmin.models import SmartModel
 
@@ -25,13 +25,13 @@ from django.utils.translation import gettext_lazy as _
 from temba import mailroom
 from temba.channels.models import Channel
 from temba.locations.models import AdminBoundary
-from temba.mailroom import ContactSpec, modifiers, queue_populate_dynamic_group
+from temba.mailroom import ContactSpec, modifiers
 from temba.orgs.models import DependencyMixin, Export, ExportType, Org, OrgRole
-from temba.utils import format_number, on_transaction_commit
+from temba.utils import dynamo, format_number, on_transaction_commit
 from temba.utils.export import MultiSheetExporter
 from temba.utils.models import JSONField, LegacyUUIDMixin, TembaModel, delete_in_batches
 from temba.utils.models.counts import BaseSquashableCount
-from temba.utils.text import unsnakify
+from temba.utils.text import obfuscate, unsnakify
 from temba.utils.urns import ParsedURN, parse_number, parse_urn
 from temba.utils.uuid import uuid4
 
@@ -48,7 +48,6 @@ class URN:
     """
 
     DELETED_SCHEME = "deleted"
-    DISCORD_SCHEME = "discord"
     EMAIL_SCHEME = "mailto"
     EXTERNAL_SCHEME = "ext"
     FACEBOOK_SCHEME = "facebook"
@@ -73,7 +72,6 @@ class URN:
 
     SCHEME_CHOICES = (
         (TEL_SCHEME, _("Phone Number")),
-        (DISCORD_SCHEME, _("Discord Identifier")),
         (EMAIL_SCHEME, _("Email Address")),
         (EXTERNAL_SCHEME, _("External Identifier")),
         (FACEBOOK_SCHEME, _("Facebook Identifier")),
@@ -221,13 +219,6 @@ class URN:
                 path,
                 regex.V0,
             )
-        # Discord IDs are snowflakes, which are int64s internally
-        elif scheme == cls.DISCORD_SCHEME:
-            try:
-                int(path)
-                return True
-            except ValueError:
-                return False
 
         # anything goes for external schemes
         return True
@@ -304,10 +295,6 @@ class URN:
     @classmethod
     def from_tel(cls, path):
         return cls.from_parts(cls.TEL_SCHEME, path)
-
-    @classmethod
-    def from_discord(cls, path):
-        return cls.from_parts(cls.DISCORD_SCHEME, path)
 
 
 class UserContactFieldsQuerySet(models.QuerySet):
@@ -459,9 +446,7 @@ class ContactField(TembaModel, DependencyMixin):
         used for imports and may ignore or modify the given name to ensure validity and uniqueness.
         """
 
-        existing = org.fields.filter(is_system=False, is_active=True, key=key).first()
-
-        if existing:
+        if existing := org.fields.filter(is_system=False, is_active=True, key=key).first():
             changed = False
 
             if name and existing.name != name and cls.is_valid_name(name):
@@ -633,11 +618,11 @@ class Contact(LegacyUUIDMixin, SmartModel):
         )
 
     @property
-    def anon_display(self):
+    def ref(self) -> str:
         """
-        The displayable identifier used in place of URNs for anonymous orgs
+        A 6-7 character human friendly string reference for this contact
         """
-        return f"{self.id:010}"
+        return obfuscate.encode_id(self.id, settings.ID_OBFUSCATION_KEY)
 
     @classmethod
     def get_status_counts(cls, org) -> dict:
@@ -646,6 +631,13 @@ class Contact(LegacyUUIDMixin, SmartModel):
         """
         groups = org.groups.filter(group_type__in=ContactGroup.CONTACT_STATUS_TYPES)
         return {g.group_type: count for g, count in ContactGroup.get_member_counts(groups).items()}
+
+    def get_history(
+        self, user, *, before: UUID = None, after: UUID = None, ticket: UUID = None, limit: int
+    ) -> list[dict]:
+        from temba.mailroom.events import Event
+
+        return Event.get_by_contact(self, user, before=before, after=after, ticket=ticket, limit=limit)
 
     def get_scheduled_broadcasts(self):
         return (
@@ -724,107 +716,6 @@ class Contact(LegacyUUIDMixin, SmartModel):
             )
 
         return sorted(merged, key=lambda k: k["scheduled"])
-
-    def get_history(self, after: datetime, before: datetime, include_event_types: set, ticket, limit: int) -> list:
-        """
-        Gets this contact's history of messages, calls, runs etc in the given time window
-        """
-        from temba.flows.models import FlowExit
-        from temba.ivr.models import Call
-        from temba.mailroom.events import get_event_time
-        from temba.msgs.models import Msg
-        from temba.tickets.models import TicketEvent
-
-        msgs = (
-            self.msgs.filter(created_on__gte=after, created_on__lt=before)
-            .exclude(status=Msg.STATUS_PENDING)
-            .order_by("-created_on", "-id")
-            .select_related("channel", "contact_urn", "broadcast", "optin")[:limit]
-        )
-
-        # get all runs start started or ended in this period
-        runs = (
-            self.runs.filter(
-                Q(created_on__gte=after, created_on__lt=before)
-                | Q(exited_on__isnull=False, exited_on__gte=after, exited_on__lt=before)
-            )
-            .exclude(flow__is_system=True)
-            .order_by("-created_on")
-            .select_related("flow")[:limit]
-        )
-        started_runs = [r for r in runs if after <= r.created_on < before]
-        exited_runs = [FlowExit(r) for r in runs if r.exited_on and after <= r.exited_on < before]
-
-        channel_events = (
-            self.channel_events.filter(created_on__gte=after, created_on__lt=before)
-            .order_by("-created_on")
-            .select_related("channel", "optin")[:limit]
-        )
-
-        calls = (
-            Call.objects.filter(contact=self, created_on__gte=after, created_on__lt=before)
-            .exclude(status__in=[Call.STATUS_PENDING, Call.STATUS_WIRED])
-            .order_by("-created_on")
-            .select_related("channel")[:limit]
-        )
-
-        ticket_events = (
-            self.ticket_events.filter(created_on__gte=after, created_on__lt=before)
-            .select_related("ticket__topic", "assignee", "created_by")
-            .order_by("-created_on")
-        )
-
-        if ticket:
-            # if we have a ticket this is for the ticket UI, so we want *all* events for *only* that ticket
-            ticket_events = ticket_events.filter(ticket=ticket)
-        else:
-            # if not then this for the contact read page so only show ticket opened/closed/reopened events
-            ticket_events = ticket_events.filter(
-                event_type__in=[TicketEvent.TYPE_OPENED, TicketEvent.TYPE_CLOSED, TicketEvent.TYPE_REOPENED]
-            )
-
-        ticket_events = ticket_events[:limit]
-
-        transfers = self.airtime_transfers.filter(created_on__gte=after, created_on__lt=before).order_by("-created_on")[
-            :limit
-        ]
-
-        session_events = self.get_session_events(after, before, include_event_types)
-
-        # chain all items together, sort by their event time, and slice
-        items = chain(
-            msgs,
-            started_runs,
-            exited_runs,
-            ticket_events,
-            channel_events,
-            calls,
-            transfers,
-            session_events,
-        )
-
-        # sort and slice
-        return sorted(items, key=get_event_time, reverse=True)[:limit]
-
-    def get_session_events(self, after: datetime, before: datetime, types: set) -> list:
-        """
-        Extracts events from this contacts sessions that overlap with the given time window
-        """
-
-        # limit to 100 sessions at a time to prevent melting when a contact has a lot of sessions
-        sessions = self.sessions.filter(
-            Q(created_on__gte=after, created_on__lt=before) | Q(ended_on__gte=after, ended_on__lt=before)
-        ).order_by("-created_on")[:100]
-        events = []
-        for session in sessions:
-            for run in session.output_json.get("runs", []):
-                for event in run.get("events", []):
-                    event["session_uuid"] = str(session.uuid)
-                    event_time = iso8601.parse_date(event["created_on"])
-                    if event["type"] in types and after <= event_time < before:
-                        events.append(event)
-
-        return events
 
     def get_field_serialized(self, field) -> str:
         """
@@ -1023,14 +914,12 @@ class Contact(LegacyUUIDMixin, SmartModel):
         self.modify(user, [mod], refresh=False)
         return self.tickets.order_by("id").last()
 
-    def interrupt(self, user) -> bool:
+    def interrupt(self, user):
         """
         Interrupts this contact's current flow
         """
         if self.current_flow:
-            return mailroom.get_client().contact_interrupt(self.org, user, self) > 0
-
-        return False
+            mailroom.get_client().contact_interrupt(self.org, user, [self])
 
     def block(self, user):
         """
@@ -1064,7 +953,7 @@ class Contact(LegacyUUIDMixin, SmartModel):
         Contact.bulk_change_status(user, [self], modifiers.Status.ACTIVE)
         self.refresh_from_db()
 
-    def release(self, user, *, immediately=False, deindex=True):
+    def release(self, user, *, immediately=False, deindex=True) -> dict:
         """
         Releases this contact. Note that we clear all identifying data but don't hard delete the contact because we need
         to expose deleted contacts over the API to allow external systems to know that contacts have been deleted.
@@ -1105,11 +994,12 @@ class Contact(LegacyUUIDMixin, SmartModel):
 
         # the hard work of removing everything this contact owns can be given to a celery task
         if immediately:
-            self._full_release()
+            return self._full_release()
         else:
             on_transaction_commit(lambda: full_release_contact.delay(self.id))
+            return {}
 
-    def _full_release(self):
+    def _full_release(self) -> dict:
         """
         Deletes everything owned by this contact
         """
@@ -1118,36 +1008,43 @@ class Contact(LegacyUUIDMixin, SmartModel):
 
         assert not self.is_active, "can't fully release a contact which hasn't been released"
 
-        with transaction.atomic():
-            # release our tickets
-            for ticket in self.tickets.all():
-                ticket.delete()
+        counts = defaultdict(int)
 
-            # delete our messages in batches
-            while True:
-                msg_batch = list(self.msgs.all()[:1000])
-                if not msg_batch:
-                    break
-                Msg.bulk_delete(msg_batch)
+        # release our tickets
+        for ticket in self.tickets.all():
+            ticket.delete()
 
-            delete_in_batches(self.runs.all())
-            delete_in_batches(self.sessions.all())
-            delete_in_batches(self.channel_events.all())
-            delete_in_batches(self.calls.all())
-            delete_in_batches(self.fires.all())
+        # delete our messages in batches
+        while True:
+            msg_batch = list(self.msgs.all()[:1000])
+            if not msg_batch:
+                break
+            Msg.bulk_delete(msg_batch)
+            counts["messages"] += len(msg_batch)
 
-            for urn in self.urns.all():
-                # delete the urn if it has no associated content.. which should be the case if it wasn't
-                # stolen from another contact
-                if not urn.msgs.all() and not urn.channel_events.all() and not urn.calls.all():
-                    urn.delete()
-                else:
-                    urn.contact = None
-                    urn.save(update_fields=("contact",))
+        counts["runs"] = delete_in_batches(self.runs.all())
+        delete_in_batches(self.channel_events.all())
+        delete_in_batches(self.calls.all())
+        delete_in_batches(self.fires.all())
 
-            # take us out of broadcast addressed contacts
-            for broadcast in self.addressed_broadcasts.all():
-                broadcast.contacts.remove(self)
+        for urn in self.urns.all():
+            # delete the urn if it has no associated content.. which should be the case if it wasn't
+            # stolen from another contact
+            if not urn.msgs.all() and not urn.channel_events.all() and not urn.calls.all():
+                urn.delete()
+            else:
+                urn.contact = None
+                urn.save(update_fields=("contact",))
+
+        # take us out of broadcast addressed contacts
+        for broadcast in self.addressed_broadcasts.all():
+            broadcast.contacts.remove(self)
+
+        self.notes.all().delete()
+
+        counts["events"] = dynamo.delete_partition(dynamo.HISTORY, f"con#{self.uuid}")
+
+        return counts
 
     @classmethod
     def bulk_urn_cache_initialize(cls, contacts, *, using: str = "default"):
@@ -1183,6 +1080,16 @@ class Contact(LegacyUUIDMixin, SmartModel):
             return {}
 
         return mailroom.get_client().contact_inspect(contacts[0].org, contacts)
+
+    @classmethod
+    def bulk_interrupt(cls, user, contacts):
+        """
+        Interrupts sessions for the given contacts.
+        """
+        if not contacts:
+            return
+
+        mailroom.get_client().contact_interrupt(contacts[0].org, user, contacts)
 
     def get_groups(self, *, manual_only=False):
         """
@@ -1232,7 +1139,7 @@ class Contact(LegacyUUIDMixin, SmartModel):
         if self.name:
             return self.name
         elif org.is_anon:
-            return self.anon_display
+            return self.ref
 
         return self.get_urn_display(org=org, formatted=formatted)
 
@@ -1392,10 +1299,12 @@ class ContactGroup(LegacyUUIDMixin, TembaModel, DependencyMixin):
     STATUS_INITIALIZING = "I"  # group has been created but not yet (re)evaluated
     STATUS_EVALUATING = "V"  # a task is currently (re)evaluating this group
     STATUS_READY = "R"  # group is ready for use
+    STATUS_INVALID = "X"  # group query is invalid
     STATUS_CHOICES = (
         (STATUS_INITIALIZING, _("Initializing")),
         (STATUS_EVALUATING, _("Evaluating")),
         (STATUS_READY, _("Ready")),
+        (STATUS_INVALID, _("Invalid")),
     )
 
     MAX_QUERY_LEN = 10_000
@@ -1580,7 +1489,7 @@ class ContactGroup(LegacyUUIDMixin, TembaModel, DependencyMixin):
 
         # start background task to re-evaluate who belongs in this group
         if reevaluate:
-            on_transaction_commit(lambda: queue_populate_dynamic_group(self))
+            on_transaction_commit(lambda: mailroom.get_client().contact_populate_group(self.org, self))
 
     @classmethod
     def get_member_counts(cls, groups) -> dict:
@@ -1612,7 +1521,8 @@ class ContactGroup(LegacyUUIDMixin, TembaModel, DependencyMixin):
 
         from .tasks import release_group_task
 
-        # delete all triggers for this group
+        self.query_fields.clear()
+
         for trigger in self.triggers.filter(is_active=True):
             trigger.release(user)
 
@@ -1791,12 +1701,14 @@ class ContactExport(ExportType):
             dict(label="Last Seen On", key="last_seen_on", field=None, urn_scheme=None),
         ]
 
-        # anon orgs also get an ID column that is just the PK
+        # anon orgs get some extra columns
         if export.org.is_anon:
-            fields = [
-                dict(label="ID", key="id", field=None, urn_scheme=None),
+            extra = [
+                dict(label="Ref", key="ref", field=None, urn_scheme=None),
+                dict(label="Legacy ID", key="id", field=None, urn_scheme=None),  # TODO remove in future
                 dict(label="Scheme", key="scheme", field=None, urn_scheme=None),
-            ] + fields
+            ]
+            fields = fields[0:1] + extra + fields[1:]
 
         scheme_counts = dict()
         if not export.org.is_anon:
@@ -1924,6 +1836,8 @@ class ContactExport(ExportType):
             return contact.last_seen_on
         elif field["key"] == "id":
             return str(contact.id)
+        elif field["key"] == "ref":
+            return str(contact.ref)
         elif field["key"] == "scheme":
             contact_urns = contact.get_urns()
             return contact_urns[0].scheme if contact_urns else ""
@@ -1947,8 +1861,10 @@ class ContactExport(ExportType):
 
 
 def get_import_upload_path(instance: Any, filename: str):
+    assert instance.org_id and instance.uuid
+
     ext = Path(filename).suffix.lower()
-    return f"orgs/{instance.org_id}/contact_imports/{uuid4()}{ext}"
+    return f"orgs/{instance.org_id}/contact_imports/{instance.uuid}{ext}"
 
 
 class ContactImport(SmartModel):
@@ -1972,6 +1888,7 @@ class ContactImport(SmartModel):
 
     MAPPING_IGNORE = {"type": "ignore"}
 
+    uuid = models.UUIDField(unique=True, default=uuid4)
     org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="contact_imports")
     file = models.FileField(upload_to=get_import_upload_path)
     original_filename = models.TextField()
@@ -2210,7 +2127,7 @@ class ContactImport(SmartModel):
             self.group = ContactGroup.create_manual(self.org, self.created_by, name=self.group_name)
             self.save(update_fields=("group",))
 
-        # parse each row, creating batch tasks for mailroom
+        # parse each row, creating batches
         workbook = load_workbook(filename=self.file, read_only=True, data_only=True)
         ws = workbook.active
         ws.reset_dimensions()  # see https://openpyxl.readthedocs.io/en/latest/optimized.html#worksheet-dimensions
@@ -2225,13 +2142,8 @@ class ContactImport(SmartModel):
             for spec in batch_specs:
                 urns.extend(spec.get("urns", []))
 
-        # set valkey key which mailroom batch tasks can decrement to know when import has completed
-        r = get_valkey_connection()
-        r.set(f"contact_import_batches_remaining:{self.id}", len(batches), ex=24 * 60 * 60)
-
-        # start each batch...
-        for batch in batches:
-            batch.import_async()
+        # tell mailroom to perform the import
+        mailroom.get_client().contact_import(self.org, self)
 
         # flag org if the set of imported URNs looks suspicious
         if not self.org.is_verified and self._detect_spamminess(urns):
@@ -2453,6 +2365,3 @@ class ContactImportBatch(models.Model):
     num_errored = models.IntegerField(default=0)
     errors = models.JSONField(default=list)
     finished_on = models.DateTimeField(null=True)
-
-    def import_async(self):
-        mailroom.queue_contact_import_batch(self)

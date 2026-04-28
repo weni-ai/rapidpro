@@ -413,7 +413,7 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
         response = self.client.get(reverse("orgs.org_join_accept", args=["invalid"]))
         self.assertRedirect(response, reverse("public.public_index"))
 
-        invitation = Invitation.create(self.org, self.admin, "edwin@textit.com", OrgRole.EDITOR)
+        invitation = Invitation.create(self.org, self.admin, "edwin@tExtit.com", OrgRole.EDITOR)
 
         join_accept_url = reverse("orgs.org_join_accept", args=[invitation.secret])
         join_url = reverse("orgs.org_join", args=[invitation.secret])
@@ -733,7 +733,7 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
         # should be now logged into that org
         self.assertRedirect(response, "/org/start/")
         response = self.client.get("/org/start/")
-        self.assertEqual(str(new_org.id), response.headers["X-Temba-Org"])
+        self.assertEqual(str(new_org.uuid), response.headers["X-Temba-Workspace"])
 
     def test_create_child(self):
         list_url = reverse("orgs.org_list")
@@ -1179,4 +1179,5 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
         # now switch to it
         response = self.client.post(reverse("orgs.org_switch"), {"other_org": self.org2.id, "next": "/msg"})
         self.assertRedirect(response, "/msg")
+        self.assertEqual(str(self.org2.uuid), self.client.session["org_uuid"])
         self.assertEqual(self.org2.id, self.client.session["org_id"])

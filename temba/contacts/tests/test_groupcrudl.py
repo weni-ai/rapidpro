@@ -1,4 +1,5 @@
 from datetime import timedelta
+from unittest.mock import call
 
 from django.test.utils import override_settings
 from django.urls import reverse
@@ -65,6 +66,9 @@ class ContactGroupCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # create a dynamic group using a query
         self.client.post(url, {"name": "Frank", "group_query": "tel = 1234"})
+        group = ContactGroup.objects.get(org=self.org, name="Frank")
+
+        self.assertEqual([call(self.org, group)], mr_mocks.calls["contact_populate_group"])
 
         ContactGroup.objects.get(org=self.org, name="Frank", query="tel = 1234")
 
@@ -116,7 +120,7 @@ class ContactGroupCRUDLTest(TembaTest, CRUDLTestMixin):
         smart = self.create_group("Dynamic", query="tel is 1234")
         open_tickets = self.org.groups.get(name="Open Tickets")
 
-        update_url = reverse("contacts.contactgroup_update", args=[manual.id])
+        update_url = reverse("contacts.contactgroup_update", args=[manual.uuid])
 
         self.assertRequestDisallowed(update_url, [None, self.agent, self.admin2])
 
@@ -147,7 +151,7 @@ class ContactGroupCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual(manual.name, "new name")
 
         # now try a smart group
-        update_url = reverse("contacts.contactgroup_update", args=[smart.id])
+        update_url = reverse("contacts.contactgroup_update", args=[smart.uuid])
 
         # mark our group as ready
         smart.status = ContactGroup.STATUS_READY
@@ -201,7 +205,7 @@ class ContactGroupCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual(smart.name, "Frank2")
 
         # try to update a system group
-        response = self.requestView(reverse("contacts.contactgroup_update", args=[open_tickets.id]), self.admin)
+        response = self.requestView(reverse("contacts.contactgroup_update", args=[open_tickets.uuid]), self.admin)
         self.assertEqual(404, response.status_code)
 
     def test_usages(self):

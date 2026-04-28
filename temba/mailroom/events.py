@@ -1,20 +1,15 @@
-from collections import defaultdict
-from datetime import datetime
+from dataclasses import dataclass
+from uuid import UUID
 
-import iso8601
-
-from django.conf import settings
-from django.urls import reverse
-from django.utils import timezone
-
-from temba.airtime.models import AirtimeTransfer
-from temba.channels.models import Channel, ChannelEvent
-from temba.flows.models import FlowExit, FlowRun
-from temba.ivr.models import Call
-from temba.msgs.models import Msg, OptIn
-from temba.orgs.models import Org
-from temba.tickets.models import Ticket, TicketEvent, Topic
 from temba.users.models import User
+from temba.utils import dynamo
+
+
+@dataclass
+class EventTag:
+    event_uuid: str
+    tag: str
+    data: dict
 
 
 class Event:
@@ -25,311 +20,162 @@ class Event:
     # engine events
     TYPE_AIRTIME_TRANSFERRED = "airtime_transferred"
     TYPE_BROADCAST_CREATED = "broadcast_created"
+    TYPE_CALL_CREATED = "call_created"
+    TYPE_CALL_MISSED = "call_missed"
+    TYPE_CALL_RECEIVED = "call_received"
+    TYPE_CHAT_STARTED = "chat_started"
     TYPE_CONTACT_FIELD_CHANGED = "contact_field_changed"
     TYPE_CONTACT_GROUPS_CHANGED = "contact_groups_changed"
     TYPE_CONTACT_LANGUAGE_CHANGED = "contact_language_changed"
     TYPE_CONTACT_NAME_CHANGED = "contact_name_changed"
+    TYPE_CONTACT_STATUS_CHANGED = "contact_status_changed"
     TYPE_CONTACT_URNS_CHANGED = "contact_urns_changed"
-    TYPE_EMAIL_SENT = "email_sent"
-    TYPE_ERROR = "error"
-    TYPE_FAILURE = "failure"
-    TYPE_FLOW_ENTERED = "flow_entered"
-    TYPE_INPUT_LABELS_ADDED = "input_labels_added"
     TYPE_IVR_CREATED = "ivr_created"
     TYPE_MSG_CREATED = "msg_created"
     TYPE_MSG_RECEIVED = "msg_received"
     TYPE_OPTIN_REQUESTED = "optin_requested"
-    TYPE_RUN_RESULT_CHANGED = "run_result_changed"
-    TYPE_TICKET_ASSIGNED = "ticket_assigned"
+    TYPE_OPTIN_STARTED = "optin_started"
+    TYPE_OPTIN_STOPPED = "optin_stopped"
+    TYPE_RUN_STARTED = "run_started"
+    TYPE_RUN_ENDED = "run_ended"
+    TYPE_TICKET_ASSIGNED = "ticket_assignee_changed"
     TYPE_TICKET_CLOSED = "ticket_closed"
     TYPE_TICKET_NOTE_ADDED = "ticket_note_added"
-    TYPE_TICKET_TOPIC_CHANGED = "ticket_topic_changed"
     TYPE_TICKET_OPENED = "ticket_opened"
     TYPE_TICKET_REOPENED = "ticket_reopened"
-    TYPE_WEBHOOK_CALLED = "webhook_called"
+    TYPE_TICKET_TOPIC_CHANGED = "ticket_topic_changed"
 
-    # additional events
-    TYPE_CALL_STARTED = "call_started"
-    TYPE_CAMPAIGN_FIRED = "campaign_fired"
-    TYPE_CHANNEL_EVENT = "channel_event"
-    TYPE_FLOW_EXITED = "flow_exited"
-
-    ticket_event_types = {
-        TicketEvent.TYPE_OPENED: TYPE_TICKET_OPENED,
-        TicketEvent.TYPE_ASSIGNED: TYPE_TICKET_ASSIGNED,
-        TicketEvent.TYPE_NOTE_ADDED: TYPE_TICKET_NOTE_ADDED,
-        TicketEvent.TYPE_TOPIC_CHANGED: TYPE_TICKET_TOPIC_CHANGED,
-        TicketEvent.TYPE_CLOSED: TYPE_TICKET_CLOSED,
-        TicketEvent.TYPE_REOPENED: TYPE_TICKET_REOPENED,
-    }
+    basic_ticket_types = {TYPE_TICKET_CLOSED, TYPE_TICKET_OPENED, TYPE_TICKET_REOPENED}
+    all_ticket_types = basic_ticket_types | {TYPE_TICKET_ASSIGNED, TYPE_TICKET_NOTE_ADDED, TYPE_TICKET_TOPIC_CHANGED}
 
     @classmethod
-    def from_history_item(cls, org: Org, user: User, item) -> dict:
-        if isinstance(item, dict):  # already an event
-            return item
+    def _from_item(cls, contact, item: dict) -> dict:
+        assert item["OrgID"] == contact.org_id, "org ID mismatch for contact event"
 
-        renderer = event_renderers.get(type(item))
-        assert renderer is not None, f"unsupported history item of type {type(item)}"
+        data = item.get("Data", {})
+        if dataGZ := item.get("DataGZ"):
+            data |= dynamo.load_jsongz(dataGZ)
 
-        return renderer(org, user, item)
+        data["uuid"] = item["SK"][4:]  # remove "evt#" prefix
+        return data
 
     @classmethod
-    def from_msg(cls, org: Org, user: User, obj: Msg) -> dict:
+    def _tag_from_item(cls, contact, item: dict) -> EventTag:
+        assert item["OrgID"] == contact.org_id, "org ID mismatch for contact event tag"
+
+        return EventTag(event_uuid=item["SK"][4:40], tag=item["SK"][41:], data=item.get("Data", {}))
+
+    @classmethod
+    def get_by_contact(cls, contact, user, *, before: UUID, after: UUID, ticket: UUID, limit: int) -> list[dict]:
         """
-        Reconstructs an engine event from a msg instance. Properties which aren't part of regular events are prefixed
-        with an underscore.
+        Fetches events for the given contact either before or after the given event UUID.
         """
+        assert (before or after) and not (before and after), "must provide either before or after"
 
-        obj_age = timezone.now() - obj.created_on
+        pk = f"con#{contact.uuid}"
+        before_sk = f"evt#{before}" if before else None
+        after_sk = f"evt#{after}" if after else None
+        events, tags = [], []
 
-        logs_url = None
-        if obj.channel and obj_age < settings.RETENTION_PERIODS["channellog"]:
-            logs_url = _url_for_user(
-                org,
-                user,
-                "channels.channel_logs_read",
-                args=[obj.channel.uuid, "msg", obj.id],
-                perm="channels.channel_logs",
-            )
+        def _item(item: dict) -> bool:
+            if item["SK"].count("#") == 1:  # item is an event rather than a tag
+                event = cls._from_item(contact, item)
 
-        if obj.direction == Msg.DIRECTION_IN:
-            return {
-                "type": cls.TYPE_MSG_RECEIVED,
-                "created_on": get_event_time(obj).isoformat(),
-                "msg": _msg_in(obj),
-                # additional properties
-                "msg_type": Msg.TYPE_VOICE if obj.msg_type == Msg.TYPE_VOICE else Msg.TYPE_TEXT,
-                "visibility": obj.visibility,
-                "logs_url": logs_url,
-            }
-        elif obj.broadcast and obj.broadcast.get_message_count() > 1:
-            return {
-                "type": cls.TYPE_BROADCAST_CREATED,
-                "created_on": get_event_time(obj).isoformat(),
-                "translations": obj.broadcast.translations,
-                "base_language": obj.broadcast.base_language,
-                # additional properties
-                "created_by": _user(obj.broadcast.created_by) if obj.broadcast.created_by else None,
-                "msg": _msg_out(obj),
-                "optin": _optin(obj.optin) if obj.optin else None,
-                "status": obj.status,
-                "recipient_count": obj.broadcast.get_message_count(),
-                "logs_url": logs_url,
-            }
-        else:
-            created_by = obj.broadcast.created_by if obj.broadcast else obj.created_by
-
-            if obj.msg_type == Msg.TYPE_VOICE:
-                msg_event = {
-                    "type": cls.TYPE_IVR_CREATED,
-                    "created_on": get_event_time(obj).isoformat(),
-                    "msg": _msg_out(obj),
-                }
-            elif obj.msg_type == Msg.TYPE_OPTIN and obj.optin:
-                msg_event = {
-                    "type": cls.TYPE_OPTIN_REQUESTED,
-                    "created_on": get_event_time(obj).isoformat(),
-                    "optin": _optin(obj.optin),
-                    "channel": _channel(obj.channel),
-                    "urn": str(obj.contact_urn),
-                }
+                if cls._include_event(event, ticket):
+                    events.append(event)
             else:
-                msg_event = {
-                    "type": cls.TYPE_MSG_CREATED,
-                    "created_on": get_event_time(obj).isoformat(),
-                    "msg": _msg_out(obj),
-                    "optin": _optin(obj.optin) if obj.optin else None,
-                }
+                tags.append(cls._tag_from_item(contact, item))
 
-            # add additional properties
-            msg_event["created_by"] = _user(created_by) if created_by else None
-            msg_event["status"] = obj.status
-            msg_event["logs_url"] = logs_url
+            # Keep going until we reach the limit. Note that because tags are interspersed with events, the last fetched
+            # event might not have all its tags yet.. but we always fetch one more event than what we return so the
+            # possibly incomplete event will be discarded anyway.
+            return len(events) < limit
 
-            if obj.status == Msg.STATUS_FAILED:
-                msg_event["failed_reason"] = obj.failed_reason
-                msg_event["failed_reason_display"] = obj.get_failed_reason_display()
+        cls._query_history(pk, after_sk=after_sk, before_sk=before_sk, limit=limit, callback=_item)
+        cls._postprocess_events(contact.org, user, events, tags)
 
-            return msg_event
+        return events
 
     @classmethod
-    def from_flow_run(cls, org: Org, user: User, obj: FlowRun) -> dict:
-        logs_url = (
-            _url_for_user(org, user, "flows.flowsession_json", args=[obj.session_uuid]) if obj.session_uuid else None
-        )
+    def _query_history(cls, pk: str, *, after_sk: str, before_sk: str, limit: int, callback):
+        num_fetches = 0
+        next_start_sk = None
+        query = dict(Limit=limit, Select="ALL_ATTRIBUTES")
 
-        return {
-            "type": cls.TYPE_FLOW_ENTERED,
-            "created_on": get_event_time(obj).isoformat(),
-            "flow": {"uuid": str(obj.flow.uuid), "name": obj.flow.name},
-            "logs_url": logs_url,
-        }
-
-    @classmethod
-    def from_flow_exit(cls, org: Org, user: User, obj: FlowExit) -> dict:
-        return {
-            "type": cls.TYPE_FLOW_EXITED,
-            "created_on": get_event_time(obj).isoformat(),
-            "flow": {"uuid": str(obj.run.flow.uuid), "name": obj.run.flow.name},
-            # additional properties
-            "status": obj.run.status,
-        }
-
-    @classmethod
-    def from_ivr_call(cls, org: Org, user: User, obj: Call) -> dict:
-        obj_age = timezone.now() - obj.created_on
-
-        logs_url = None
-        if obj_age < settings.RETENTION_PERIODS["channellog"]:
-            logs_url = _url_for_user(
-                org,
-                user,
-                "channels.channel_logs_read",
-                args=[obj.channel.uuid, "call", obj.id],
-                perm="channels.channel_logs",
+        if after_sk:
+            query.update(
+                KeyConditionExpression="PK = :pk AND SK > :after_sk",
+                ExpressionAttributeValues={":pk": pk, ":after_sk": after_sk},
+                ScanIndexForward=True,
+            )
+        elif before_sk:
+            query.update(
+                KeyConditionExpression="PK = :pk AND SK < :before_sk",
+                ExpressionAttributeValues={":pk": pk, ":before_sk": before_sk},
+                ScanIndexForward=False,
             )
 
-        return {
-            "type": cls.TYPE_CALL_STARTED,
-            "created_on": get_event_time(obj).isoformat(),
-            "status": obj.status,
-            "status_display": obj.status_display,
-            "logs_url": logs_url,
-        }
+        while True:
+            assert num_fetches < 100, "too many fetches for history"
+
+            if next_start_sk:  # pragma: no cover
+                query["ExclusiveStartKey"] = {"PK": pk, "SK": next_start_sk}
+
+            response = dynamo.HISTORY.query(**query)
+            num_fetches += 1
+
+            for item in response.get("Items", []):
+                if not callback(item):
+                    return
+
+            next_start_sk = response.get("LastEvaluatedKey", {}).get("SK")
+            if not next_start_sk:
+                return
 
     @classmethod
-    def from_airtime_transfer(cls, org: Org, user: User, obj: AirtimeTransfer) -> dict:
-        logs_url = _url_for_user(org, user, "airtime.airtimetransfer_read", args=[obj.id])
+    def _include_event(cls, event, ticket_uuid) -> bool:
+        if event["type"] in cls.all_ticket_types:
+            if ticket_uuid:
+                # if we have a ticket this is for the ticket UI, so we want *all* events for *only* that ticket
+                event_ticket_uuid = event.get("ticket_uuid", event.get("ticket", {}).get("uuid"))
+                return event_ticket_uuid == str(ticket_uuid)
+            else:
+                # if not then this for the contact read page so only show ticket opened/closed/reopened events
+                return event["type"] in cls.basic_ticket_types
 
-        return {
-            "type": cls.TYPE_AIRTIME_TRANSFERRED,
-            "created_on": get_event_time(obj).isoformat(),
-            "sender": obj.sender,
-            "recipient": obj.recipient,
-            "currency": obj.currency,
-            "desired_amount": obj.desired_amount,
-            "actual_amount": obj.actual_amount,
-            # additional properties
-            "logs_url": logs_url,
-        }
+        return True
 
     @classmethod
-    def from_ticket_event(cls, org: Org, user: User, obj: TicketEvent) -> dict:
-        ticket = obj.ticket
-        return {
-            "type": cls.ticket_event_types[obj.event_type],
-            "note": obj.note,
-            "topic": _topic(obj.topic) if obj.topic else None,
-            "assignee": _user(obj.assignee) if obj.assignee else None,
-            "ticket": {
-                "uuid": str(ticket.uuid),
-                "opened_on": ticket.opened_on.isoformat(),
-                "closed_on": ticket.closed_on.isoformat() if ticket.closed_on else None,
-                "topic": _topic(ticket.topic) if ticket.topic else None,
-                "status": ticket.status,
-            },
-            "created_on": get_event_time(obj).isoformat(),
-            "created_by": _user(obj.created_by) if obj.created_by else None,
-        }
+    def _postprocess_events(cls, org, user: User, events: list[dict], tags: list[EventTag]):
+        """
+        Post-processes a list of events in place with up to date information from the database.
+        """
 
-    @classmethod
-    def from_channel_event(cls, org: Org, user: User, obj: ChannelEvent) -> dict:
-        extra = obj.extra or {}
-        ch_event = {"type": obj.event_type, "channel": _channel(obj.channel)}
+        # inject tags into their corresponding events
+        events_by_uuid = {event["uuid"]: event for event in events}
+        for tag in tags:
+            if event := events_by_uuid.get(tag.event_uuid):
+                if tag.tag == "del":
+                    event["_deleted"] = tag.data
+                elif tag.tag == "sts":
+                    event["_status"] = tag.data
 
-        if obj.event_type in ChannelEvent.CALL_TYPES:
-            ch_event["duration"] = extra.get("duration")
-        elif obj.event_type in (ChannelEvent.TYPE_OPTIN, ChannelEvent.TYPE_OPTOUT):
-            ch_event["optin"] = _optin(obj.optin) if obj.optin else None
+        user_uuids = {event["_user"]["uuid"] for event in events if event.get("_user")}
+        users_by_uuid = {str(u.uuid): u for u in org.get_users().filter(uuid__in=user_uuids)}
 
-        return {
-            "type": cls.TYPE_CHANNEL_EVENT,
-            "created_on": get_event_time(obj).isoformat(),
-            "event": ch_event,
-            "channel_event_type": obj.event_type,  # deprecated
-            "duration": extra.get("duration"),  # deprecated
-        }
+        # TODO build a more generic mechanism for refreshing all references to things like users, flows.. or put that
+        # somewhere else entirely?
+        for event in events:
+            if "_user" in event and event["_user"]:
+                if user := users_by_uuid.get(event["_user"]["uuid"]):
+                    event["_user"] = user.as_chat_ref()
+                else:
+                    event["_user"] = None  # user no longer exists
 
-
-def _url_for_user(org: Org, user: User, view_name: str, args: list, perm: str = None) -> str:
-    allowed = user.has_org_perm(org, perm or view_name) or user.is_staff
-
-    return reverse(view_name, args=args) if allowed else None
-
-
-def _msg_in(obj) -> dict:
-    d = _base_msg(obj)
-
-    if obj.external_id:
-        d["external_id"] = obj.external_id
-
-    return d
-
-
-def _msg_out(obj) -> dict:
-    d = _base_msg(obj)
-
-    if obj.quick_replies:
-        d["quick_replies"] = obj.quick_replies
-
-    return d
-
-
-def _base_msg(obj) -> dict:
-    redact = obj.visibility in (Msg.VISIBILITY_DELETED_BY_USER, Msg.VISIBILITY_DELETED_BY_SENDER)
-    d = {
-        "uuid": str(obj.uuid),
-        "id": obj.id,
-        "urn": str(obj.contact_urn) if obj.contact_urn else None,
-        "channel": _channel(obj.channel) if obj.channel else None,
-        "text": obj.text if not redact else "",
-    }
-    if obj.attachments:
-        d["attachments"] = obj.attachments if not redact else []
-
-    return d
-
-
-def _user(user: User) -> dict:
-    return {"id": user.id, "first_name": user.first_name, "last_name": user.last_name, "email": user.email}
-
-
-def _channel(channel: Channel) -> dict:
-    return {"uuid": str(channel.uuid), "name": channel.name}
-
-
-def _topic(topic: Topic) -> dict:
-    return {"uuid": str(topic.uuid), "name": topic.name}
-
-
-def _optin(optin: OptIn) -> dict:
-    return {"uuid": str(optin.uuid), "name": optin.name}
-
-
-# map of history item types to methods to render them as events
-event_renderers = {
-    AirtimeTransfer: Event.from_airtime_transfer,
-    ChannelEvent: Event.from_channel_event,
-    FlowExit: Event.from_flow_exit,
-    FlowRun: Event.from_flow_run,
-    Call: Event.from_ivr_call,
-    Msg: Event.from_msg,
-    TicketEvent: Event.from_ticket_event,
-}
-
-# map of history item types to a callable which can extract the event time from that type
-event_time = defaultdict(lambda: lambda i: i.created_on)
-event_time.update(
-    {
-        dict: lambda e: iso8601.parse_date(e["created_on"]),
-        FlowExit: lambda e: e.run.exited_on,
-        Ticket: lambda e: e.closed_on,
-    },
-)
-
-
-def get_event_time(item) -> datetime:
-    """
-    Extracts the event time from a history item
-    """
-    return event_time[type(item)](item)
+        for event in events:
+            if event["type"] in [cls.TYPE_MSG_CREATED, cls.TYPE_MSG_RECEIVED, cls.TYPE_IVR_CREATED]:
+                # older events may have attachments stored as objects rather than encoded strings
+                if attachments := event["msg"].get("attachments"):
+                    event["msg"]["attachments"] = [
+                        f"{a['content_type']}:{a['url']}" if isinstance(a, dict) else a for a in attachments
+                    ]
