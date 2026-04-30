@@ -20,6 +20,7 @@ from temba.flows.models import Flow
 from temba.triggers.models import Trigger
 from temba.utils import analytics
 from temba.utils.dates import datetime_to_str
+from temba.utils.text import unsnakify
 
 TIME_SINCE_CHUNKS = (
     (60 * 60 * 24 * 365, ngettext_lazy("%d year", "%d years")),
@@ -77,6 +78,11 @@ def icon(o):
         return "icon-flow"
 
     return ""
+
+
+@register.filter
+def unsnake(str):
+    return unsnakify(str)
 
 
 @register.filter
@@ -210,6 +216,16 @@ def to_json(value):
     return mark_safe(f'JSON.parse("{escaped_output}")')
 
 
+@register.filter
+def duration(date):
+    return mark_safe(f"<temba-date value='{date.isoformat()}' display='duration'></temba-date>")
+
+
+@register.filter
+def datetime(date):
+    return mark_safe(f"<temba-date value='{date.isoformat()}' display='datetime'></temba-date>")
+
+
 @register.simple_tag(takes_context=True)
 def short_datetime(context, dtime):
     if dtime.tzinfo is None:
@@ -272,6 +288,11 @@ def format_datetime(context, dt, seconds: bool = False):
 @register.filter
 def parse_isodate(value):
     return iso8601.parse_date(value)
+
+
+@register.filter
+def first_word(value):
+    return str(value).split(" ", maxsplit=1)[0]
 
 
 @register.simple_tag(takes_context=True)

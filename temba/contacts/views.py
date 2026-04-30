@@ -37,6 +37,7 @@ from temba.channels.models import Channel
 from temba.contacts.templatetags.contacts import MISSING_VALUE
 from temba.mailroom.events import Event
 from temba.notifications.views import NotificationTargetMixin
+from temba.orgs.models import User
 from temba.orgs.views import (
     DependencyDeleteModal,
     DependencyUsagesModal,
@@ -45,7 +46,7 @@ from temba.orgs.views import (
     OrgObjPermsMixin,
     OrgPermsMixin,
 )
-from temba.tickets.models import Ticket
+from temba.tickets.models import Ticket, Ticketer, Topic
 from temba.utils import analytics, json, languages, on_transaction_commit
 from temba.utils.dates import datetime_to_timestamp, timestamp_to_datetime
 from temba.utils.fields import (
@@ -58,7 +59,7 @@ from temba.utils.fields import (
 )
 from temba.utils.models import patch_queryset_count
 from temba.utils.models.es import IDSliceQuerySet
-from temba.utils.views import BulkActionMixin, ComponentFormMixin, NonAtomicMixin, SpaMixin
+from temba.utils.views import BulkActionMixin, ComponentFormMixin, ContentMenuMixin, NonAtomicMixin, SpaMixin
 
 from .models import (
     URN,
@@ -122,10 +123,10 @@ class ContactGroupForm(forms.ModelForm):
     preselected_contacts = forms.CharField(required=False, widget=forms.HiddenInput)
     group_query = forms.CharField(required=False, widget=forms.HiddenInput)
 
-    def __init__(self, user, *args, **kwargs):
-        self.user = user
-        self.org = user.get_org()
+    def __init__(self, org, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        self.org = org
 
     def clean_name(self):
         name = self.cleaned_data["name"]
@@ -177,6 +178,7 @@ class ContactListView(SpaMixin, OrgPermsMixin, BulkActionMixin, SmartListView):
     Base class for contact list views with contact folders and groups listed by the side
     """
 
+    permission = "contacts.contact_list"
     system_group = None
     add_button = True
     paginate_by = 50
@@ -321,7 +323,7 @@ class ContactListView(SpaMixin, OrgPermsMixin, BulkActionMixin, SmartListView):
             return qs
 
     def get_bulk_action_labels(self):
-        return ContactGroup.get_groups(self.get_user().get_org(), manual_only=True)
+        return ContactGroup.get_groups(self.request.org, manual_only=True)
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
@@ -390,11 +392,10 @@ class ContactListView(SpaMixin, OrgPermsMixin, BulkActionMixin, SmartListView):
 
 
 class ContactForm(forms.ModelForm):
-    def __init__(self, *args, **kwargs):
-        self.user = kwargs["user"]
-        self.org = self.user.get_org()
-        del kwargs["user"]
+    def __init__(self, org, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        self.org = org
 
         # add all URN scheme fields if org is not anon
         extra_fields = []
@@ -495,8 +496,8 @@ class UpdateContactForm(ContactForm):
         widget=SelectMultipleWidget(attrs={"placeholder": _("Select groups for this contact"), "searchable": True}),
     )
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, org, *args, **kwargs):
+        super().__init__(org, *args, **kwargs)
 
         choices = [("", "No Preference")]
 
@@ -514,12 +515,11 @@ class UpdateContactForm(ContactForm):
         )
 
         self.fields["groups"].initial = self.instance.get_groups(manual_only=True)
-        self.fields["groups"].queryset = ContactGroup.get_groups(self.user.get_org(), manual_only=True)
-        self.fields["groups"].help_text = _("The groups which this contact belongs to")
+        self.fields["groups"].queryset = ContactGroup.get_groups(self.org, manual_only=True)
 
     class Meta:
         model = Contact
-        fields = ("name", "language", "groups")
+        fields = ("name", "status", "language", "groups")
         widgets = {
             "name": InputWidget(),
         }
@@ -535,13 +535,12 @@ class ExportForm(Form):
         ),
     )
 
-    def __init__(self, user, *args, **kwargs):
+    def __init__(self, org, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.user = user
 
-        self.fields["group_memberships"].queryset = ContactGroup.get_groups(
-            self.user.get_org(), ready_only=True
-        ).order_by(Upper("name"))
+        self.fields["group_memberships"].queryset = ContactGroup.get_groups(org, ready_only=True).order_by(
+            Upper("name")
+        )
 
         self.fields["group_memberships"].help_text = _(
             "Include group membership only for these groups. " "(Leave blank to ignore group memberships)."
@@ -562,12 +561,11 @@ class ContactCRUDL(SmartCRUDL):
         "filter",
         "blocked",
         "omnibox",
+        "open_ticket",
         "update_fields",
         "update_fields_input",
         "export",
-        "block",
-        "restore",
-        "archive",
+        "interrupt",
         "delete",
         "scheduled",
         "history",
@@ -582,29 +580,33 @@ class ContactCRUDL(SmartCRUDL):
                     "id": "active",
                     "count": counts[Contact.STATUS_ACTIVE],
                     "name": _("Active"),
+                    "verbose_name": _("Active Contacts"),
                     "href": reverse("contacts.contact_list"),
-                    "icon": "user",
+                    "icon": "icon.active",
                 },
                 {
                     "id": "archived",
-                    "icon": "archive",
+                    "icon": "icon.archive",
                     "count": counts[Contact.STATUS_ARCHIVED],
                     "name": _("Archived"),
+                    "verbose_name": _("Archived Contacts"),
                     "href": reverse("contacts.contact_archived"),
                 },
                 {
                     "id": "blocked",
                     "count": counts[Contact.STATUS_BLOCKED],
                     "name": _("Blocked"),
+                    "verbose_name": _("Blocked Contacts"),
                     "href": reverse("contacts.contact_blocked"),
-                    "icon": "slash",
+                    "icon": "icon.contact_blocked",
                 },
                 {
                     "id": "stopped",
                     "count": counts[Contact.STATUS_STOPPED],
                     "name": _("Stopped"),
+                    "verbose_name": _("Stopped Contacts"),
                     "href": reverse("contacts.contact_stopped"),
-                    "icon": "x-octagon",
+                    "icon": "icon.contact_stopped",
                 },
             ]
 
@@ -612,7 +614,7 @@ class ContactCRUDL(SmartCRUDL):
             menu.append(
                 {
                     "id": "import",
-                    "icon": "publish",
+                    "icon": "icon.upload",
                     "href": reverse("contacts.contactimport_create"),
                     "name": _("Import"),
                 }
@@ -623,24 +625,12 @@ class ContactCRUDL(SmartCRUDL):
                 menu.append(
                     dict(
                         id="fields",
-                        icon="database",
+                        icon="icon.fields",
                         count=count,
                         name=_("Fields"),
-                        endpoint=reverse("contacts.contactfield_menu"),
+                        href=reverse("contacts.contactfield_list"),
                     )
                 )
-
-            menu += [
-                self.create_divider(),
-                self.create_modax_button(
-                    name=_("New Contact"),
-                    href="contacts.contact_create",
-                ),
-                self.create_modax_button(
-                    name=_("New Group"),
-                    href="contacts.contactgroup_create",
-                ),
-            ]
 
             groups = (
                 ContactGroup.get_groups(org, ready_only=False)
@@ -685,7 +675,7 @@ class ContactCRUDL(SmartCRUDL):
 
         def get_form_kwargs(self):
             kwargs = super().get_form_kwargs()
-            kwargs["user"] = self.request.user
+            kwargs["org"] = self.request.org
             return kwargs
 
         def form_invalid(self, form):  # pragma: needs cover
@@ -698,8 +688,7 @@ class ContactCRUDL(SmartCRUDL):
 
         def form_valid(self, form):
             user = self.request.user
-            org = user.get_org()
-
+            org = self.request.org
             group_uuid, search, redirect = self.derive_params()
 
             # is there already an export taking place?
@@ -775,7 +764,7 @@ class ContactCRUDL(SmartCRUDL):
 
             return HttpResponse(json.dumps(json_result), content_type="application/json")
 
-    class Read(SpaMixin, OrgObjPermsMixin, SmartReadView):
+    class Read(SpaMixin, OrgObjPermsMixin, ContentMenuMixin, SmartReadView):
         slug_url_kwarg = "uuid"
         fields = ("name",)
         select_related = ("current_flow",)
@@ -863,95 +852,59 @@ class ContactCRUDL(SmartCRUDL):
 
             return HttpResponse("unknown action", status=400)  # pragma: no cover
 
-        def get_gear_links(self):
-            links = []
+        def build_content_menu(self, menu):
+            obj = self.get_object()
 
-            if self.object.status == Contact.STATUS_ACTIVE:
-
+            if obj.status == Contact.STATUS_ACTIVE:
                 if not self.is_spa() and self.has_org_perm("msgs.broadcast_send"):
-                    links.append(
-                        dict(
-                            id="send-message",
-                            title=_("Send Message"),
-                            style="button-primary",
-                            href=f"{reverse('msgs.broadcast_send')}?c={self.object.uuid}",
-                            modax=_("Send Message"),
-                        )
+                    menu.add_modax(
+                        _("Send Message"),
+                        "send-message",
+                        f"{reverse('msgs.broadcast_send')}?c={obj.uuid}",
+                        primary=True,
+                        as_button=True,
+                    )
+                if self.has_org_perm("flows.flow_broadcast"):
+                    menu.add_modax(
+                        _("Start Flow"),
+                        "start-flow",
+                        f"{reverse('flows.flow_broadcast')}?c={obj.uuid}",
+                        as_button=self.is_spa(),
+                        disabled=True,
+                    )
+                if self.has_org_perm("contacts.contact_open_ticket"):
+                    menu.add_modax(
+                        _("Open Ticket"), "open-ticket", reverse("contacts.contact_open_ticket", args=[obj.id])
                     )
 
-                if self.has_org_perm("flows.flow_broadcast"):
-                    links.append(
-                        dict(
-                            id="start-flow",
-                            title=_("Start Flow"),
-                            href=f"{reverse('flows.flow_broadcast', args=[])}?c={self.object.uuid}",
-                            modax=_("Start Flow"),
-                        )
-                    )
+                menu.new_group()
+
+                if self.has_org_perm("contacts.contact_interrupt") and obj.current_flow:
+                    menu.add_url_post(_("Interrupt"), reverse("contacts.contact_interrupt", args=(obj.id,)))
 
             if self.has_org_perm("contacts.contact_update"):
-                links.append(
-                    dict(
-                        id="edit-contact",
-                        title=_("Edit"),
-                        modax=_("Edit Contact"),
-                        on_submit="contactUpdated()",
-                        href=f"{reverse('contacts.contact_update', args=[self.object.pk])}",
-                    )
+                menu.add_modax(
+                    _("Edit"),
+                    "edit-contact",
+                    f"{reverse('contacts.contact_update', args=[obj.id])}",
+                    title=_("Edit Contact"),
+                    on_submit="contactUpdated()",
                 )
 
                 if not self.is_spa():
-                    links.append(
-                        dict(
-                            id="update-custom-fields",
-                            title=_("Custom Fields"),
-                            modax=_("Custom Fields"),
-                            on_submit="contactUpdated()",
-                            href=f"{reverse('contacts.contact_update_fields', args=[self.object.pk])}",
-                        )
+                    menu.add_modax(
+                        _("Custom Fields"),
+                        "update-custom-fields",
+                        f"{reverse('contacts.contact_update_fields', args=[obj.id])}",
+                        on_submit="contactUpdated()",
                     )
 
-                if self.object.status != Contact.STATUS_ACTIVE and self.has_org_perm("contacts.contact_restore"):
-                    links.append(
-                        dict(
-                            title=_("Activate"),
-                            style="button-primary",
-                            js_class="posterize",
-                            href=reverse("contacts.contact_restore", args=(self.object.pk,)),
-                        )
-                    )
-
-                if self.object.status != Contact.STATUS_BLOCKED and self.has_org_perm("contacts.contact_block"):
-                    links.append(
-                        dict(
-                            title=_("Block"),
-                            style="button-primary",
-                            js_class="posterize",
-                            href=reverse("contacts.contact_block", args=(self.object.pk,)),
-                        )
-                    )
-
-                if self.object.status != Contact.STATUS_ARCHIVED and self.has_org_perm("contacts.contact_archive"):
-                    links.append(
-                        dict(
-                            title=_("Archive"),
-                            style="btn-primary",
-                            js_class="posterize",
-                            href=reverse("contacts.contact_archive", args=(self.object.pk,)),
-                        )
-                    )
-
-            user = self.get_user()
-            if user.is_superuser or user.is_staff:
-                links.append(
-                    dict(
-                        title=_("Service"),
-                        posterize=True,
-                        href=f'{reverse("orgs.org_service")}?organization={self.object.org_id}&redirect_url={reverse("contacts.contact_read", args=[self.get_object().uuid])}',
-                    )
+            if self.request.user.is_staff:
+                menu.new_group()
+                menu.add_url_post(
+                    _("Service"),
+                    f'{reverse("orgs.org_service")}?organization={obj.org_id}&redirect_url={reverse("contacts.contact_read", args=[obj.uuid])}',
                 )
-
-            return links
 
     class Scheduled(OrgObjPermsMixin, SmartReadView):
         """
@@ -1093,16 +1046,14 @@ class ContactCRUDL(SmartCRUDL):
             }
             return JsonResponse(summary)
 
-    class List(ContactListView):
+    class List(ContentMenuMixin, ContactListView):
         title = _("Active Contacts")
         system_group = ContactGroup.TYPE_DB_ACTIVE
 
         def get_bulk_actions(self):
-            return ("block", "archive", "send") if self.has_org_perm("contacts.contact_update") else ()
+            return ("block", "archive", "send", "start-flow") if self.has_org_perm("contacts.contact_update") else ()
 
-        def get_gear_links(self):
-            links = []
-
+        def build_content_menu(self, menu):
             is_spa = "HTTP_TEMBA_SPA" in self.request.META
             search = self.request.GET.get("search")
 
@@ -1114,31 +1065,31 @@ class ContactCRUDL(SmartCRUDL):
                 try:
                     parsed = parse_query(self.org, search)
                     if parsed.metadata.allow_as_group:
-                        links.append(
-                            dict(
-                                id="create-smartgroup",
-                                title=_("Create Smart Group"),
-                                modax=_("Create Smart Group"),
-                                href=f"{reverse('contacts.contactgroup_create')}?search={quote_plus(search)}",
-                            )
+                        menu.add_modax(
+                            _("Create Smart Group"),
+                            "create-smartgroup",
+                            f"{reverse('contacts.contactgroup_create')}?search={quote_plus(search)}",
+                            as_button=True,
                         )
                 except SearchException:  # pragma: no cover
                     pass
 
+            if self.is_spa():
+                if self.has_org_perm("contacts.contact_create"):
+                    menu.add_modax(
+                        _("New Contact"), "new-contact", reverse("contacts.contact_create"), title=_("New Contact")
+                    )
+
+                if has_contactgroup_create_perm:
+                    menu.add_modax(
+                        _("New Group"), "new-group", reverse("contacts.contactgroup_create"), title=_("New Group")
+                    )
+
             if self.has_org_perm("contacts.contactfield_list") and not is_spa:
-                links.append(dict(title=_("Manage Fields"), href=reverse("contacts.contactfield_list")))
+                menu.add_link(_("Manage Fields"), reverse("contacts.contactfield_list"), as_button=True)
 
             if self.has_org_perm("contacts.contact_export"):
-                links.append(
-                    dict(
-                        id="export-contacts",
-                        title=_("Export"),
-                        modax=_("Export Contacts"),
-                        href=self.derive_export_url(),
-                    )
-                )
-
-            return links
+                menu.add_modax(_("Export"), "export-contacts", self.derive_export_url(), title=_("Export Contacts"))
 
         def get_context_data(self, *args, **kwargs):
             context = super().get_context_data(*args, **kwargs)
@@ -1174,7 +1125,7 @@ class ContactCRUDL(SmartCRUDL):
             context["reply_disabled"] = True
             return context
 
-    class Archived(ContactListView):
+    class Archived(ContentMenuMixin, ContactListView):
         title = _("Archived Contacts")
         template_name = "contacts/contact_archived.haml"
         system_group = ContactGroup.TYPE_DB_ARCHIVED
@@ -1193,70 +1144,33 @@ class ContactCRUDL(SmartCRUDL):
             context["reply_disabled"] = True
             return context
 
-        def get_gear_links(self):
-            links = []
+        def build_content_menu(self, menu):
             if self.has_org_perm("contacts.contact_delete"):
-                links.append(
-                    dict(
-                        title=_("Delete All"),
-                        style="btn-default",
-                        on_click="handleDeleteAllContacts(event)",
-                        js_class="contacts-btn-delete-all",
-                        href="#",
-                    )
-                )
-            return links
+                menu.add_js(_("Delete All"), "handleDeleteAllContacts(event)", "contacts-btn-delete-all")
 
-    class Filter(ContactListView, OrgObjPermsMixin):
+    class Filter(OrgObjPermsMixin, ContentMenuMixin, ContactListView):
         template_name = "contacts/contact_filter.haml"
 
-        def get_gear_links(self):
-            links = []
-
+        def build_content_menu(self, menu):
             is_spa = "HTTP_TEMBA_SPA" in self.request.META
 
             if self.has_org_perm("contacts.contactfield_list") and not is_spa:
-                links.append(dict(title=_("Manage Fields"), href=reverse("contacts.contactfield_list")))
+                menu.add_link(_("Manage Fields"), reverse("contacts.contactfield_list"))
 
             if not self.group.is_system and self.has_org_perm("contacts.contactgroup_update"):
-                links.append(
-                    dict(
-                        id="edit-group",
-                        title=_("Edit Group"),
-                        modax=_("Edit Group"),
-                        href=reverse("contacts.contactgroup_update", args=[self.group.id]),
-                    )
-                )
+                menu.add_modax(_("Edit"), "edit-group", reverse("contacts.contactgroup_update", args=[self.group.id]))
 
             if self.has_org_perm("contacts.contact_export"):
-                links.append(
-                    dict(
-                        id="export-contacts",
-                        title=_("Export"),
-                        modax=_("Export Contacts"),
-                        href=self.derive_export_url(),
-                    )
-                )
+                menu.add_modax(_("Export"), "export-contacts", self.derive_export_url(), title=_("Export Contacts"))
 
-            links.append(
-                dict(
-                    id="group-usages",
-                    title=_("Usages"),
-                    modax=_("Usages"),
-                    href=reverse("contacts.contactgroup_usages", args=[self.group.uuid]),
-                )
+            menu.add_modax(
+                _("Usages"), "group-usages", reverse("contacts.contactgroup_usages", args=[self.group.uuid])
             )
 
             if not self.group.is_system and self.has_org_perm("contacts.contactgroup_delete"):
-                links.append(
-                    dict(
-                        id="delete-group",
-                        title=_("Delete Group"),
-                        modax=_("Delete Group"),
-                        href=reverse("contacts.contactgroup_delete", args=[self.group.uuid]),
-                    )
+                menu.add_modax(
+                    _("Delete"), "delete-group", reverse("contacts.contactgroup_delete", args=[self.group.uuid])
                 )
-            return links
 
         def get_bulk_actions(self):
             return ("block", "archive") if self.group.is_smart else ("block", "unlabel")
@@ -1296,7 +1210,7 @@ class ContactCRUDL(SmartCRUDL):
 
         def get_form_kwargs(self, *args, **kwargs):
             form_kwargs = super().get_form_kwargs(*args, **kwargs)
-            form_kwargs["user"] = self.request.user
+            form_kwargs["org"] = self.request.org
             return form_kwargs
 
         def get_form(self):
@@ -1316,7 +1230,7 @@ class ContactCRUDL(SmartCRUDL):
 
             Contact.create(obj.org, self.request.user, obj.name, language="", urns=urns, fields={}, groups=[])
 
-    class Update(NonAtomicMixin, ModalMixin, OrgObjPermsMixin, SmartUpdateView):
+    class Update(SpaMixin, ComponentFormMixin, NonAtomicMixin, ModalMixin, OrgObjPermsMixin, SmartUpdateView):
         form_class = UpdateContactForm
         success_url = "uuid@contacts.contact_read"
         success_message = ""
@@ -1332,9 +1246,6 @@ class ContactCRUDL(SmartCRUDL):
             exclude = []
             exclude.extend(self.exclude)
 
-            if not obj.org.flow_languages:
-                exclude.append("language")
-
             if obj.status != Contact.STATUS_ACTIVE:
                 exclude.append("groups")
 
@@ -1342,7 +1253,7 @@ class ContactCRUDL(SmartCRUDL):
 
         def get_form_kwargs(self, *args, **kwargs):
             form_kwargs = super().get_form_kwargs(*args, **kwargs)
-            form_kwargs["user"] = self.request.user
+            form_kwargs["org"] = self.request.org
             return form_kwargs
 
         def get_context_data(self, **kwargs):
@@ -1353,6 +1264,18 @@ class ContactCRUDL(SmartCRUDL):
         def form_valid(self, form):
             obj = self.get_object()
             data = form.cleaned_data
+            user = self.request.user
+
+            status = data.get("status")
+            if status and status != obj.status:
+                if status == Contact.STATUS_ACTIVE:
+                    obj.restore(user)
+                elif status == Contact.STATUS_ARCHIVED:
+                    obj.archive(user)
+                elif status == Contact.STATUS_BLOCKED:
+                    obj.block(user)
+                elif status == Contact.STATUS_STOPPED:
+                    obj.stop(user)
 
             mods = obj.update(data.get("name"), data.get("language"))
 
@@ -1395,7 +1318,7 @@ class ContactCRUDL(SmartCRUDL):
     class UpdateFields(NonAtomicMixin, ModalMixin, OrgObjPermsMixin, SmartUpdateView):
         class Form(forms.Form):
             contact_field = TembaChoiceField(
-                ContactField.user_fields.all(),
+                ContactField.user_fields.none(),
                 widget=SelectWidget(
                     attrs={"widget_only": True, "searchable": True, "placeholder": _("Select a field to update")}
                 ),
@@ -1406,9 +1329,9 @@ class ContactCRUDL(SmartCRUDL):
                 widget=InputWidget({"hide_label": True, "textarea": True}),
             )
 
-            def __init__(self, user, instance, *args, **kwargs):
+            def __init__(self, org, instance, *args, **kwargs):
                 super().__init__(*args, **kwargs)
-                org = user.get_org()
+
                 self.fields["contact_field"].queryset = org.fields.filter(is_system=False, is_active=True)
 
         form_class = Form
@@ -1423,7 +1346,7 @@ class ContactCRUDL(SmartCRUDL):
 
         def get_form_kwargs(self):
             kwargs = super().get_form_kwargs()
-            kwargs["user"] = self.request.user
+            kwargs["org"] = self.request.org
             return kwargs
 
         def get_context_data(self, **kwargs):
@@ -1465,9 +1388,60 @@ class ContactCRUDL(SmartCRUDL):
                     context["value"] = self.get_object().get_field_display(contact_field)
             return context
 
-    class Block(OrgObjPermsMixin, SmartUpdateView):
+    class OpenTicket(ComponentFormMixin, ModalMixin, OrgObjPermsMixin, SmartUpdateView):
         """
-        Block this contact
+        Opens a new ticket for this contact.
+        """
+
+        class Form(forms.Form):
+            ticketer = forms.ModelChoiceField(
+                queryset=Ticketer.objects.none(), label=_("Ticket Service"), required=True
+            )
+            topic = forms.ModelChoiceField(queryset=Topic.objects.none(), label=_("Topic"), required=True)
+            body = forms.CharField(label=_("Body"), widget=forms.Textarea, required=True)
+            assignee = forms.ModelChoiceField(
+                queryset=User.objects.none(),
+                label=_("Assignee"),
+                widget=SelectWidget(),
+                required=False,
+                empty_label=_("Unassigned"),
+            )
+
+            def __init__(self, instance, org, **kwargs):
+                super().__init__(**kwargs)
+
+                self.fields["ticketer"].queryset = org.ticketers.filter(is_active=True).order_by("id")
+                self.fields["topic"].queryset = org.topics.filter(is_active=True).order_by("name")
+                self.fields["assignee"].queryset = Ticket.get_allowed_assignees(org).order_by("email")
+
+        form_class = Form
+        submit_button_name = _("Open")
+        success_message = ""
+
+        def get_form_kwargs(self):
+            kwargs = super().get_form_kwargs()
+            kwargs["org"] = self.request.org
+            return kwargs
+
+        def derive_exclude(self):
+            # don't show ticketer select if they don't have external ticketers
+            return ["ticketer"] if self.request.org.ticketers.filter(is_active=True).count() == 1 else []
+
+        def save(self, obj):
+            self.ticket = obj.open_ticket(
+                self.request.user,
+                self.form.cleaned_data.get("ticketer") or self.request.org.ticketers.filter(is_active=True).first(),
+                self.form.cleaned_data["topic"],
+                self.form.cleaned_data["body"],
+                assignee=self.form.cleaned_data.get("assignee"),
+            )
+
+        def get_success_url(self):
+            return f"{reverse('tickets.ticket_list')}all/open/{self.ticket.uuid}/"
+
+    class Interrupt(OrgObjPermsMixin, SmartUpdateView):
+        """
+        Interrupt this contact
         """
 
         fields = ()
@@ -1475,33 +1449,7 @@ class ContactCRUDL(SmartCRUDL):
         success_message = ""
 
         def save(self, obj):
-            obj.block(self.request.user)
-            return obj
-
-    class Restore(OrgObjPermsMixin, SmartUpdateView):
-        """
-        Restore this contact
-        """
-
-        fields = ()
-        success_url = "uuid@contacts.contact_read"
-        success_message = ""
-
-        def save(self, obj):
-            obj.restore(self.request.user)
-            return obj
-
-    class Archive(OrgObjPermsMixin, SmartUpdateView):
-        """
-        Archive this contact
-        """
-
-        fields = ()
-        success_url = "uuid@contacts.contact_read"
-        success_message = ""
-
-        def save(self, obj):
-            obj.archive(self.request.user)
+            obj.interrupt(self.request.user)
             return obj
 
     class Delete(ModalMixin, OrgObjPermsMixin, SmartUpdateView):
@@ -1521,7 +1469,7 @@ class ContactCRUDL(SmartCRUDL):
 
 class ContactGroupCRUDL(SmartCRUDL):
     model = ContactGroup
-    actions = ("list", "create", "update", "usages", "delete", "menu")
+    actions = ("create", "update", "usages", "delete", "menu")
 
     class Menu(MenuMixin, OrgPermsMixin, SmartTemplateView):  # pragma: no cover
         def derive_menu(self):
@@ -1543,50 +1491,6 @@ class ContactGroupCRUDL(SmartCRUDL):
                     )
                 )
             return menu
-
-    class List(SpaMixin, OrgPermsMixin, BulkActionMixin, SmartListView):
-        fields = ("name", "query", "count", "created_on")
-        search_fields = ("name__icontains", "query")
-        default_order = ("name",)
-        paginate_by = 250
-
-        def get_gear_links(self):
-            links = []
-            group_type = self.request.GET.get("type", "")
-            if group_type != "smart" and self.has_org_perm("contacts.contactgroup_create"):
-                links.append(
-                    {
-                        "id": "new-group",
-                        "title": _("New Group"),
-                        "style": "button-primary",
-                        "href": f"{reverse('contacts.contactgroup_create')}",
-                        "modax": _("New Group"),
-                    }
-                )
-
-            return links
-
-        def get_bulk_actions(self):
-            return ("delete",) if self.has_org_perm("contacts.contactgroup_delete") else ()
-
-        def get_count(self, obj):
-            if not self.group_counts:
-                self.group_counts = ContactGroupCount.get_totals(self.get_queryset())
-            return self.group_counts[obj]
-
-        def get_queryset(self, **kwargs):
-            self.group_counts = {}
-            group_type = self.request.GET.get("type", "")
-            org = self.request.org
-            qs = super().get_queryset(**kwargs)
-            qs = qs.filter(org=org, is_system=False, is_active=True)
-
-            if group_type == "smart":
-                qs = qs.exclude(query=None)
-            else:
-                qs = qs.filter(query=None)
-
-            return qs
 
     class Create(ComponentFormMixin, ModalMixin, OrgPermsMixin, SmartCreateView):
         form_class = ContactGroupForm
@@ -1620,7 +1524,7 @@ class ContactGroupCRUDL(SmartCRUDL):
 
         def get_form_kwargs(self):
             kwargs = super().get_form_kwargs()
-            kwargs["user"] = self.request.user
+            kwargs["org"] = self.request.org
             return kwargs
 
     class Update(ComponentFormMixin, ModalMixin, OrgObjPermsMixin, SmartUpdateView):
@@ -1637,7 +1541,7 @@ class ContactGroupCRUDL(SmartCRUDL):
 
         def get_form_kwargs(self):
             kwargs = super().get_form_kwargs()
-            kwargs["user"] = self.request.user
+            kwargs["org"] = self.request.org
             return kwargs
 
         def form_valid(self, form):
@@ -1666,6 +1570,16 @@ class ContactFieldForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
 
         self.org = org
+
+        is_already_location_type = self.instance and self.instance.value_type in (
+            ContactField.TYPE_STATE,
+            ContactField.TYPE_DISTRICT,
+            ContactField.TYPE_WARD,
+        )
+        allow_location_types = "locations" in settings.FEATURES or is_already_location_type
+        self.fields["value_type"].choices = (
+            ContactField.TYPE_CHOICES if allow_location_types else ContactField.TYPE_CHOICES_BASIC
+        )
 
     def clean_name(self):
         name = self.cleaned_data["name"]
@@ -1708,7 +1622,7 @@ class ContactFieldForm(forms.ModelForm):
 
 class ContactFieldListView(SpaMixin, OrgPermsMixin, SmartListView):
     queryset = ContactField.user_fields
-    title = _("Manage Contact Fields")
+    title = _("Fields")
     fields = ("name", "show_in_table", "key", "value_type")
     search_fields = ("name__icontains", "key__icontains")
     default_order = ("name",)
@@ -1760,8 +1674,26 @@ class ContactFieldListView(SpaMixin, OrgPermsMixin, SmartListView):
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        context.update(self._get_static_context_data(**kwargs))
+        if not self.is_spa():
+            context.update(self._get_static_context_data(**kwargs))
         return context
+
+
+class FieldLookupMixin:
+    @classmethod
+    def derive_url_pattern(cls, path, action):
+        return r"^%s/%s/(?P<key>[^/]+)/$" % (path, action)
+
+    def has_permission(self, request, *args, **kwargs):
+        object = self.get_object()
+        if object:
+            return super().has_permission(request, *args, **kwargs)
+        return False
+
+    def get_object(self):
+        if self.request.org:
+            return self.request.org.fields.filter(key=self.kwargs["key"]).first()
+        return None
 
 
 class ContactFieldCRUDL(SmartCRUDL):
@@ -1815,12 +1747,20 @@ class ContactFieldCRUDL(SmartCRUDL):
         queryset = ContactField.user_fields
         form_class = Form
         success_message = ""
+        success_url = "hide"
         submit_button_name = _("Create")
 
         def get_form_kwargs(self):
             kwargs = super().get_form_kwargs()
             kwargs["org"] = self.derive_org()
             return kwargs
+
+        def get_context_data(self, **kwargs):
+            context_data = super().get_context_data(**kwargs)
+            org_count, org_limit = ContactField.get_org_limit_progress(self.org)
+            context_data["total_count"] = org_count
+            context_data["total_limit"] = org_limit
+            return context_data
 
         def form_valid(self, form):
             self.object = ContactField.create(
@@ -1832,25 +1772,33 @@ class ContactFieldCRUDL(SmartCRUDL):
             )
             return self.render_modal_response(form)
 
-    class Update(ModalMixin, OrgObjPermsMixin, SmartUpdateView):
+    class Update(FieldLookupMixin, ModalMixin, OrgObjPermsMixin, SmartUpdateView):
         queryset = ContactField.user_fields
         form_class = ContactFieldForm
         success_message = ""
         submit_button_name = _("Update")
+        success_url = "hide"
 
         def get_form_kwargs(self):
             kwargs = super().get_form_kwargs()
             kwargs["org"] = self.derive_org()
             return kwargs
 
+        def pre_save(self, obj):
+            obj = super().pre_save(obj)
+
+            # clear our priority if no longer featured
+            if not obj.show_in_table:
+                obj.priority = 0
+            return obj
+
         def form_valid(self, form):
             super().form_valid(form)
-
             return self.render_modal_response(form)
 
-    class Delete(DependencyDeleteModal):
+    class Delete(FieldLookupMixin, DependencyDeleteModal):
         cancel_url = "@contacts.contactfield_list"
-        success_url = "@contacts.contactfield_list"
+        success_url = "hide"
         success_message = ""
 
     class UpdatePriority(OrgPermsMixin, SmartView, View):
@@ -1858,10 +1806,9 @@ class ContactFieldCRUDL(SmartCRUDL):
 
             try:
                 post_data = json.loads(request.body)
-
                 with transaction.atomic():
-                    for cfid, priority in post_data.items():
-                        ContactField.user_fields.filter(id=cfid, org=self.request.org).update(priority=priority)
+                    for key, priority in post_data.items():
+                        ContactField.user_fields.filter(key=key, org=self.request.org).update(priority=priority)
 
                 return HttpResponse('{"status":"OK"}', status=200, content_type="application/json")
 
@@ -1872,8 +1819,14 @@ class ContactFieldCRUDL(SmartCRUDL):
 
                 return HttpResponse(json.dumps(payload), status=400, content_type="application/json")
 
-    class List(ContactFieldListView):
-        pass
+    class List(ContentMenuMixin, ContactFieldListView):
+        def build_content_menu(self, menu):
+            menu.add_modax(
+                _("New Field"),
+                "new-field",
+                f"{reverse('contacts.contactfield_create')}",
+                on_submit="handleFieldUpdated()",
+            )
 
     class Featured(ContactFieldListView):
         search_fields = None  # search and reordering do not work together
@@ -1911,7 +1864,7 @@ class ContactFieldCRUDL(SmartCRUDL):
         def derive_url_pattern(cls, path, action):
             return r"^%s/%s/(?P<value_type>[^/]+)/$" % (path, action)
 
-    class Usages(DependencyUsagesModal):
+    class Usages(FieldLookupMixin, DependencyUsagesModal):
         permission = "contacts.contactfield_read"
         queryset = ContactField.user_fields
 
@@ -1950,24 +1903,24 @@ class ContactImportCRUDL(SmartCRUDL):
 
         def get_form_kwargs(self):
             kwargs = super().get_form_kwargs()
-            kwargs["org"] = self.derive_org()
+            kwargs["org"] = self.request.org
             return kwargs
 
         def get_context_data(self, **kwargs):
             context = super().get_context_data(**kwargs)
 
-            org = self.derive_org()
+            org = self.request.org
             schemes = org.get_schemes(role=Channel.ROLE_SEND)
             schemes.add(URN.TEL_SCHEME)  # always show tel
             context["urn_schemes"] = [conf for conf in URN.SCHEME_CHOICES if conf[0] in schemes]
             context["explicit_clear"] = ContactImport.EXPLICIT_CLEAR
             context["max_records"] = ContactImport.MAX_RECORDS
-            context["org_country"] = self.org.default_country
+            context["org_country"] = org.default_country
             return context
 
         def pre_save(self, obj):
             obj = super().pre_save(obj)
-            obj.org = self.get_user().get_org()
+            obj.org = self.request.org
             obj.original_filename = self.form.cleaned_data["file"].name
             obj.mappings = self.form.mappings
             obj.num_records = self.form.num_records

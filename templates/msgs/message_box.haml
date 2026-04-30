@@ -1,5 +1,5 @@
 -extends "smartmin/list.html"
--load smartmin sms temba compress contacts i18n humanize
+-load smartmin sms temba compress contacts i18n humanize channels
 
 -block extra-style
   {{block.super}}
@@ -55,33 +55,12 @@
                 .font-normal.uppercase.text-xs.text-gray-500.pb-1
                   - trans "Labels"
                 .inner-scroll
-                  -for node in labels
-                    -if node.obj.is_folder
-                      .lp-nav-item{ class:'{% if current_label.id == node.obj.id %}font-normal{% endif %}' }
-                        .name{onclick:"goto(event)", 'href':'{% url "msgs.msg_filter" node.obj.uuid %}'}
-                          {{ node.obj.name }}
-                        -if node.children
-                          .count.-mr-1.text-gray-400
-                            -if current_label.id == node.obj.id or current_label.folder_id == node.obj.id
-                              .glyph.icon-arrow-down-2{onclick:"goto(event)", 'href':'{% url "msgs.msg_filter" node.obj.uuid %}'}
-                            -else
-                              .glyph.icon-arrow-right-8{onclick:"goto(event)", 'href':'{% url "msgs.msg_filter" node.obj.uuid %}'}
-
-                      -if current_label.id == node.obj.id or current_label.folder_id == node.obj.id
-                        .pl-2.mt-1.level2.font-light
-                          -for child in node.children
-                            .lp-nav-item{ class:'{% if current_label.id == child.obj.id %}font-normal{% endif %}' }
-                              .name{onclick:"goto(event)",  href:"{% url 'msgs.msg_filter' child.obj.uuid %}" }
-                                {{ child.obj.name }}
-                              .count{onclick:"goto(event)", href:"{% url 'msgs.msg_filter' child.obj.uuid %}" }
-                                {{ child.count | intcomma }}
-                  -for node in labels
-                    -if not node.obj.is_folder
-                      .lp-nav-item{ class:'{% if current_label.id == node.obj.id %}font-normal{% endif %}' }
-                        .name{onclick:"goto(event)", href:"{% url 'msgs.msg_filter' node.obj.uuid %}", class:'{% if current_label.id == node.obj.id %}font-normal active{% endif %}' }
-                          {{ node.obj.name }} 
-                        .count{onclick:"goto(event)", href:"{% url 'msgs.msg_filter' node.obj.uuid %}", class:'{% if current_label.id == node.obj.id %}font-normal active{% endif %}' }
-                          {{ node.count | intcomma }}
+                  -for label in labels
+                    .lp-nav-item{ class:'{% if current_label.id == label.id %}font-normal{% endif %}' }
+                      .name{onclick:"goto(event)", href:"{% url 'msgs.msg_filter' label.uuid %}", class:'{% if current_label.id == label.id %}font-normal active{% endif %}' }
+                        {{ label.name }} 
+                      .count{onclick:"goto(event)", href:"{% url 'msgs.msg_filter' label.uuid %}", class:'{% if current_label.id == label.id %}font-normal active{% endif %}' }
+                        {{ label.count | intcomma }}
 
             .flex-grow
               -if org_perms.msgs.label_create
@@ -102,12 +81,12 @@
                           -trans "Remove Label"
 
                       - if 'archive' in actions
-                        .button-action(onclick='runActionOnObjectRows("archive")')
+                        .button-action(onclick='runActionOnObjectRows("archive", wireTableListeners)')
                           .-mt-1.mr-2.glyph.icon-box
                           -trans "Archive"
 
                       - if 'restore' in actions
-                        .button-action(onclick='runActionOnObjectRows("restore")')
+                        .button-action(onclick='runActionOnObjectRows("restore", wireTableListeners)')
                           .-mt-1.mr-2.glyph.icon-download
                           -trans "Restore"
 
@@ -117,44 +96,26 @@
                           -trans "Delete"
 
                       - if 'resend' in actions
-                        .button-action(onclick='runActionOnObjectRows("resend")')
+                        .button-action(onclick='runActionOnObjectRows("resend", wireTableListeners)')
                           .mt-1.mr-2.glyph.icon-loop.text-sm
                           -trans "Resend"
 
                       - if 'label' in actions
-                        .btn-group
-                          .button-action.dropdown-toggle{data-toggle:"dropdown"}
+                        
+                        %temba-dropdown.items-stretch.flex.flex-column(arrowoffset="14" offsetx="6" offsety="10" arrowsize="8")
+                          .button-action(slot="toggle")
                             .-mt-1.mr-2.glyph.icon-tag{style:"width:16px"}
                             -trans "Label"
+                          .rounded-lg.border-none.px-4.py-3(slot="dropdown" style="min-width:200px")
+                            -for label in labels
+                              .lbl-menu(href='#' onclick='labelObjectRows({{label.id}}, false, wireTableListeners)' data-id='{{label.id}}')
+                                .flex.items-center.py-1.hover-linked
+                                  .glyph.message-label.label-checkbox
+                                  .name.px-1
+                                    {{ label.name }}
 
-                          %ul.dropdown-menu.label-menu.rounded-lg.border-none.px-4.py-3
-                            -for node in labels
-                              -if node.obj.is_folder and node.children
-                                %li.dropdown-submenu
-                                  .lbl-menu.cursor-pointer(href='#' onclick='labelObjectRows({{node.obj.id}})' data-id='{{node.obj.id}}')
-                                    .flex.items-center.py-1.hover-linked
-                                      .icon-arrow-right-8.text-2xl.-ml-1.-mt-1.mr-1
-                                      .name.px-2
-                                        {{ node.obj.name }}
-                                  %ul.dropdown-menu.label-menu.border-none
-                                    - for child in node.children
-                                      %li
-                                        .lbl-menu.object-btn-label.px-4(href='#' onclick='labelObjectRows({{child.obj.id}})' data-id='{{child.obj.id}}')
-                                          .flex.items-center.py-1.hover-linked
-                                            .glyph.message-label.label-checkbox
-                                            .name.px-1
-                                              {{ child.obj.name }}
-                            -for node in labels
-                              -if not node.obj.is_folder
-                                %li
-                                  .lbl-menu(href='#' onclick='labelObjectRows({{node.obj.id}})' data-id='{{node.obj.id}}')
-                                    .flex.items-center.py-1.hover-linked
-                                      .glyph.message-label.label-checkbox
-                                      .name.px-1
-                                        {{ node.obj.name }}
-
-                            - if org_perms.msgs.label_create
-                              - if labels
+                            -if org_perms.msgs.label_create
+                              -if labels
                                 %li.separator.-mx-4.border-b.my-3
                               %li
                                 .lbl-menu.add-label.linked{onclick:"handleAddLabelClicked()"}
@@ -197,14 +158,12 @@
                               {% attachment_button attachment %}
 
                       %td
-                        .flex.w-full.items-end.justify-end.pr-4
+                        .flex.w-full.items-end.justify-end.pr-4.items-center
                           .time.whitespace-nowrap
                             -block message_time
                               {% short_datetime object.created_on %}
 
-                          -if show_channel_logs and not user_org.is_anon or perms.contacts.contact_break_anon
-                            .inline-block.text-gray-400.linked.ml-3
-                              {% channel_log_link object %}
+                          {% channel_log_link object %}
 
                   -if not object_list
                     %tr.empty_list
@@ -277,7 +236,7 @@
 
         deleteConfirmation.addEventListener("temba-button-clicked", function(event){
           if (!event.detail.button.secondary) {
-            runActionOnObjectRows("delete");
+            runActionOnObjectRows("delete", wireTableListeners);
           }
           deleteConfirmation.open = false;
         });
@@ -291,6 +250,9 @@
 
     function handleCreateLabelModalSubmitted(event) {
       refresh(function() { recheckIds(); }, true);
+      if (refreshMenu) {
+        refreshMenu();
+      }
     }
 
     function handleSendMessageClicked() {

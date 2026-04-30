@@ -1,15 +1,21 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from unittest.mock import patch
 
+import pytz
+from openpyxl import load_workbook
+
+from django.conf import settings
 from django.test.utils import override_settings
 from django.urls import reverse
 from django.utils import timezone
 
-from temba.contacts.models import Contact
-from temba.tests import CRUDLTestMixin, MigrationTest, TembaTest, matchers, mock_mailroom
+from temba.contacts.models import Contact, ContactField, ContactURN
+from temba.tests import CRUDLTestMixin, TembaTest, matchers, mock_mailroom
+from temba.tests.base import AnonymousOrg
 from temba.utils.dates import datetime_to_timestamp
 
 from .models import (
+    ExportTicketsTask,
     Team,
     Ticket,
     TicketCount,
@@ -20,7 +26,7 @@ from .models import (
     Topic,
     export_ticket_stats,
 )
-from .tasks import squash_ticketcounts
+from .tasks import squash_ticket_counts
 from .types import reload_ticketer_types
 from .types.internal import InternalType
 from .types.mailgun import MailgunType
@@ -172,7 +178,7 @@ class TicketTest(TembaTest):
             contacts={contact1: 2, contact2: 2},
         )
 
-        squash_ticketcounts()  # shouldn't change counts
+        squash_ticket_counts()  # shouldn't change counts
 
         assert_counts(
             self.org,
@@ -214,6 +220,8 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # just a placeholder view for frontend components
         self.assertListFetch(list_url, allow_viewers=False, allow_editors=True, allow_agents=True, context_objects=[])
+
+        self.assertContentMenu(list_url, self.admin, ["Export"])
 
         # can hit this page with a uuid
         # TODO: work out reverse for deep link
@@ -262,9 +270,15 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
         menu = response.json()["results"]
         self.assertEqual(
             [
-                {"id": "mine", "name": "My Tickets", "icon": "coffee", "count": 2},
-                {"id": "unassigned", "name": "Unassigned", "icon": "mail", "count": 1},
-                {"id": "all", "name": "All", "icon": "archive", "count": 3},
+                {"id": "mine", "name": "My Tickets", "icon": "icon.tickets_mine", "count": 2, "verbose_name": None},
+                {
+                    "id": "unassigned",
+                    "name": "Unassigned",
+                    "icon": "icon.tickets_unassigned",
+                    "count": 1,
+                    "verbose_name": "Unassigned Tickets",
+                },
+                {"id": "all", "name": "All", "icon": "icon.tickets_all", "count": 3, "verbose_name": "All Tickets"},
             ],
             menu,
         )
@@ -507,6 +521,411 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
             response["Content-Disposition"],
         )
 
+    def test_export_when_export_already_in_progress(self):
+        self.clear_storage()
+        self.login(self.admin)
+        export_url = reverse("tickets.ticket_export")
+
+        # create a dummy export task so that we won't be able to export
+        blocking_export = ExportTicketsTask.create(
+            self.org, self.admin, start_date=date.today() - timedelta(days=7), end_date=date.today(), with_fields=()
+        )
+        response = self.client.post(export_url, {"start_date": "2022-06-28", "end_date": "2022-09-28"})
+        self.assertModalResponse(response, redirect="/ticket/")
+
+        response = self.client.get("/ticket/")
+        self.assertContains(response, "already an export in progress")
+
+        # ok mark that export as finished and try again
+        blocking_export.update_status(ExportTicketsTask.STATUS_COMPLETE)
+
+        response = self.client.post(export_url, {"start_date": "2022-06-28", "end_date": "2022-09-28"})
+        self.assertModalResponse(response, redirect="/ticket/")
+        self.assertEqual(2, ExportTicketsTask.objects.count())
+
+    def test_export_empty(self):
+        self.login(self.admin)
+
+        # check results of sheet in workbook (no Contact ID column)
+        export = self._request_export(start_date=date.today() - timedelta(days=7), end_date=date.today())
+        self.assertExcelSheet(
+            export[0],
+            [
+                [
+                    "UUID",
+                    "Opened On",
+                    "Closed On",
+                    "Topic",
+                    "Assigned To",
+                    "Contact UUID",
+                    "Contact Name",
+                    "URN Scheme",
+                    "URN Value",
+                ]
+            ],
+            tz=self.org.timezone,
+        )
+
+        with AnonymousOrg(self.org):
+            # anon org doesn't see URN value column
+            export = self._request_export(start_date=date.today() - timedelta(days=7), end_date=date.today())
+            self.assertExcelSheet(
+                export[0],
+                [
+                    [
+                        "UUID",
+                        "Opened On",
+                        "Closed On",
+                        "Topic",
+                        "Assigned To",
+                        "Contact UUID",
+                        "Contact Name",
+                        "URN Scheme",
+                        "Anon Value",
+                    ]
+                ],
+                tz=self.org.timezone,
+            )
+
+        self.clear_storage()
+
+    def test_export(self):
+        export_url = reverse("tickets.ticket_export")
+
+        self.login(self.admin)
+
+        gender = self.create_field("gender", "Gender")
+        age = self.create_field("age", "Age", value_type=ContactField.TYPE_NUMBER)
+
+        # messages can't be older than org
+        self.org.created_on = datetime(2016, 1, 2, 10, tzinfo=pytz.UTC)
+        self.org.save(update_fields=("created_on",))
+
+        ticketer = Ticketer.create(self.org, self.admin, "internal", "Internal", {})
+        topic = Topic.create(self.org, self.admin, "AFC Richmond")
+        assignee = self.admin
+        today = timezone.now().astimezone(self.org.timezone).date()
+
+        # create a contact with no urns
+        nate = self.create_contact("Nathan Shelley", fields={"gender": "Male"})
+
+        # create a contact with one set of urns
+        jamie = self.create_contact("Jamie Tartt", fields={"gender": "Male", "age": 25})
+        ContactURN.create(self.org, jamie, "twitter:jamietarttshark")
+
+        # create a contact with multiple urns that have different max priority
+        roy = self.create_contact("Roy Kent", fields={"gender": "Male", "age": 41})
+        ContactURN.create(self.org, roy, "tel:+1234567890")
+        ContactURN.create(self.org, roy, "twitter:roykent")
+
+        # create a contact with multiple urns that have the same max priority
+        sam = self.create_contact("Sam Obisanya", fields={"gender": "Male", "age": 22})
+        ContactURN.create(self.org, sam, "twitter:nigerianprince", priority=50)
+        ContactURN.create(self.org, sam, "tel:+9876543210", priority=50)
+
+        testers = self.create_group("Testers", contacts=[nate, roy])
+
+        # create an open ticket for nate, opened 30 days ago
+        ticket1 = self.create_ticket(
+            ticketer,
+            nate,
+            body="Y'ello",
+            topic=topic,
+            assignee=assignee,
+            opened_on=timezone.now() - timedelta(days=30),
+        )
+        # create an open ticket for jamie, opened 25 days ago
+        ticket2 = self.create_ticket(
+            ticketer, jamie, body="Hi", topic=topic, assignee=assignee, opened_on=timezone.now() - timedelta(days=25)
+        )
+
+        # create a closed ticket for roy, opened yesterday
+        ticket3 = self.create_ticket(
+            ticketer,
+            roy,
+            body="Hello",
+            topic=topic,
+            assignee=assignee,
+            opened_on=timezone.now() - timedelta(days=1),
+            closed_on=timezone.now(),
+        )
+        # create a closed ticket for sam, opened today
+        ticket4 = self.create_ticket(
+            ticketer,
+            sam,
+            body="Yo",
+            topic=topic,
+            assignee=assignee,
+            opened_on=timezone.now(),
+            closed_on=timezone.now(),
+        )
+
+        # create a ticketer and ticket on another org for rebecca
+        zendesk = Ticketer.create(self.org2, self.admin, ZendeskType.slug, "Zendesk", {})
+        self.create_ticket(
+            zendesk, self.create_contact("Rebecca", urns=["twitter:rwaddingham"], org=self.org2), "Stuff"
+        )
+
+        # try to submit without specifying dates (UI doesn't actually allow this)
+        response = self.client.post(export_url, {})
+        self.assertFormError(response, "form", "start_date", "This field is required.")
+        self.assertFormError(response, "form", "end_date", "This field is required.")
+
+        # try to submit with start date in future
+        response = self.client.post(export_url, {"start_date": "2200-01-01", "end_date": "2022-09-28"})
+        self.assertFormError(response, "form", "__all__", "Start date can't be in the future.")
+
+        # try to submit with start date > end date
+        response = self.client.post(export_url, {"start_date": "2022-09-01", "end_date": "2022-03-01"})
+        self.assertFormError(response, "form", "__all__", "End date can't be before start date.")
+
+        # check requesting export for last 90 days
+        with self.mockReadOnly(assert_models={Ticket, ContactURN}):
+            with self.assertNumQueries(33):
+                export = self._request_export(start_date=today - timedelta(days=90), end_date=today)
+
+        expected_headers = [
+            "UUID",
+            "Opened On",
+            "Closed On",
+            "Topic",
+            "Assigned To",
+            "Contact UUID",
+            "Contact Name",
+            "URN Scheme",
+            "URN Value",
+        ]
+
+        self.assertExcelSheet(
+            export[0],
+            rows=[
+                expected_headers,
+                [
+                    ticket1.uuid,
+                    ticket1.opened_on,
+                    "",
+                    ticket1.topic.name,
+                    ticket1.assignee.email,
+                    ticket1.contact.uuid,
+                    "Nathan Shelley",
+                    "",
+                    "",
+                ],
+                [
+                    ticket2.uuid,
+                    ticket2.opened_on,
+                    "",
+                    ticket2.topic.name,
+                    ticket2.assignee.email,
+                    ticket2.contact.uuid,
+                    "Jamie Tartt",
+                    "twitter",
+                    "jamietarttshark",
+                ],
+                [
+                    ticket3.uuid,
+                    ticket3.opened_on,
+                    ticket3.closed_on,
+                    ticket3.topic.name,
+                    ticket3.assignee.email,
+                    ticket3.contact.uuid,
+                    "Roy Kent",
+                    "tel",
+                    "+1234567890",
+                ],
+                [
+                    ticket4.uuid,
+                    ticket4.opened_on,
+                    ticket4.closed_on,
+                    ticket4.topic.name,
+                    ticket4.assignee.email,
+                    ticket4.contact.uuid,
+                    "Sam Obisanya",
+                    "twitter",
+                    "nigerianprince",
+                ],
+            ],
+            tz=self.org.timezone,
+        )
+
+        # check requesting export for last 7 days
+        with self.mockReadOnly(assert_models={Ticket, ContactURN}):
+            export = self._request_export(start_date=today - timedelta(days=7), end_date=today)
+
+        self.assertExcelSheet(
+            export[0],
+            rows=[
+                expected_headers,
+                [
+                    ticket3.uuid,
+                    ticket3.opened_on,
+                    ticket3.closed_on,
+                    ticket3.topic.name,
+                    ticket3.assignee.email,
+                    ticket3.contact.uuid,
+                    "Roy Kent",
+                    "tel",
+                    "+1234567890",
+                ],
+                [
+                    ticket4.uuid,
+                    ticket4.opened_on,
+                    ticket4.closed_on,
+                    ticket4.topic.name,
+                    ticket4.assignee.email,
+                    ticket4.contact.uuid,
+                    "Sam Obisanya",
+                    "twitter",
+                    "nigerianprince",
+                ],
+            ],
+            tz=self.org.timezone,
+        )
+
+        # check requesting with contact fields and groups
+        with self.mockReadOnly(assert_models={Ticket, ContactURN}):
+            export = self._request_export(
+                start_date=today - timedelta(days=7), end_date=today, with_fields=(age, gender), with_groups=(testers,)
+            )
+
+        self.assertExcelSheet(
+            export[0],
+            rows=[
+                expected_headers + ["Field:Age", "Field:Gender", "Group:Testers"],
+                [
+                    ticket3.uuid,
+                    ticket3.opened_on,
+                    ticket3.closed_on,
+                    ticket3.topic.name,
+                    ticket3.assignee.email,
+                    ticket3.contact.uuid,
+                    "Roy Kent",
+                    "tel",
+                    "+1234567890",
+                    "41",
+                    "Male",
+                    True,
+                ],
+                [
+                    ticket4.uuid,
+                    ticket4.opened_on,
+                    ticket4.closed_on,
+                    ticket4.topic.name,
+                    ticket4.assignee.email,
+                    ticket4.contact.uuid,
+                    "Sam Obisanya",
+                    "twitter",
+                    "nigerianprince",
+                    "22",
+                    "Male",
+                    False,
+                ],
+            ],
+            tz=self.org.timezone,
+        )
+
+        with AnonymousOrg(self.org):
+            with self.mockReadOnly(assert_models={Ticket, ContactURN}):
+                export = self._request_export(start_date=today - timedelta(days=90), end_date=today)
+            self.assertExcelSheet(
+                export[0],
+                [
+                    [
+                        "UUID",
+                        "Opened On",
+                        "Closed On",
+                        "Topic",
+                        "Assigned To",
+                        "Contact UUID",
+                        "Contact Name",
+                        "URN Scheme",
+                        "Anon Value",
+                    ],
+                    [
+                        ticket1.uuid,
+                        ticket1.opened_on,
+                        "",
+                        ticket1.topic.name,
+                        ticket1.assignee.email,
+                        ticket1.contact.uuid,
+                        "Nathan Shelley",
+                        "",
+                        ticket1.contact.anon_display,
+                    ],
+                    [
+                        ticket2.uuid,
+                        ticket2.opened_on,
+                        "",
+                        ticket2.topic.name,
+                        ticket2.assignee.email,
+                        ticket2.contact.uuid,
+                        "Jamie Tartt",
+                        "twitter",
+                        ticket2.contact.anon_display,
+                    ],
+                    [
+                        ticket3.uuid,
+                        ticket3.opened_on,
+                        ticket3.closed_on,
+                        ticket3.topic.name,
+                        ticket3.assignee.email,
+                        ticket3.contact.uuid,
+                        "Roy Kent",
+                        "tel",
+                        ticket3.contact.anon_display,
+                    ],
+                    [
+                        ticket4.uuid,
+                        ticket4.opened_on,
+                        ticket4.closed_on,
+                        ticket4.topic.name,
+                        ticket4.assignee.email,
+                        ticket4.contact.uuid,
+                        "Sam Obisanya",
+                        "twitter",
+                        ticket4.contact.anon_display,
+                    ],
+                ],
+                tz=self.org.timezone,
+            )
+
+        self.clear_storage()
+
+    def test_export_with_too_many_fields_and_groups(self):
+        export_url = reverse("tickets.ticket_export")
+        today = timezone.now().astimezone(self.org.timezone).date()
+        too_many_fields = [self.create_field(f"Field {i}", f"field{i}") for i in range(11)]
+        too_many_groups = [self.create_group(f"Group {i}", contacts=[]) for i in range(11)]
+
+        self.login(self.admin)
+        response = self.client.post(
+            export_url,
+            {
+                "start_date": today - timedelta(days=7),
+                "end_date": today,
+                "with_fields": [cf.id for cf in too_many_fields],
+                "with_groups": [cg.id for cg in too_many_groups],
+            },
+        )
+        self.assertFormError(response, "form", "with_fields", "You can only include up to 10 fields.")
+        self.assertFormError(response, "form", "with_groups", "You can only include up to 10 groups.")
+
+    def _request_export(self, start_date: date, end_date: date, with_fields=(), with_groups=()):
+        export_url = reverse("tickets.ticket_export")
+        self.client.post(
+            export_url,
+            {
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "with_fields": [cf.id for cf in with_fields],
+                "with_groups": [cf.id for cf in with_groups],
+            },
+        )
+        task = ExportTicketsTask.objects.all().order_by("-id").first()
+        filename = f"{settings.MEDIA_ROOT}/test_orgs/{self.org.id}/ticket_exports/{task.uuid}.xlsx"
+        workbook = load_workbook(filename=filename)
+        return workbook.worksheets
+
 
 class TicketerTest(TembaTest):
     @patch("temba.mailroom.client.MailroomClient.ticket_close")
@@ -730,6 +1149,23 @@ class TopicTest(TembaTest):
         self.assertIsNone(topic15)
         self.assertEqual(Topic.ImportResult.IGNORED_LIMIT_REACHED, result)
 
+    def test_release(self):
+        topic1 = Topic.create(self.org, self.admin, "Sales")
+        flow = self.create_flow("Test")
+        flow.topic_dependencies.add(topic1)
+
+        topic1.release(self.admin)
+
+        self.assertFalse(topic1.is_active)
+        self.assertTrue(topic1.name.startswith("deleted-"))
+
+        flow.refresh_from_db()
+        self.assertTrue(flow.has_issues)
+
+        # can't release default topic
+        with self.assertRaises(AssertionError):
+            self.org.default_ticket_topic.release(self.admin)
+
 
 class TeamTest(TembaTest):
     def test_create(self):
@@ -934,79 +1370,3 @@ class TicketDailyTimingTest(TembaTest):
         TicketDailyTiming.objects.create(
             count_type=TicketDailyTiming.TYPE_LAST_CLOSE, scope=f"o:{org.id}", day=d, count=count, seconds=seconds
         )
-
-
-class BackfillTicketDailyReplyTimingsTest(MigrationTest):
-    app = "tickets"
-    migrate_from = "0035_ticketdailytiming_ticket_replied_on_and_more"
-    migrate_to = "0036_backfill_ticket_reply_timings"
-
-    def setUpBeforeMigration(self, apps):
-        ticketer = self.org.ticketers.get()
-        contact = self.create_contact("Bob", phone="+1234567890")
-
-        # ticket opened on May 1
-        self.ticket1 = self.create_ticket(
-            ticketer, contact, "Help", opened_on=datetime(2022, 5, 1, 10, 30, 0, 0, tzinfo=timezone.utc)
-        )
-
-        # first reply 30 mins later, then another 30 mins after that
-        self._ticket_reply(
-            self.ticket1, "What is the problem?", datetime(2022, 5, 1, 11, 0, 0, 0, tzinfo=timezone.utc)
-        )
-        self._ticket_reply(self.ticket1, "Still there?", datetime(2022, 5, 1, 11, 30, 0, 0, tzinfo=timezone.utc))
-
-        # another ticket opened on May 1
-        self.ticket2 = self.create_ticket(
-            ticketer, contact, "Help", opened_on=datetime(2022, 5, 1, 13, 0, 0, 0, tzinfo=timezone.utc)
-        )
-
-        # only reply 1 hour later
-        self._ticket_reply(
-            self.ticket2, "What is the problem?", datetime(2022, 5, 1, 14, 0, 0, 0, tzinfo=timezone.utc)
-        )
-
-        # another ticket opened on May 2, no replies
-        self.ticket3 = self.create_ticket(
-            ticketer, contact, "Help", opened_on=datetime(2022, 5, 2, 13, 0, 0, 0, tzinfo=timezone.utc)
-        )
-
-        # finally another ticket on May 2 which has a reply that is already counted
-        self.ticket4 = self.create_ticket(
-            ticketer, contact, "Help", opened_on=datetime(2022, 5, 2, 15, 0, 0, 0, tzinfo=timezone.utc)
-        )
-        self._ticket_reply(self.ticket4, "Hi?", datetime(2022, 5, 2, 15, 30, 0, 0, tzinfo=timezone.utc))
-
-        self.ticket4.replied_on = datetime(2022, 5, 1, 15, 30, 0, 0, tzinfo=timezone.utc)
-        self.ticket4.save(update_fields=("replied_on",))
-
-        TicketDailyTiming.objects.create(
-            count_type=TicketDailyTiming.TYPE_FIRST_REPLY,
-            scope=f"o:{self.org.id}",
-            day=date(2022, 5, 2),
-            count=1,
-            seconds=30 * 60,
-        )
-
-    def test_migration(self):
-        self.ticket1.refresh_from_db()
-        self.ticket2.refresh_from_db()
-        self.ticket3.refresh_from_db()
-        self.ticket4.refresh_from_db()
-
-        self.assertEqual(datetime(2022, 5, 1, 11, 0, 0, 0, tzinfo=timezone.utc), self.ticket1.replied_on)
-        self.assertEqual(datetime(2022, 5, 1, 14, 0, 0, 0, tzinfo=timezone.utc), self.ticket2.replied_on)
-        self.assertIsNone(self.ticket3.replied_on)
-        self.assertEqual(datetime(2022, 5, 2, 15, 30, 0, 0, tzinfo=timezone.utc), self.ticket4.replied_on)
-
-        self.assertEqual(
-            [(date(2022, 5, 1), 2), (date(2022, 5, 2), 1)],
-            TicketDailyTiming.get_by_org(self.org, TicketDailyTiming.TYPE_FIRST_REPLY).day_totals(),
-        )
-        self.assertEqual(
-            [(date(2022, 5, 1), 2700.0), (date(2022, 5, 2), 1800.0)],
-            TicketDailyTiming.get_by_org(self.org, TicketDailyTiming.TYPE_FIRST_REPLY).day_averages(),
-        )
-
-    def _ticket_reply(self, ticket, text, when):
-        self.create_broadcast(self.admin, text, contacts=[ticket.contact], ticket=ticket, created_on=when)

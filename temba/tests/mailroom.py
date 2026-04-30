@@ -6,8 +6,6 @@ from decimal import Decimal
 from functools import wraps
 from unittest.mock import call, patch
 
-from django_redis import get_redis_connection
-
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import connection
@@ -16,6 +14,7 @@ from django.utils import timezone
 from temba import mailroom
 from temba.campaigns.models import CampaignEvent, EventFire
 from temba.contacts.models import URN, Contact, ContactField, ContactGroup, ContactURN
+from temba.flows.models import FlowRun, FlowSession
 from temba.locations.models import AdminBoundary
 from temba.mailroom.client import ContactSpec, MailroomClient, MailroomException
 from temba.mailroom.modifiers import Modifier
@@ -23,7 +22,6 @@ from temba.orgs.models import Org
 from temba.tests.dates import parse_datetime
 from temba.tickets.models import Ticket, TicketEvent, Topic
 from temba.utils import get_anonymous_user, json
-from temba.utils.cache import incrby_existing
 
 event_units = {
     CampaignEvent.UNIT_MINUTES: "minutes",
@@ -171,6 +169,17 @@ class TestClient(MailroomClient):
             "contact": {"id": contact.id, "uuid": str(contact.uuid), "name": contact.name},
             "urn": {"id": contact_urn.id, "identity": contact_urn.identity},
         }
+
+    @_client_method
+    def contact_interrupt(self, org_id: int, user_id: int, contact_id: int):
+        contact = Contact.objects.get(id=contact_id)
+
+        # get the waiting session IDs
+        session_ids = list(contact.sessions.filter(status=FlowSession.STATUS_WAITING).values_list("id", flat=True))
+
+        exit_sessions(session_ids, FlowSession.STATUS_INTERRUPTED)
+
+        return {"sessions": len(session_ids)}
 
     @_client_method
     def parse_query(self, org_id: int, query: str, parse_only: bool = False, group_uuid: str = ""):
@@ -368,6 +377,20 @@ def apply_modifiers(org, user, contacts, modifiers: list):
             add = mod.modification == "add"
             for contact in contacts:
                 update_groups_locally(contact, [g.uuid for g in mod.groups], add=add)
+
+        elif mod.type == "ticket":
+            ticketer = org.ticketers.get(uuid=mod.ticketer.uuid, is_active=True)
+            topic = org.topics.get(uuid=mod.topic.uuid, is_active=True)
+            assignee = org.users.get(email=mod.assignee.email, is_active=True) if mod.assignee else None
+            for contact in contacts:
+                contact.tickets.create(
+                    org=org,
+                    ticketer=ticketer,
+                    topic=topic,
+                    status=Ticket.STATUS_OPEN,
+                    body=mod.body,
+                    assignee=assignee,
+                )
 
         elif mod.type == "urns":
             assert len(contacts) == 1, "should never be trying to bulk update contact URNs"
@@ -630,28 +653,20 @@ def find_boundary_by_name(org, name, level, parent):
     return boundary
 
 
-def decrement_credit(org):
-    r = get_redis_connection()
+def exit_sessions(session_ids: list, status: str):
+    FlowRun.objects.filter(session_id__in=session_ids).update(
+        status=status, exited_on=timezone.now(), modified_on=timezone.now()
+    )
+    FlowSession.objects.filter(id__in=session_ids).update(
+        status=status,
+        ended_on=timezone.now(),
+        wait_started_on=None,
+        wait_expires_on=None,
+        timeout_on=None,
+        current_flow_id=None,
+    )
 
-    # we always consider this a credit 'used' since un-applied msgs are pending
-    # credit expenses for the next purchased topup
-    incrby_existing(f"org:{org.id}:cache:credits_used", 1)
-
-    # if we have an active topup cache, we need to decrement the amount remaining
-    active_topup_id = org.get_active_topup_id()
-    if active_topup_id:
-        remaining = r.decr(f"org:{org.id}:cache:credits_remaining:{active_topup_id}", 1)
-
-        # near the edge, clear out our cache and calculate from the db
-        if not remaining or int(remaining) < 100:
-            active_topup_id = None
-            org.clear_credit_cache()
-
-    # calculate our active topup if we need to
-    if not active_topup_id:
-        active_topup = org.get_active_topup(force_dirty=True)
-        if active_topup:
-            active_topup_id = active_topup.id
-            r.decr(f"org:{org.id}:cache:credits_remaining:{active_topup_id}", 1)
-
-    return active_topup_id or None
+    for session in FlowSession.objects.filter(id__in=session_ids):
+        session.contact.current_flow = None
+        session.contact.modified_on = timezone.now()
+        session.contact.save(update_fields=("current_flow", "modified_on"))

@@ -15,7 +15,7 @@ class FacebookAppType(ChannelType):
     A Facebook channel
     """
 
-    extra_links = [dict(name=_("Reconnect Facebook Page"), link="channels.types.facebookapp.refresh_token")]
+    extra_links = [dict(label=_("Reconnect Facebook Page"), view_name="channels.types.facebookapp.refresh_token")]
 
     code = "FBA"
     category = ChannelType.Category.SOCIAL_MEDIA
@@ -36,7 +36,6 @@ class FacebookAppType(ChannelType):
 
     schemes = [URN.FACEBOOK_SCHEME]
     max_length = 2000
-    attachment_support = True
     free_sending = True
 
     def get_urls(self):
@@ -81,3 +80,6 @@ class FacebookAppType(ChannelType):
 
             if response.status_code != 200:  # pragma: no cover
                 raise Exception("Unable to update call to action: %s" % response.text)
+
+    def get_error_ref_url(self, channel, code: str) -> str:
+        return "https://developers.facebook.com/docs/messenger-platform/error-codes"

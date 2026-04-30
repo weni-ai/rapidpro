@@ -77,8 +77,6 @@ class SignalWireType(ChannelType):
     schemes = [URN.TEL_SCHEME]
     max_length = 1600
 
-    attachment_support = True
-
     async_activation = False
 
     configuration_blurb = _("Your SignalWire channel is now connected.")
@@ -151,3 +149,6 @@ class SignalWireType(ChannelType):
             raise ValidationError(
                 "Unable to update your phone number settings, please check your domain, key and token"
             )
+
+    def get_error_ref_url(self, channel, code: str) -> str:
+        return "https://developer.signalwire.com/compatibility-api/rest/overview/error-codes/"

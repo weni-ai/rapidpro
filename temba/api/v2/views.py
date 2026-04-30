@@ -10,9 +10,9 @@ from rest_framework.reverse import reverse
 from smartmin.views import SmartFormView, SmartTemplateView
 
 from django import forms
+from django.conf import settings
 from django.contrib.auth import authenticate, login
-from django.contrib.auth.models import User
-from django.db.models import Prefetch, Q
+from django.db.models import Count, Prefetch, Q
 from django.http import HttpResponse, JsonResponse
 from django.utils.translation import gettext_lazy as _
 from django.views.decorators.csrf import csrf_exempt
@@ -37,11 +37,12 @@ from temba.flows.models import Flow, FlowRun, FlowStart
 from temba.globals.models import Global
 from temba.locations.models import AdminBoundary, BoundaryAlias
 from temba.msgs.models import Broadcast, Label, LabelCount, Msg, SystemLabel
-from temba.orgs.models import OrgMembership, OrgRole
+from temba.orgs.models import OrgMembership, OrgRole, User
 from temba.templates.models import Template, TemplateTranslation
 from temba.tickets.models import Ticket, Ticketer, Topic
 from temba.utils import splitting_getlist, str_to_bool
-from temba.utils.uuid import is_uuid
+from temba.utils.s3 import public_file_storage
+from temba.utils.uuid import is_uuid, uuid4
 
 from ..models import SSLPermission
 from ..support import InvalidQueryError
@@ -246,6 +247,11 @@ class ExplorerView(SmartTemplateView):
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
+
+        org = self.request.org
+        user = self.request.user
+
+        context["api_token"] = user.get_api_token(org) if (org and user) else None
         context["endpoints"] = [
             ArchivesEndpoint.get_read_explorer(),
             BoundariesEndpoint.get_read_explorer(),
@@ -493,7 +499,7 @@ class BoundariesEndpoint(ListAPIMixin, BaseAPIView):
     pagination_class = Pagination
 
     def derive_queryset(self):
-        org = self.request.user.get_org()
+        org = self.request.org
         if not org.country:
             return AdminBoundary.objects.none()
 
@@ -595,7 +601,8 @@ class BroadcastsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
     throttle_scope = "v2.broadcasts"
 
     def filter_queryset(self, queryset):
-        org = self.request.user.get_org()
+        org = self.request.org
+        queryset = queryset.filter(schedule=None)
 
         # filter by id (optional)
         broadcast_id = self.get_int_param("id")
@@ -809,7 +816,7 @@ class CampaignEventsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseAP
             {
                 "uuid": "f14e4ff0-724d-43fe-a953-1d16aefd1c00",
                 "campaign": {"uuid": "f14e4ff0-724d-43fe-a953-1d16aefd1c00", "name": "Reminders"},
-                "relative_to": {"key": "registration", "label": "Registration Date"},
+                "relative_to": {"key": "registration", "name": "Registration Date"},
                 "offset": 7,
                 "unit": "days",
                 "delivery_hour": 9,
@@ -850,7 +857,7 @@ class CampaignEventsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseAP
         {
             "uuid": "6a6d7531-6b44-4c45-8c33-957ddd8dfabc",
             "campaign": {"uuid": "f14e4ff0-724d-43fe-a953-1d16aefd1c00", "name": "Hits"},
-            "relative_to": "last_hit",
+            "relative_to": {"key": "last_hit", "name": "Last Hit"},
             "offset": 160,
             "unit": "W",
             "delivery_hour": -1,
@@ -893,12 +900,12 @@ class CampaignEventsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseAP
     pagination_class = CreatedOnCursorPagination
 
     def derive_queryset(self):
-        return self.model.objects.filter(campaign__org=self.request.user.get_org(), is_active=True)
+        return self.model.objects.filter(campaign__org=self.request.org, is_active=True)
 
     def filter_queryset(self, queryset):
         params = self.request.query_params
         queryset = queryset.filter(is_active=True)
-        org = self.request.user.get_org()
+        org = self.request.org
 
         # filter by UUID (optional)
         uuid = params.get("uuid")
@@ -1129,7 +1136,7 @@ class ChannelEventsEndpoint(ListAPIMixin, BaseAPIView):
 
     def filter_queryset(self, queryset):
         params = self.request.query_params
-        org = self.request.user.get_org()
+        org = self.request.org
 
         # filter by id (optional)
         call_id = self.get_int_param("id")
@@ -1222,7 +1229,7 @@ class ClassifiersEndpoint(ListAPIMixin, BaseAPIView):
 
     def filter_queryset(self, queryset):
         params = self.request.query_params
-        org = self.request.user.get_org()
+        org = self.request.org
 
         queryset = queryset.filter(org=org, is_active=True)
 
@@ -1401,7 +1408,7 @@ class ContactsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseAPIView)
 
     def filter_queryset(self, queryset):
         params = self.request.query_params
-        org = self.request.user.get_org()
+        org = self.request.org
 
         deleted_only = str_to_bool(params.get("deleted"))
         queryset = queryset.filter(is_active=(not deleted_only))
@@ -1446,7 +1453,7 @@ class ContactsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseAPIView)
         So that we only fetch active contact fields once for all contacts
         """
         context = super().get_serializer_context()
-        context["contact_fields"] = ContactField.user_fields.active_for_org(org=self.request.user.get_org())
+        context["contact_fields"] = ContactField.user_fields.active_for_org(org=self.request.org)
         return context
 
     def get_object(self):
@@ -1641,7 +1648,7 @@ class DefinitionsEndpoint(BaseAPIView):
         all = 2
 
     def get(self, request, *args, **kwargs):
-        org = request.user.get_org()
+        org = request.org
         params = request.query_params
 
         if "flow_uuid" in params or "campaign_uuid" in params:  # deprecated
@@ -1716,8 +1723,8 @@ class FieldsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
     A **GET** returns the list of custom contact fields for your organization, in the order of last created.
 
      * **key** - the unique key of this field (string), filterable as `key`
-     * **label** - the display label of this field (string)
-     * **value_type** - the data type of values associated with this field (string)
+     * **name** - the display name of this field (string)
+     * **type** - the data type of this field (one of "text", "number", "datetime", "state", "district", "ward")
 
     Example:
 
@@ -1731,8 +1738,8 @@ class FieldsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
             "results": [
                 {
                     "key": "nick_name",
-                    "label": "Nick name",
-                    "value_type": "text"
+                    "name": "Nick name",
+                    "type": "text"
                 },
                 ...
             ]
@@ -1742,23 +1749,23 @@ class FieldsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
 
     A **POST** can be used to create a new contact field. Don't specify a key as this will be generated for you.
 
-    * **label** - the display label (string)
-    * **value_type** - one of the value type codes (string)
+    * **name** - the display name (string)
+    * **type** - one of the data type codes (string)
 
     Example:
 
         POST /api/v2/fields.json
         {
-            "label": "Nick name",
-            "value_type": "text"
+            "name": "Nick name",
+            "type": "text"
         }
 
     You will receive a field object (with the new field key) as a response if successful:
 
         {
             "key": "nick_name",
-            "label": "Nick name",
-            "value_type": "text"
+            "name": "Nick name",
+            "type": "text"
         }
 
     ## Updating Fields
@@ -1769,16 +1776,16 @@ class FieldsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
 
         POST /api/v2/fields.json?key=nick_name
         {
-            "label": "New label",
-            "value_type": "text"
+            "name": "New label",
+            "type": "text"
         }
 
     You will receive the updated field object as a response if successful:
 
         {
             "key": "nick_name",
-            "label": "New label",
-            "value_type": "text"
+            "name": "New label",
+            "type": "text"
         }
     """
 
@@ -1790,8 +1797,13 @@ class FieldsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
     lookup_params = {"key": "key"}
 
     def derive_queryset(self):
-        org = self.request.user.get_org()
-        return self.model.user_fields.filter(org=org, is_active=True)
+        org = self.request.org
+        return (
+            self.model.user_fields.filter(org=org, is_active=True)
+            .annotate(flow_count=Count("dependent_flows", filter=Q(dependent_flows__is_active=True)))
+            .annotate(group_count=Count("dependent_groups", filter=Q(dependent_groups__is_active=True)))
+            .annotate(campaignevent_count=Count("campaign_events", filter=Q(campaign_events__is_active=True)))
+        )
 
     def filter_queryset(self, queryset):
         params = self.request.query_params
@@ -1801,7 +1813,7 @@ class FieldsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
         if key:
             queryset = queryset.filter(key=key)
 
-        return queryset.filter(is_active=True)
+        return queryset
 
     @classmethod
     def get_read_explorer(cls):
@@ -1823,8 +1835,8 @@ class FieldsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
             "slug": "field-write",
             "params": [{"name": "key", "required": False, "help": "Key of an existing field to update"}],
             "fields": [
-                {"name": "label", "required": True, "help": "The label of the field"},
-                {"name": "value_type", "required": True, "help": "The value type of the field"},
+                {"name": "name", "required": True, "help": "The display name of the field"},
+                {"name": "type", "required": True, "help": "The data type of the field"},
             ],
             "example": {"query": "key=nick_name"},
         }
@@ -2187,7 +2199,7 @@ class GroupsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseAPIView):
     exclusive_params = ("uuid", "name")
 
     def derive_queryset(self):
-        return ContactGroup.get_groups(self.request.user.get_org())
+        return ContactGroup.get_groups(self.request.org)
 
     def filter_queryset(self, queryset):
         params = self.request.query_params
@@ -2346,8 +2358,7 @@ class LabelsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseAPIView):
     exclusive_params = ("uuid", "name")
 
     def derive_queryset(self):
-        org = self.request.user.get_org()
-        return self.model.objects.filter(org=org, is_active=True).exclude(label_type=Label.TYPE_FOLDER)
+        return self.model.objects.filter(org=self.request.org, is_active=True)
 
     def filter_queryset(self, queryset):
         params = self.request.query_params
@@ -2402,31 +2413,6 @@ class LabelsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseAPIView):
             "slug": "label-delete",
             "params": [{"name": "uuid", "required": True, "help": "The UUID of the message label to delete"}],
         }
-
-
-class MediaEndpoint(BaseAPIView):
-    """
-    This endpoint allows you to submit media which can be embedded in flow steps.
-
-    ## Creating Media
-
-    By making a `POST` request to the endpoint you can add a new media files
-    """
-
-    parser_classes = (MultiPartParser, FormParser)
-    permission = "msgs.msg_api"
-
-    def post(self, request, format=None, *args, **kwargs):
-
-        org = self.request.user.get_org()
-        media_file = request.data.get("media_file", None)
-        extension = request.data.get("extension", None)
-
-        if media_file and extension:
-            location = org.save_media(media_file, extension)
-            return Response(dict(location=location), status=status.HTTP_201_CREATED)
-
-        return Response(dict(), status=status.HTTP_400_BAD_REQUEST)
 
 
 class MessagesEndpoint(ListAPIMixin, BaseAPIView):
@@ -2523,7 +2509,7 @@ class MessagesEndpoint(ListAPIMixin, BaseAPIView):
     }
 
     def derive_queryset(self):
-        org = self.request.user.get_org()
+        org = self.request.org
         folder = self.request.query_params.get("folder")
 
         if folder:
@@ -2541,7 +2527,7 @@ class MessagesEndpoint(ListAPIMixin, BaseAPIView):
 
     def filter_queryset(self, queryset):
         params = self.request.query_params
-        org = self.request.user.get_org()
+        org = self.request.org
 
         # filter by id (optional)
         msg_id = self.get_int_param("id")
@@ -2565,7 +2551,11 @@ class MessagesEndpoint(ListAPIMixin, BaseAPIView):
         # filter by label name/uuid (optional)
         label_ref = params.get("label")
         if label_ref:
-            label = Label.get_active_for_org(org).filter(Q(name=label_ref) | Q(uuid=label_ref)).first()
+            label_filter = Q(name=label_ref)
+            if is_uuid(label_ref):
+                label_filter |= Q(uuid=label_ref)
+
+            label = Label.get_active_for_org(org).filter(label_filter).first()
             if label:
                 queryset = queryset.filter(labels=label, visibility=Msg.VISIBILITY_VISIBLE)
             else:
@@ -2816,8 +2806,7 @@ class ResthookSubscribersEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, B
     lookup_params = {"id": "id"}
 
     def get_queryset(self):
-        org = self.request.user.get_org()
-        return self.model.objects.filter(resthook__org=org, is_active=True)
+        return self.model.objects.filter(resthook__org=self.request.org, is_active=True)
 
     def filter_queryset(self, queryset):
         params = self.request.query_params
@@ -3051,7 +3040,7 @@ class RunsEndpoint(ListAPIMixin, BaseAPIView):
 
     def filter_queryset(self, queryset):
         params = self.request.query_params
-        org = self.request.user.get_org()
+        org = self.request.org
 
         # filter by flow (optional)
         flow_uuid = params.get("flow")
@@ -3088,12 +3077,15 @@ class RunsEndpoint(ListAPIMixin, BaseAPIView):
         # use prefetch rather than select_related for foreign keys to avoid joins
         queryset = queryset.prefetch_related(
             Prefetch("flow", queryset=Flow.objects.only("uuid", "name", "base_language")),
-            Prefetch("contact", queryset=Contact.objects.only("uuid", "name", "language")),
-            Prefetch("contact__urns", ContactURN.objects.order_by("-priority", "id")),
+            Prefetch("contact", queryset=Contact.objects.only("uuid", "name", "language", "org")),
+            Prefetch("contact__org"),
             Prefetch("start", queryset=FlowStart.objects.only("uuid")),
         )
 
         return self.filter_before_after(queryset, "modified_on")
+
+    def prepare_for_serialization(self, object_list, using: str):
+        Contact.bulk_urn_cache_initialize([r.contact for r in object_list], using=using)
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -3373,7 +3365,7 @@ class TemplatesEndpoint(ListAPIMixin, BaseAPIView):
     pagination_class = ModifiedOnCursorPagination
 
     def filter_queryset(self, queryset):
-        org = self.request.user.get_org()
+        org = self.request.org
         queryset = org.templates.exclude(translations=None).prefetch_related(
             Prefetch("translations", TemplateTranslation.objects.filter(is_active=True))
         )
@@ -3430,7 +3422,7 @@ class TicketersEndpoint(ListAPIMixin, BaseAPIView):
 
     def filter_queryset(self, queryset):
         params = self.request.query_params
-        org = self.request.user.get_org()
+        org = self.request.org
 
         queryset = queryset.filter(org=org, is_active=True)
 
@@ -3481,8 +3473,11 @@ class TicketsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
      * **contact** - the UUID and name of the contact (object), filterable as `contact` with UUID.
      * **status** - the status of the ticket, e.g. 'open' or 'closed'.
      * **topic** - the topic of the ticket (object).
+     * **assignee** - the user assigned to the ticket (object).
      * **body** - the body of the ticket (string).
      * **opened_on** - when this ticket was opened (datetime).
+     * **opened_by** - the user who opened the ticket (object).
+     * **opened_in** - the flow which opened the ticket (object).
      * **modified_on** - when this ticket was last modified (datetime).
      * **closed_on** - when this ticket was closed (datetime).
 
@@ -3502,8 +3497,11 @@ class TicketsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
                 "contact": {"uuid": "f1ea776e-c923-4c1a-b3a3-0c466932b2cc", "name": "Jim"},
                 "status": "open",
                 "topic": {"uuid": "040edbfe-be55-48f3-864d-a4a7147c447b", "name": "Support"},
+                "assignee": {"email": "bob@flow.com", "name": "Bob McFlow"},
                 "body": "Where did I leave my shorts?",
                 "opened_on": "2013-02-27T09:06:15.456",
+                "opened_by": null,
+                "opened_in": {"uuid": "54cd8e2c-6334-49a4-abf9-f0fa8d0971da", "name": "Support Flow"},
                 "modified_on": "2013-02-27T09:07:18.234",
                 "closed_on": null
             },
@@ -3517,7 +3515,7 @@ class TicketsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
 
     def filter_queryset(self, queryset):
         params = self.request.query_params
-        org = self.request.user.get_org()
+        org = self.request.org
 
         queryset = queryset.filter(org=org)
 
@@ -3538,7 +3536,9 @@ class TicketsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
             Prefetch("ticketer", queryset=Ticketer.objects.only("uuid", "name")),
             Prefetch("topic", queryset=Topic.objects.only("uuid", "name")),
             Prefetch("contact", queryset=Contact.objects.only("uuid", "name")),
-            "assignee",
+            Prefetch("assignee", queryset=User.objects.only("email", "first_name", "last_name")),
+            Prefetch("opened_by", queryset=User.objects.only("email", "first_name", "last_name")),
+            Prefetch("opened_in", queryset=Flow.objects.only("uuid", "name")),
         )
 
         return queryset
@@ -3701,7 +3701,7 @@ class UsersEndpoint(ListAPIMixin, BaseAPIView):
     pagination_class = DateJoinedCursorPagination
 
     def derive_queryset(self):
-        org = self.request.user.get_org()
+        org = self.request.org
 
         # limit to roles if specified
         roles = self.request.query_params.getlist("role")
@@ -3718,7 +3718,7 @@ class UsersEndpoint(ListAPIMixin, BaseAPIView):
 
         # build a map of users to roles
         user_roles = {}
-        for m in OrgMembership.objects.filter(org=self.request.user.get_org()).select_related("user"):
+        for m in OrgMembership.objects.filter(org=self.request.org).select_related("user"):
             user_roles[m.user] = m.role
 
         context["user_roles"] = user_roles
@@ -3754,10 +3754,8 @@ class WorkspaceEndpoint(BaseAPIView):
             "name": "Nyaruka",
             "country": "RW",
             "languages": ["eng", "fra"],
-            "primary_language": "eng",
             "timezone": "Africa/Kigali",
             "date_style": "day_first",
-            "credits": {"used": 121433, "remaining": 3452},
             "anon": false
         }
     """
@@ -3765,8 +3763,7 @@ class WorkspaceEndpoint(BaseAPIView):
     permission = "orgs.org_api"
 
     def get(self, request, *args, **kwargs):
-        org = request.user.get_org()
-        serializer = WorkspaceReadSerializer(org)
+        serializer = WorkspaceReadSerializer(request.org)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @classmethod
@@ -3777,3 +3774,27 @@ class WorkspaceEndpoint(BaseAPIView):
             "url": reverse("api.v2.workspace"),
             "slug": "workspace-read",
         }
+
+
+class SurveyorAttachmentsEndpoint(BaseAPIView):
+    """
+    Undocumented endpoint used by Surveyor to submit response attachments.
+    """
+
+    parser_classes = (MultiPartParser, FormParser)
+    permission = "msgs.msg_api"
+
+    def post(self, request, format=None, *args, **kwargs):
+        org = self.request.org
+        file = request.data.get("media_file", None)
+        extension = request.data.get("extension", None)
+
+        if file and extension:
+            uuid = uuid4()
+            path = f"{settings.STORAGE_ROOT_DIR}/{org.id}/surveyor_attachments/{str(uuid)[0:4]}/{uuid}.{extension}"
+            public_file_storage.save(path, file)
+            url = public_file_storage.url(path)
+
+            return Response({"location": url}, status=status.HTTP_201_CREATED)
+
+        return Response({}, status=status.HTTP_400_BAD_REQUEST)
