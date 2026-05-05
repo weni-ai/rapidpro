@@ -33,10 +33,10 @@ ENV PATH              "${NPM_CONFIG_PREFIX}/bin:${PATH}"
 
 RUN apt-get update \
  && apt-get install --no-install-recommends --no-install-suggests -y apt-utils \
- && apt-get install --no-install-recommends --no-install-suggests -y gcc bzip2 git curl nginx libpq-dev gettext \
+ && apt-get install --no-install-recommends --no-install-suggests -y gcc bzip2 git curl ca-certificates gnupg nginx libpq-dev gettext \
     libgdal-dev python3-cffi python3-gdal vim
 
-RUN curl -sL https://deb.nodesource.com/setup_12.x | bash - \
+RUN curl -sL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get install --no-install-recommends --no-install-suggests -y nodejs
 
 RUN rm -rf /var/lib/apt/lists/*
