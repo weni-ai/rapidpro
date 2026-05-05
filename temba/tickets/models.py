@@ -1,3 +1,4 @@
+import logging
 from abc import ABCMeta
 from datetime import date
 
@@ -13,11 +14,16 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from temba import mailroom
+from temba.assets.models import register_asset_store
 from temba.contacts.models import Contact
 from temba.orgs.models import DependencyMixin, Org, User, UserSettings
+from temba.utils import chunk_list
 from temba.utils.dates import date_range
+from temba.utils.export import BaseExportAssetStore, BaseItemWithContactExport, MultiSheetExporter
 from temba.utils.models import DailyCountModel, DailyTimingModel, SquashableModel, TembaModel
 from temba.utils.uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 
 class TicketerType(metaclass=ABCMeta):
@@ -178,6 +184,16 @@ class Topic(TembaModel, DependencyMixin):
     def create_from_import_def(cls, org, user, definition: dict):
         return cls.create(org, user, definition["name"])
 
+    def release(self, user):
+        assert not (self.is_system and self.org.is_active), "can't release system topics"
+
+        super().release(user)
+
+        self.is_active = False
+        self.name = self._deleted_name()
+        self.modified_by = user
+        self.save(update_fields=("name", "is_active", "modified_by", "modified_on"))
+
     class Meta:
         constraints = [models.UniqueConstraint("org", Lower("name"), name="unique_topic_names")]
 
@@ -215,8 +231,11 @@ class Ticket(models.Model):
     status = models.CharField(max_length=1, choices=STATUS_CHOICES)
     assignee = models.ForeignKey(User, on_delete=models.PROTECT, null=True, related_name="assigned_tickets")
 
-    # when this ticket was opened, first replied to, closed, modified
     opened_on = models.DateTimeField(default=timezone.now)
+    opened_in = models.ForeignKey("flows.Flow", null=True, on_delete=models.PROTECT, related_name="opened_tickets")
+    opened_by = models.ForeignKey(User, null=True, on_delete=models.PROTECT, related_name="opened_tickets")
+
+    # when this ticket was first replied to, closed, modified
     replied_on = models.DateTimeField(null=True)
     closed_on = models.DateTimeField(null=True)
     modified_on = models.DateTimeField(default=timezone.now)
@@ -335,6 +354,7 @@ class TicketFolder(metaclass=ABCMeta):
     slug = None
     name = None
     icon = None
+    verbose_name = None
 
     def get_queryset(self, org, user, ordered):
         qs = Ticket.objects.filter(org=org)
@@ -360,7 +380,7 @@ class MineFolder(TicketFolder):
 
     slug = "mine"
     name = _("My Tickets")
-    icon = "coffee"
+    icon = "icon.tickets_mine"
 
     def get_queryset(self, org, user, ordered):
         return super().get_queryset(org, user, ordered).filter(assignee=user)
@@ -373,7 +393,8 @@ class UnassignedFolder(TicketFolder):
 
     slug = "unassigned"
     name = _("Unassigned")
-    icon = "mail"
+    verbose_name = _("Unassigned Tickets")
+    icon = "icon.tickets_unassigned"
 
     def get_queryset(self, org, user, ordered):
         return super().get_queryset(org, user, ordered).filter(assignee=None)
@@ -386,7 +407,8 @@ class AllFolder(TicketFolder):
 
     slug = "all"
     name = _("All")
-    icon = "archive"
+    verbose_name = _("All Tickets")
+    icon = "icon.tickets_all"
 
     def get_queryset(self, org, user, ordered):
         return super().get_queryset(org, user, ordered)
@@ -612,3 +634,67 @@ def export_ticket_stats(org: Org, since: date, until: date) -> openpyxl.Workbook
         day_row += 1
 
     return workbook
+
+
+class ExportTicketsTask(BaseItemWithContactExport):
+    analytics_key = "ticket_export"
+    notification_export_type = "ticket"
+
+    @classmethod
+    def create(cls, org, user, start_date, end_date, with_fields=(), with_groups=()):
+        export = cls.objects.create(
+            org=org, start_date=start_date, end_date=end_date, created_by=user, modified_by=user
+        )
+        export.with_fields.add(*with_fields)
+        export.with_groups.add(*with_groups)
+        return export
+
+    def write_export(self):
+        headers = ["UUID", "Opened On", "Closed On", "Topic", "Assigned To"] + self._get_contact_headers()
+        start_date, end_date = self._get_date_range()
+
+        # get the ticket ids, filtered and ordered by opened on
+        ticket_ids = (
+            self.org.tickets.filter(opened_on__gte=start_date, opened_on__lte=end_date)
+            .order_by("opened_on")
+            .values_list("id", flat=True)
+        )
+
+        exporter = MultiSheetExporter("Tickets", headers, self.org.timezone)
+
+        # add tickets to the export in batches of 1k to limit memory usage
+        for batch_ids in chunk_list(ticket_ids, 1000):
+            tickets = (
+                Ticket.objects.filter(id__in=batch_ids)
+                .order_by("opened_on")
+                .prefetch_related("org", "contact", "contact__org", "contact__groups", "assignee", "topic")
+                .using("readonly")
+            )
+
+            Contact.bulk_urn_cache_initialize([t.contact for t in tickets], using="readonly")
+
+            for ticket in tickets:
+                values = [
+                    str(ticket.uuid),
+                    ticket.opened_on,
+                    ticket.closed_on,
+                    ticket.topic.name,
+                    ticket.assignee.email if ticket.assignee else None,
+                ]
+                values += self._get_contact_columns(ticket.contact)
+
+                exporter.write_row(values)
+
+            self.modified_on = timezone.now()
+            self.save(update_fields=("modified_on",))
+
+        return exporter.save_file()
+
+
+@register_asset_store
+class TicketExportAssetStore(BaseExportAssetStore):
+    model = ExportTicketsTask
+    key = "ticket_export"
+    directory = "ticket_exports"
+    permission = "tickets.ticket_export"
+    extensions = ("xlsx",)

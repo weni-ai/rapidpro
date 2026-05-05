@@ -26,7 +26,7 @@ from temba.msgs.models import Broadcast, Label, Msg
 from temba.orgs.models import Org, OrgRole
 from temba.templates.models import Template, TemplateTranslation
 from temba.tickets.models import Ticket, Ticketer, Topic
-from temba.utils import extract_constants, json, on_transaction_commit
+from temba.utils import json, on_transaction_commit
 from temba.utils.fields import NameValidator
 
 from . import fields
@@ -245,7 +245,7 @@ class BroadcastWriteSerializer(WriteSerializer):
 
 
 class ChannelEventReadSerializer(ReadSerializer):
-    TYPES = extract_constants(ChannelEvent.TYPE_CONFIG)
+    TYPES = {t[0]: t[2] for t in ChannelEvent.TYPE_CONFIG}
 
     type = serializers.SerializerMethodField()
     contact = fields.ContactField()
@@ -351,7 +351,6 @@ class CampaignEventWriteSerializer(WriteSerializer):
     relative_to = fields.ContactFieldField(required=True)
     message = fields.TranslatableField(required=False, max_length=Msg.MAX_TEXT_LEN)
     flow = fields.FlowField(required=False)
-    new_expressions = serializers.BooleanField(required=False, default=False)
 
     def validate_unit(self, value):
         return self.UNITS[value]
@@ -515,6 +514,13 @@ class ContactReadSerializer(ReadSerializer):
     blocked = serializers.SerializerMethodField()  # deprecated
     stopped = serializers.SerializerMethodField()  # deprecated
 
+    def __init__(self, *args, context, **kwargs):
+        super().__init__(*args, context=context, **kwargs)
+
+        # remove anon_display field if org isn't anon
+        if not context["org"].is_anon:
+            self.fields.pop("anon_display")
+
     def get_name(self, obj):
         return obj.name if obj.is_active else None
 
@@ -528,7 +534,7 @@ class ContactReadSerializer(ReadSerializer):
         if not obj.is_active:
             return []
 
-        return [urn.api_urn() for urn in obj.get_urns()]
+        return [urn.get_for_api() for urn in obj.get_urns()]
 
     def get_groups(self, obj):
         if not obj.is_active:
@@ -557,6 +563,7 @@ class ContactReadSerializer(ReadSerializer):
         fields = (
             "uuid",
             "name",
+            "anon_display",
             "status",
             "language",
             "urns",
@@ -697,9 +704,26 @@ class ContactFieldReadSerializer(ReadSerializer):
         ContactField.TYPE_WARD: "ward",
     }
 
+    type = serializers.SerializerMethodField()
+    featured = serializers.SerializerMethodField()
+    usages = serializers.SerializerMethodField()
+
+    # for backwards compatibility
     label = serializers.SerializerMethodField()
     value_type = serializers.SerializerMethodField()
-    pinned = serializers.SerializerMethodField()
+
+    def get_type(self, obj):
+        return ContactField.ENGINE_TYPES[obj.value_type]
+
+    def get_featured(self, obj):
+        return obj.show_in_table
+
+    def get_usages(self, obj):
+        return {
+            "flows": getattr(obj, "flow_count", 0),
+            "groups": getattr(obj, "group_count", 0),
+            "campaign_events": getattr(obj, "campaignevent_count", 0),
+        }
 
     def get_label(self, obj):
         return obj.name
@@ -707,27 +731,35 @@ class ContactFieldReadSerializer(ReadSerializer):
     def get_value_type(self, obj):
         return self.VALUE_TYPES[obj.value_type]
 
-    def get_pinned(self, obj):
-        return obj.show_in_table
-
     class Meta:
         model = ContactField
-        fields = ("key", "label", "value_type", "pinned", "priority")
+        fields = ("key", "name", "type", "featured", "priority", "usages", "label", "value_type")
 
 
 class ContactFieldWriteSerializer(WriteSerializer):
+    TYPES = {v: k for k, v in ContactField.ENGINE_TYPES.items()}
     VALUE_TYPES = {v: k for k, v in ContactFieldReadSerializer.VALUE_TYPES.items()}
 
-    label = serializers.CharField(
-        required=True,
+    name = serializers.CharField(
+        required=False,
         max_length=ContactField.MAX_NAME_LEN,
         validators=[
             UniqueForOrgValidator(ContactField.objects.filter(is_active=True), ignore_case=True, model_field="name")
         ],
     )
-    value_type = serializers.ChoiceField(required=True, choices=list(VALUE_TYPES.keys()))
+    type = serializers.ChoiceField(required=False, choices=list(TYPES.keys()))
 
-    def validate_label(self, value):
+    # for backwards compatibility
+    label = serializers.CharField(
+        required=False,
+        max_length=ContactField.MAX_NAME_LEN,
+        validators=[
+            UniqueForOrgValidator(ContactField.objects.filter(is_active=True), ignore_case=True, model_field="name")
+        ],
+    )
+    value_type = serializers.ChoiceField(required=False, choices=list(VALUE_TYPES.keys()))
+
+    def validate_name(self, value):
         if not ContactField.is_valid_name(value):
             raise serializers.ValidationError("Can only contain letters, numbers and hypens.")
 
@@ -737,17 +769,32 @@ class ContactFieldWriteSerializer(WriteSerializer):
 
         return value
 
-    def validate_value_type(self, value):
+    def validate_type(self, value):
         if self.instance and self.instance.campaign_events.filter(is_active=True).exists() and value != "datetime":
             raise serializers.ValidationError("Can't change type of date field being used by campaign events.")
 
-        return self.VALUE_TYPES[value]
+        return self.TYPES.get(value, self.VALUE_TYPES.get(value))
+
+    def validate_label(self, value):
+        return self.validate_name(value)
+
+    def validate_value_type(self, value):
+        return self.validate_type(value)
+
+    def validate(self, data):
+        if not data.get("name") and not data.get("label"):
+            raise serializers.ValidationError("Field 'name' is required.")
+
+        if not data.get("type") and not data.get("value_type"):
+            raise serializers.ValidationError("Field 'type' is required.")
+
+        return data
 
     def save(self):
         org = self.context["org"]
         user = self.context["user"]
-        name = self.validated_data["label"]
-        value_type = self.validated_data["value_type"]
+        name = self.validated_data.get("name") or self.validated_data.get("label")
+        value_type = self.validated_data.get("type") or self.validated_data.get("value_type")
 
         if self.instance:
             self.instance.name = name
@@ -889,16 +936,10 @@ class FlowReadSerializer(ReadSerializer):
         return self.FLOW_TYPES.get(obj.flow_type)
 
     def get_labels(self, obj):
-        return [{"uuid": lb.uuid, "name": lb.name} for lb in obj.labels.all()]
+        return [{"uuid": str(lb.uuid), "name": lb.name} for lb in obj.labels.all()]
 
     def get_runs(self, obj):
-        stats = obj.get_run_stats()
-        return {
-            "active": stats["active"],
-            "completed": stats["completed"],
-            "interrupted": stats["interrupted"],
-            "expired": stats["expired"],
-        }
+        return obj.get_run_stats()["status"]
 
     def get_results(self, obj):
         return obj.metadata.get(Flow.METADATA_RESULTS, [])
@@ -932,7 +973,7 @@ class FlowRunReadSerializer(ReadSerializer):
     }
 
     flow = fields.FlowField()
-    contact = fields.ContactField(with_urn=True)
+    contact = fields.ContactField(as_summary=True)
     start = serializers.SerializerMethodField()
     path = serializers.SerializerMethodField()
     values = serializers.SerializerMethodField()
@@ -1163,16 +1204,14 @@ class LabelWriteSerializer(WriteSerializer):
 
 class MsgReadSerializer(ReadSerializer):
     STATUSES = {
-        Msg.STATUS_INITIALIZING: "initializing",
         Msg.STATUS_PENDING: "queued",  # same as far as users are concerned
+        Msg.STATUS_HANDLED: "handled",
         Msg.STATUS_QUEUED: "queued",
         Msg.STATUS_WIRED: "wired",
         Msg.STATUS_SENT: "sent",
         Msg.STATUS_DELIVERED: "delivered",
-        Msg.STATUS_HANDLED: "handled",
         Msg.STATUS_ERRORED: "errored",
         Msg.STATUS_FAILED: "failed",
-        Msg.STATUS_RESENT: "resent",
     }
     TYPES = {Msg.TYPE_INBOX: "inbox", Msg.TYPE_FLOW: "flow", Msg.TYPE_IVR: "ivr"}
     VISIBILITIES = {  # deleted messages should never be exposed over API
@@ -1442,6 +1481,8 @@ class TicketReadSerializer(ReadSerializer):
     topic = fields.TopicField()
     assignee = fields.UserField()
     opened_on = serializers.DateTimeField(default_timezone=pytz.UTC)
+    opened_by = fields.UserField()
+    opened_in = fields.FlowField()
     modified_on = serializers.DateTimeField(default_timezone=pytz.UTC)
     closed_on = serializers.DateTimeField(default_timezone=pytz.UTC)
 
@@ -1459,6 +1500,8 @@ class TicketReadSerializer(ReadSerializer):
             "body",
             "assignee",
             "opened_on",
+            "opened_by",
+            "opened_in",
             "modified_on",
             "closed_on",
         )
@@ -1574,11 +1617,12 @@ class WorkspaceReadSerializer(ReadSerializer):
 
     country = serializers.SerializerMethodField()
     languages = serializers.SerializerMethodField()
-    primary_language = serializers.SerializerMethodField()
     timezone = serializers.SerializerMethodField()
     date_style = serializers.SerializerMethodField()
-    credits = serializers.SerializerMethodField()
     anon = serializers.SerializerMethodField()
+
+    credits = serializers.SerializerMethodField()  # deprecated
+    primary_language = serializers.SerializerMethodField()  # deprecated
 
     def get_country(self, obj):
         return obj.default_country_code
@@ -1586,20 +1630,20 @@ class WorkspaceReadSerializer(ReadSerializer):
     def get_languages(self, obj):
         return obj.flow_languages
 
-    def get_primary_language(self, obj):
-        return obj.flow_languages[0] if obj.flow_languages else None
-
     def get_timezone(self, obj):
         return str(obj.timezone)
 
     def get_date_style(self, obj):
         return self.DATE_STYLES.get(obj.date_format)
 
-    def get_credits(self, obj):
-        return {"used": obj.get_credits_used(), "remaining": obj.get_credits_remaining()}
-
     def get_anon(self, obj):
         return obj.is_anon
+
+    def get_credits(self, obj):
+        return {"used": -1, "remaining": -1}  # for backwards compatibility
+
+    def get_primary_language(self, obj):
+        return obj.flow_languages[0]
 
     class Meta:
         model = Org
@@ -1608,9 +1652,9 @@ class WorkspaceReadSerializer(ReadSerializer):
             "name",
             "country",
             "languages",
-            "primary_language",
             "timezone",
             "date_style",
-            "credits",
             "anon",
+            "credits",
+            "primary_language",
         )

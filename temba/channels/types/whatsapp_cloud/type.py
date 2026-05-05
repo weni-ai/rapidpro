@@ -20,8 +20,8 @@ class WhatsAppCloudType(ChannelType):
     """
 
     extra_links = [
-        dict(name=_("Message Templates"), link="channels.types.whatsapp_cloud.templates"),
-        dict(name=_("Verify Number"), link="channels.types.whatsapp_cloud.request_code"),
+        dict(label=_("Message Templates"), view_name="channels.types.whatsapp_cloud.templates"),
+        dict(label=_("Verify Number"), view_name="channels.types.whatsapp_cloud.request_code"),
     ]
 
     code = "WAC"
@@ -57,8 +57,7 @@ class WhatsAppCloudType(ChannelType):
         wa_pin = channel.config.get("wa_pin")
         wa_user_auth_token = channel.config.get("wa_user_auth_token")
 
-        weni_headers = {"Authorization": f"Bearer {settings.WHATSAPP_ADMIN_SYSTEM_USER_TOKEN}"}
-        user_headers = {"Authorization": f"Bearer {wa_user_auth_token}"}
+        headers = {"Authorization": f"Bearer {settings.WHATSAPP_ADMIN_SYSTEM_USER_TOKEN}"}
 
         # Subscribe to events
         url = f"https://graph.facebook.com/v18.0/{waba_id}/subscribed_apps"
@@ -101,10 +100,7 @@ class WhatsAppCloudType(ChannelType):
             headers = {"Authorization": f"Bearer {settings.WHATSAPP_ADMIN_SYSTEM_USER_TOKEN}"}
             while url:
                 resp = requests.get(url, params=dict(limit=255), headers=headers)
-                elapsed = (timezone.now() - start).total_seconds() * 1000
-                HTTPLog.create_from_response(
-                    HTTPLog.WHATSAPP_TEMPLATES_SYNCED, url, resp, channel=channel, request_time=elapsed
-                )
+                HTTPLog.from_response(HTTPLog.WHATSAPP_TEMPLATES_SYNCED, resp, start, timezone.now(), channel=channel)
                 if resp.status_code != 200:  # pragma: no cover
                     return [], False
 
@@ -112,5 +108,5 @@ class WhatsAppCloudType(ChannelType):
                 url = resp.json().get("paging", {}).get("next", None)
             return template_data, True
         except requests.RequestException as e:
-            HTTPLog.create_from_exception(HTTPLog.WHATSAPP_TEMPLATES_SYNCED, url, e, start, channel=channel)
+            HTTPLog.from_exception(HTTPLog.WHATSAPP_TEMPLATES_SYNCED, e, start, channel=channel)
             return [], False

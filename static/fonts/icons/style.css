@@ -1,10 +1,10 @@
 @font-face {
   font-family: 'temba';
-  src:  url('fonts/temba.eot?hu3jzs');
-  src:  url('fonts/temba.eot?hu3jzs#iefix') format('embedded-opentype'),
-    url('fonts/temba.ttf?hu3jzs') format('truetype'),
-    url('fonts/temba.woff?hu3jzs') format('woff'),
-    url('fonts/temba.svg?hu3jzs#temba') format('svg');
+  src:  url('fonts/temba.eot?kyypz2');
+  src:  url('fonts/temba.eot?kyypz2#iefix') format('embedded-opentype'),
+    url('fonts/temba.ttf?kyypz2') format('truetype'),
+    url('fonts/temba.woff?kyypz2') format('woff'),
+    url('fonts/temba.svg?kyypz2#temba') format('svg');
   font-weight: normal;
   font-style: normal;
   font-display: block;
@@ -25,7 +25,7 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
-.icon-weniwebchat:before {
+.icon-slack:before {
   content: "\e922";
 }
 .icon-instagram:before {

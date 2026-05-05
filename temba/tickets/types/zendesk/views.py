@@ -20,7 +20,7 @@ from temba.orgs.views import OrgPermsMixin
 from temba.utils import json
 from temba.utils.s3 import public_file_storage
 from temba.utils.text import random_string
-from temba.utils.views import ComponentFormMixin
+from temba.utils.views import ComponentFormMixin, ContentMenuMixin
 
 from ...models import Ticketer
 from ...views import BaseConnectView
@@ -39,7 +39,7 @@ class ConnectView(BaseConnectView):
         def clean_subdomain(self):
             from .type import ZendeskType
 
-            org = self.request.user.get_org()
+            org = self.request.org
             data = self.cleaned_data["subdomain"]
 
             if not re.match(r"^[\w\-]+", data):
@@ -65,8 +65,7 @@ class ConnectView(BaseConnectView):
         return super(ConnectView, self).get(request, *args, **kwargs)
 
     def get_absolute_url(self):
-        brand = self.org.get_branding()
-        return f"https://{brand['domain']}{reverse('tickets.types.zendesk.connect')}"
+        return f"https://{self.org.branding['domain']}{reverse('tickets.types.zendesk.connect')}"
 
     def get_success_url(self):
         return reverse("tickets.types.zendesk.configure", args=[self.object.uuid])
@@ -116,7 +115,7 @@ class ConnectView(BaseConnectView):
         return HttpResponseRedirect(self.get_success_url())
 
 
-class ConfigureView(ComponentFormMixin, OrgPermsMixin, SmartReadView):
+class ConfigureView(ComponentFormMixin, ContentMenuMixin, OrgPermsMixin, SmartReadView):
     model = Ticketer
     fields = ()
     permission = "tickets.ticketer_configure"
@@ -125,13 +124,11 @@ class ConfigureView(ComponentFormMixin, OrgPermsMixin, SmartReadView):
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        return queryset.filter(org=self.get_user().get_org())
+        return queryset.filter(org=self.request.org)
 
-    def get_gear_links(self):
-        links = []
+    def build_content_menu(self, menu):
         if self.has_org_perm("tickets.ticket_list"):
-            links.append(dict(title=_("Tickets"), href=reverse("tickets.ticket_list")))
-        return links
+            menu.add_link(_("Tickets"), reverse("tickets.ticket_list"))
 
     def get_context_data(self, **kwargs):
         from .type import ZendeskType

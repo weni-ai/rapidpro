@@ -11,6 +11,7 @@ import phonenumbers
 import pyexcel
 import pytz
 import regex
+import xlrd
 from django_redis import get_redis_connection
 from smartmin.models import SmartModel
 
@@ -30,7 +31,7 @@ from temba.locations.models import AdminBoundary
 from temba.mailroom import ContactSpec, modifiers, queue_populate_dynamic_group
 from temba.orgs.models import DependencyMixin, Org
 from temba.utils import chunk_list, format_number, on_transaction_commit
-from temba.utils.export import BaseExportAssetStore, BaseExportTask, TableExporter
+from temba.utils.export import BaseExport, BaseExportAssetStore, MultiSheetExporter
 from temba.utils.models import JSONField, LegacyUUIDMixin, SquashableModel, TembaModel
 from temba.utils.text import decode_stream, unsnakify
 from temba.utils.urns import ParsedURN, parse_number, parse_urn
@@ -62,7 +63,6 @@ class URN:
     LINE_SCHEME = "line"
     ROCKETCHAT_SCHEME = "rocketchat"
     SLACK_SCHEME = "slack"
-    TEAMS_SCHEME = "teams"
     TELEGRAM_SCHEME = "telegram"
     TEL_SCHEME = "tel"
     TWITTERID_SCHEME = "twitterid"
@@ -87,7 +87,6 @@ class URN:
         (LINE_SCHEME, _("LINE Identifier")),
         (ROCKETCHAT_SCHEME, _("RocketChat Identifier")),
         (SLACK_SCHEME, _("Slack Identifier")),
-        (TEAMS_SCHEME, _("Teams Identifier")),
         (TELEGRAM_SCHEME, _("Telegram Identifier")),
         (TWITTERID_SCHEME, _("Twitter ID")),
         (TWITTER_SCHEME, _("Twitter Handle")),
@@ -358,14 +357,17 @@ class ContactField(TembaModel, DependencyMixin):
     TYPE_DISTRICT = "I"
     TYPE_WARD = "W"
 
-    TYPE_CHOICES = (
+    TYPE_CHOICES_BASIC = (
         (TYPE_TEXT, _("Text")),
         (TYPE_NUMBER, _("Number")),
         (TYPE_DATETIME, _("Date & Time")),
+    )
+    TYPE_CHOICES_LOCATIONS = (
         (TYPE_STATE, _("State")),
         (TYPE_DISTRICT, _("District")),
         (TYPE_WARD, _("Ward")),
     )
+    TYPE_CHOICES = TYPE_CHOICES_BASIC + TYPE_CHOICES_LOCATIONS
 
     ENGINE_TYPES = {
         TYPE_TEXT: "text",
@@ -601,16 +603,13 @@ class Contact(LegacyUUIDMixin, SmartModel):
 
     org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="contacts")
 
-    name = models.CharField(
-        verbose_name=_("Name"), max_length=128, blank=True, null=True, help_text=_("The name of this contact")
-    )
+    name = models.CharField(verbose_name=_("Name"), max_length=128, blank=True, null=True)
 
     language = models.CharField(
         max_length=3,
         verbose_name=_("Language"),
         null=True,
         blank=True,
-        help_text=_("The preferred language for this contact"),
     )
 
     # custom field values for this contact, keyed by field UUID
@@ -666,12 +665,27 @@ class Contact(LegacyUUIDMixin, SmartModel):
         contact_urn = ContactURN.objects.get(id=response["urn"]["id"])
         return contact, contact_urn
 
+    @classmethod
+    def from_urn(cls, org, urn_as_string, country=None):
+        """
+        Looks up a contact by a URN string (which will be normalized)
+        """
+        try:
+            urn_obj = ContactURN.lookup(org, urn_as_string, country)
+        except ValueError:
+            return None
+
+        if urn_obj and urn_obj.contact and urn_obj.contact.is_active:
+            return urn_obj.contact
+        else:
+            return None
+
     @property
-    def anon_identifier(self):
+    def anon_display(self):
         """
         The displayable identifier used in place of URNs for anonymous orgs
         """
-        return "%010d" % self.id
+        return f"{self.id:010}"
 
     @classmethod
     def get_status_counts(cls, org) -> dict:
@@ -753,7 +767,7 @@ class Contact(LegacyUUIDMixin, SmartModel):
         Gets this contact's history of messages, calls, runs etc in the given time window
         """
         from temba.flows.models import FlowExit
-        from temba.ivr.models import IVRCall
+        from temba.ivr.models import Call
         from temba.mailroom.events import get_event_time
         from temba.tickets.models import TicketEvent
 
@@ -791,8 +805,8 @@ class Contact(LegacyUUIDMixin, SmartModel):
         )
 
         calls = (
-            IVRCall.objects.filter(contact=self, created_on__gte=after, created_on__lt=before)
-            .exclude(status__in=[IVRCall.STATUS_PENDING, IVRCall.STATUS_WIRED])
+            Call.objects.filter(contact=self, created_on__gte=after, created_on__lt=before)
+            .exclude(status__in=[Call.STATUS_PENDING, Call.STATUS_WIRED])
             .order_by("-created_on")
             .select_related("channel")[:limit]
         )
@@ -1004,21 +1018,6 @@ class Contact(LegacyUUIDMixin, SmartModel):
         return [c.id for c in contacts if modified(c)]
 
     @classmethod
-    def from_urn(cls, org, urn_as_string, country=None):
-        """
-        Looks up a contact by a URN string (which will be normalized)
-        """
-        try:
-            urn_obj = ContactURN.lookup(org, urn_as_string, country)
-        except ValueError:
-            return None
-
-        if urn_obj and urn_obj.contact and urn_obj.contact.is_active:
-            return urn_obj.contact
-        else:
-            return None
-
-    @classmethod
     def bulk_change_status(cls, user, contacts, status):
         cls.bulk_modify(user, contacts, [modifiers.Status(status=status)])
 
@@ -1058,6 +1057,28 @@ class Contact(LegacyUUIDMixin, SmartModel):
             from .tasks import release_contacts
 
             on_transaction_commit(lambda: release_contacts.delay(user.id, [c.id for c in contacts]))
+
+    def open_ticket(self, user, ticketer, topic, body: str, assignee=None):
+        """
+        Opens a new ticket for this contact.
+        """
+        mod = modifiers.Ticket(
+            ticketer=modifiers.TicketerRef(uuid=str(ticketer.uuid), name=ticketer.name),
+            topic=modifiers.TopicRef(uuid=str(topic.uuid), name=topic.name),
+            body=body,
+            assignee=modifiers.UserRef(email=assignee.email, name=assignee.name) if assignee else None,
+        )
+        self.modify(user, [mod], refresh=False)
+        return self.tickets.order_by("id").last()
+
+    def interrupt(self, user) -> bool:
+        """
+        Interrupts this contact's current flow
+        """
+        if self.current_flow:
+            sessions = mailroom.get_client().contact_interrupt(self.org.id, user.id, self.id)
+            return len(sessions) > 0
+        return False
 
     def block(self, user):
         """
@@ -1148,16 +1169,14 @@ class Contact(LegacyUUIDMixin, SmartModel):
 
             # any urns currently owned by us
             for urn in self.urns.all():
-
-                # release any messages attached with each urn,
-                # these could include messages that began life
+                # release any messages attached with each urn, these could include messages that began life
                 # on a different contact
                 for msg in urn.msgs.all():
                     msg.delete()
 
-                # same thing goes for connections
-                for conn in urn.connections.all():
-                    conn.release()
+                # same thing goes for calls
+                for call in urn.calls.all():
+                    call.release()
 
                 urn.release()
 
@@ -1171,8 +1190,8 @@ class Contact(LegacyUUIDMixin, SmartModel):
             for session in self.sessions.all():
                 session.delete()
 
-            for conn in self.connections.all():  # pragma: needs cover
-                conn.release()
+            for call in self.calls.all():  # pragma: needs cover
+                call.release()
 
             # and any event fire history
             self.campaign_fires.all().delete()
@@ -1254,7 +1273,7 @@ class Contact(LegacyUUIDMixin, SmartModel):
         if self.name:
             return self.name
         elif org.is_anon:
-            return self.anon_identifier
+            return self.anon_display
 
         return self.get_urn_display(org=org, formatted=formatted)
 
@@ -1405,26 +1424,26 @@ class ContactURN(models.Model):
 
         return self
 
-    def get_display(self, org=None, international=False, formatted=True):
+    def get_display(self, org=None, international: bool = False, formatted: bool = True) -> str:
         """
-        Gets a representation of the URN for display
+        Gets a representation of the URN for display, e.g. tel:+12345678901 becomes +1 234 567-8901
         """
-        if not org:
-            org = self.org
-
-        if org.is_anon:
+        if (org or self.org).is_anon:
             return self.ANON_MASK
 
         return URN.format(self.urn, international=international, formatted=formatted)
 
-    def api_urn(self):
+    def get_for_api(self) -> str:
+        """
+        Gets a representation for the API which will be scheme:path and will have the path redacted if the org is anon
+        """
         if self.org.is_anon:
             return URN.from_parts(self.scheme, self.ANON_MASK)
 
-        return URN.from_parts(self.scheme, self.path, display=self.display)
+        return URN.from_parts(self.scheme, self.path)
 
     @property
-    def urn(self):
+    def urn(self) -> str:
         """
         Returns a full representation of this contact URN as a string
         """
@@ -1613,19 +1632,9 @@ class ContactGroup(LegacyUUIDMixin, TembaModel, DependencyMixin):
             modified_by=user,
         )
 
-    @classmethod
-    def apply_action_delete(cls, user, groups):
-        groups.update(is_active=False, modified_by=user)
-
-        from .tasks import release_group_task
-
-        for group in groups:
-            # release each group in a background task
-            on_transaction_commit(lambda: release_group_task.delay(group.id))
-
     @property
     def icon(self) -> str:
-        return "atom" if self.group_type == self.TYPE_SMART else "users"
+        return "icon.group_smart" if self.group_type == self.TYPE_SMART else "icon.group"
 
     def get_attrs(self):
         return {"icon": self.icon}
@@ -1810,7 +1819,7 @@ class ContactGroupCount(SquashableModel):
         return ContactGroupCount.objects.create(group=group, count=count)
 
 
-class ExportContactsTask(BaseExportTask):
+class ExportContactsTask(BaseExport):
     analytics_key = "contact_export"
     notification_export_type = "contact"
 
@@ -1911,7 +1920,9 @@ class ExportContactsTask(BaseExportTask):
             contact_ids = group.contacts.order_by("name", "id").values_list("id", flat=True)
 
         # create our exporter
-        exporter = TableExporter(self, "Contact", [f["label"] for f in fields] + [g["label"] for g in group_fields])
+        exporter = MultiSheetExporter(
+            "Contact", [f["label"] for f in fields] + [g["label"] for g in group_fields], self.org.timezone
+        )
 
         total_exported_contacts = 0
         start = time.time()
@@ -1933,8 +1944,7 @@ class ExportContactsTask(BaseExportTask):
 
                 values = []
                 for field in fields:
-                    value = self.get_field_value(field, contact)
-                    values.append(self.prepare_value(value))
+                    values.append(self.get_field_value(field, contact))
 
                 group_values = []
                 if include_group_memberships:
@@ -2051,7 +2061,11 @@ class ContactImport(SmartModel):
         if file_type == "csv":
             file = decode_stream(file)
 
-        data = pyexcel.iget_array(file_stream=file, file_type=file_type)
+        try:
+            data = pyexcel.iget_array(file_stream=file, file_type=file_type)
+        except xlrd.XLRDError:
+            raise ValidationError(_("Import file appears to be corrupted. Please save again in Excel and try again."))
+
         try:
             headers = [str(h).strip() for h in next(data)]
         except StopIteration:

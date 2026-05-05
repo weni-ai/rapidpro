@@ -1,18 +1,23 @@
-import slack_sdk
 from unittest.mock import patch
-from temba.tests import TembaTest
-from ...models import Channel
+
+import slack_sdk
+
 from django.urls import reverse
+
+from temba.tests import TembaTest
+
+from ...models import Channel
 
 
 class SlackTypeTest(TembaTest):
     def setUp(self):
         super().setUp()
 
-        self.channel = self.create_channel(
+        self.create_channel(
             "SL",
-            "Slack",
-            "12345",
+            "Slack12345",
+            "B0T12345",
+            org=self.org2,
             config={
                 "user_token": "123456789:ABCDEFabcdef-1a2b3c4d",
                 "bot_token": "123456789:ABCDEFabcdef-1a2b3c4d",
@@ -51,6 +56,35 @@ class SlackTypeTest(TembaTest):
             response.context["form"].errors["bot_token"][0],
         ),
 
+        # test to claim a channel with a bot token that already exists for another workspace.
+        auth_test = {
+            "ok": True,
+            "url": "https://12345-team-group.slack.com/",
+            "team": "12345-team",
+            "user": "dummy",
+            "team_id": "T012345",
+            "user_id": "U012345",
+            "bot_id": "B0T12345",
+            "is_enterprise_install": False,
+        }
+
+        mock_api_call.side_effect = None
+        mock_api_call.return_value = auth_test
+
+        response = self.client.post(
+            url,
+            {
+                "user_token": "123456789:ABCDEFabcdef-1a2b3c4d",
+                "bot_token": "123456789:ABCDEFabcdef-1a2b3c4d",
+                "verification_token": "123456789:ABCDEFabcdef-1a2b3c4d",
+            },
+        )
+        self.assertEqual(
+            "A slack channel for this bot already exists in another workspace.",
+            response.context["form"].errors["bot_token"][0],
+        )
+
+        # test claim a channel with success
         auth_test = {
             "ok": True,
             "url": "https://dummy-team-group.slack.com/",
@@ -58,6 +92,7 @@ class SlackTypeTest(TembaTest):
             "user": "dummy",
             "team_id": "T0DUMMY",
             "user_id": "U0DUMMY",
+            "bot_id": "B0TDUMMY",
             "is_enterprise_install": False,
         }
 
@@ -72,7 +107,7 @@ class SlackTypeTest(TembaTest):
                 "verification_token": "VTK0123456789ABCDEFabcdef-1a2b3c4d",
             },
         )
-        channel = Channel.objects.get(address="dummy")
+        channel = Channel.objects.get(address="B0TDUMMY")
         self.assertEqual(channel.channel_type, "SL")
         self.assertEqual(
             channel.config,
@@ -83,12 +118,14 @@ class SlackTypeTest(TembaTest):
             },
         ),
 
+        # test access config page
         config_url = reverse("channels.channel_configuration", args=[channel.uuid])
         self.assertRedirect(response, config_url)
 
         response = self.client.get(config_url)
         self.assertEqual(response.status_code, 200)
 
+        # test to claim a channel with a bot token that already exists in this workspace
         response = self.client.post(
             url,
             {
@@ -98,14 +135,11 @@ class SlackTypeTest(TembaTest):
             },
         )
         self.assertEqual(
-            "A slack channel for this bot already exists on your account.",
-            response.context["form"].errors["user_token"][0],
+            "A slack channel for this bot already exists in this workspace.",
+            response.context["form"].errors["bot_token"][0],
         )
 
-        contact = self.create_contact("Slack User", urns=["slack:1234"])
-
         # make sure we our slack channel satisfies as a send channel
-        response = self.client.get(reverse("contacts.contact_read", args=[contact.uuid]))
-        send_channel = response.context["send_channel"]
+        send_channel = self.org.get_send_channel()
         self.assertIsNotNone(send_channel)
         self.assertEqual(send_channel.channel_type, "SL")

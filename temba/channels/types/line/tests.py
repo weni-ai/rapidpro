@@ -3,6 +3,7 @@ from django.urls import reverse
 from temba.tests import TembaTest
 
 from ...models import Channel
+from .type import LineType
 
 
 class LineTypeTest(TembaTest):
@@ -30,6 +31,11 @@ class LineTypeTest(TembaTest):
         response = self.client.get(reverse("channels.channel_claim"))
         self.assertContains(response, url)
 
+        payload = {"access_token": "abcdef123456", "secret": "123456", "channel_id": "123456789", "name": "Temba" * 20}
+
+        response = self.client.post(url, payload, follow=True)
+        self.assertFormError(response, "form", "name", "Ensure this value has at most 64 characters (it has 100).")
+
         payload = {"access_token": "abcdef123456", "secret": "123456", "channel_id": "123456789", "name": "Temba"}
 
         response = self.client.post(url, payload, follow=True)
@@ -40,3 +46,9 @@ class LineTypeTest(TembaTest):
 
         response = self.client.post(url, payload, follow=True)
         self.assertContains(response, "A channel with this configuration already exists.")
+
+    def test_get_error_ref_url(self):
+        self.assertEqual(
+            "https://developers.line.biz/en/reference/messaging-api/#error-responses",
+            LineType().get_error_ref_url(None, "12"),
+        )

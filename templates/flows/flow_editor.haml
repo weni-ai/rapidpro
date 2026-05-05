@@ -93,16 +93,8 @@
       line-height: 20px;
     }
 
-    #top-menu {
-      z-index: inherit;
-    }
-
-    #top-menu.expanded {
-      z-index: 3000 !important;
-    }
-
-    .gear-menu.open {
-      z-index: 3000;
+    #content-menu {
+      z-index: 20;
     }
 
     #toolbar {
@@ -185,9 +177,9 @@
     %script(type="text/javascript" src="{{script}}")
 
   :javascript
-    const base = '/flow/assets/{{object.org.id}}/' + new Date().getTime() + '/';
-    const api = '/api/v2/';
-    const flowType = '{{ object.engine_type }}';
+    var base = '/flow/assets/{{object.org.id}}/' + new Date().getTime() + '/';
+    var api = '/api/v2/';
+    var flowType = '{{ object.engine_type }}';
 
     window.addEventListener("DOMContentLoaded", function() {
       var confirmation = document.getElementById("confirm-language");
@@ -230,7 +222,7 @@
       confirmation.open = true;      
     }
 
-    const config = {
+    var config = {
       flow: '{{object.uuid}}',
       flowType: flowType,
       localStorage: true,
@@ -268,11 +260,12 @@
         // TODO: migrate to API?
         revisions: '/flow/revisions/{{object.uuid}}/',
         recents: '/flow/recent_contacts/{{object.uuid}}/',
-        attachments: '/flow/upload_media_action/{{object.uuid}}/',
+        attachments: '{% url "msgs.media_upload" %}',
         languages: base + 'language',
         environment: base + 'environment',
         activity: '/flow/activity/{{object.uuid}}/',
         recipients: '/contact/omnibox?v=2&types=gc',
+        contacts: '/contact/omnibox?v=2&types=c',
         contact: '/contact/read/',
 
         {% if can_simulate %}
@@ -282,7 +275,14 @@
       }
     };
 
-    showFlowEditor(document.getElementById('rp-flow-editor'), config);
+    // wait for our component to load, then show the editor
+    if (window.showFlowEditor) {
+      window.showFlowEditor(document.getElementById("rp-flow-editor"), config);
+    } else {
+      document.addEventListener("temba-floweditor-loaded", function(){
+        window.showFlowEditor(document.getElementById("rp-flow-editor"), config);
+      });
+    }
 
 -block page-container
 
