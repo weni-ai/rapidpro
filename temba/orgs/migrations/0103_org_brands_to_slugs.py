@@ -4,19 +4,32 @@ from django.conf import settings
 from django.db import migrations
 
 
+def get_configured_brands():  # pragma: no cover
+    for brand in settings.BRANDS:
+        yield None, brand
+
+    for key, brand in getattr(settings, "BRANDING", {}).items():
+        yield key, brand
+
+
+def brand_matches(lookup: str, key: str | None, brand: dict) -> bool:  # pragma: no cover
+    identifiers = {key, brand.get("slug"), brand.get("domain")}
+    identifiers.update(brand.get("hosts") or [])
+    return lookup in identifiers
+
+
 def get_branding(host: str) -> dict:  # pragma: no cover
     """
     Returns the branding for the given host
     """
-    for brand in settings.BRANDS:
-        # in case it's already a slug
-        if host == brand["slug"]:
-            return brand
+    brands = list(get_configured_brands())
 
-        if host in brand["hosts"]:
-            return brand
+    for lookup in (host, settings.DEFAULT_BRAND):
+        for key, brand in brands:
+            if brand_matches(lookup, key, brand):
+                return brand
 
-    return get_branding(settings.DEFAULT_BRAND)
+    return brands[0][1]
 
 
 def convert_org_brands_to_slugs(apps, schema_editor):  # pragma: no cover
