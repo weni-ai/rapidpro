@@ -62,7 +62,7 @@ jobs:
         run: |
           poetry install
           yarn install
-          sudo yarn global add less
+          sudo yarn global add less@3.13.1
           ln -s ${{ github.workspace }}/temba/settings.py.dev ${{ github.workspace }}/temba/settings.py
           poetry run ./manage.py migrate
           # fetch and extract rp-indexer
