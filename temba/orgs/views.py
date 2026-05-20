@@ -1762,7 +1762,7 @@ class OrgCRUDL(SmartCRUDL):
                             raise Exception(
                                 'Missing permission, we need all the following permissions "business_management", "whatsapp_business_management", "whatsapp_business_messaging"'
                             )
-                except Exception as e:
+                except Exception:
                     raise forms.ValidationError(
                         _("Sorry account could not be connected. Please try again"), code="invalid"
                     )

@@ -26,6 +26,10 @@ MANAGERS = ADMINS
 
 USE_DEPRECATED_PYTZ = True
 
+# User reset password limit
+USER_RECOVER_TIME_INTERVAL = 12
+USER_RECOVER_MAX_ATTEMPTS = 5
+
 # -----------------------------------------------------------------------------------
 # set the mail settings, override these in your settings.py
 # if your site was at http://temba.io, it might look like this:

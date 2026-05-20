@@ -1,10 +1,9 @@
-from django.core.cache import cache
 from django import forms
-from django.utils.translation import gettext_lazy as _
 from django.conf import settings
+from django.core.cache import cache
+from django.utils.translation import gettext_lazy as _
 
 from .views import UserCRUDL as UserCRUDLBase
-
 
 USER_RECOVER_ATTEMPTS_CACHE_KEY = "user-email:{email}"
 USER_RECOVER_TIME_INTERVAL = settings.USER_RECOVER_TIME_INTERVAL * 60 * 60
@@ -24,7 +23,7 @@ class UserCRUDL(UserCRUDLBase):
                     cache.touch(attempts_key, USER_RECOVER_TIME_INTERVAL)
                     raise forms.ValidationError(
                         _(
-                            f"You have exceeded the maximum number of attempts, "
+                            "You have exceeded the maximum number of attempts, "
                             "please try again in {settings.USER_RECOVER_TIME_INTERVAL} hours!"
                         )
                     )

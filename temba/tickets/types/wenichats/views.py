@@ -1,12 +1,12 @@
+import requests
+
 from django import forms
+from django.core.exceptions import ValidationError
 from django.utils.translation import gettext_lazy as _
-from temba.api.models import APIToken
 
 from temba.tickets.models import Ticketer
 from temba.tickets.views import BaseConnectView
 from temba.utils.uuid import uuid4
-from django.core.exceptions import ValidationError
-import requests
 
 
 class ConnectView(BaseConnectView):

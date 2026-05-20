@@ -2,8 +2,6 @@ from datetime import timedelta
 
 from requests import RequestException
 
-from django.conf import settings
-from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 

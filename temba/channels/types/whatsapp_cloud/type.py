@@ -57,7 +57,8 @@ class WhatsAppCloudType(ChannelType):
         wa_pin = channel.config.get("wa_pin")
         wa_user_auth_token = channel.config.get("wa_user_auth_token")
 
-        headers = {"Authorization": f"Bearer {settings.WHATSAPP_ADMIN_SYSTEM_USER_TOKEN}"}
+        user_headers = {"Authorization": f"Bearer {wa_user_auth_token}"}
+        weni_headers = {"Authorization": f"Bearer {settings.WHATSAPP_ADMIN_SYSTEM_USER_TOKEN}"}
 
         # Subscribe to events
         url = f"https://graph.facebook.com/v18.0/{waba_id}/subscribed_apps"

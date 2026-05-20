@@ -1777,6 +1777,42 @@ botocore = ">=1.12.36,<2.0a0"
 crt = ["botocore[crt] (>=1.20.29,<2.0a0)"]
 
 [[package]]
+name = "sentry-sdk"
+version = "1.9.8"
+description = "Python client for Sentry (https://sentry.io)"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "sentry-sdk-1.9.8.tar.gz", hash = "sha256:ef4b4d57631662ff81e15c22bf007f7ce07c47321648c8e601fbd22950ed1a79"},
+    {file = "sentry_sdk-1.9.8-py2.py3-none-any.whl", hash = "sha256:7378c08d81da78a4860da7b4900ac51fef38be841d01bc5b7cb249ac51e070c6"},
+]
+
+[package.dependencies]
+certifi = "*"
+urllib3 = {version = ">=1.26.11", markers = "python_version >= \"3.6\""}
+
+[package.extras]
+aiohttp = ["aiohttp (>=3.5)"]
+beam = ["apache-beam (>=2.12)"]
+bottle = ["bottle (>=0.12.13)"]
+celery = ["celery (>=3)"]
+chalice = ["chalice (>=1.16.0)"]
+django = ["django (>=1.8)"]
+falcon = ["falcon (>=1.4)"]
+fastapi = ["fastapi (>=0.79.0)"]
+flask = ["blinker (>=1.1)", "flask (>=0.11)"]
+httpx = ["httpx (>=0.16.0)"]
+pure-eval = ["asttokens", "executing", "pure-eval"]
+pyspark = ["pyspark (>=2.4.4)"]
+quart = ["blinker (>=1.1)", "quart (>=0.16.1)"]
+rq = ["rq (>=0.6)"]
+sanic = ["sanic (>=0.8)"]
+sqlalchemy = ["sqlalchemy (>=1.2)"]
+starlette = ["starlette (>=0.19.1)"]
+tornado = ["tornado (>=5)"]
+
+[[package]]
 name = "setuptools"
 version = "80.10.2"
 description = "Easily download, build, install, upgrade, and uninstall Python packages"
@@ -2206,4 +2242,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.10"
-content-hash = "5150ce9451ee189eb8bebb5240526c2d91201593a4f68a0fc449c506be3bb532"
+content-hash = "7a47448a46cdc9b017dadcaddad89fc080b76b39a783536b43777500858fd303"

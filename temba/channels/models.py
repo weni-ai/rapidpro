@@ -1215,12 +1215,12 @@ class ChannelLog(models.Model):
         """
         Get a part of the log which may or may not have to be redacted to hide sensitive information in anon orgs
         """
+        from temba.request_logs.models import HTTPLog
+
         secrets = [settings.WHATSAPP_ADMIN_SYSTEM_USER_TOKEN]
         for secret in secrets:
             if secret and original:
-                original = redact.text(original, secret, mask)
-
-        from temba.request_logs.models import HTTPLog
+                original = redact.text(original, secret, HTTPLog.REDACT_MASK)
 
         for secret_val in redact_values:
             original = redact.text(original, secret_val, HTTPLog.REDACT_MASK)

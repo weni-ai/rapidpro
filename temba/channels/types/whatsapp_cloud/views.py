@@ -142,6 +142,7 @@ class ClaimView(ClaimViewMixin, SmartFormView):
 
     def form_valid(self, form):
         org = self.request.org
+        user_auth = self.request.session.get(Channel.CONFIG_WHATSAPP_CLOUD_USER_TOKEN)
 
         number = form.cleaned_data["number"]
         verified_name = form.cleaned_data["verified_name"]

@@ -2,7 +2,6 @@ import logging
 
 from django.conf import settings
 from django.utils import timezone
-from django.utils.timesince import timesince
 
 from temba.utils.crons import cron_task
 

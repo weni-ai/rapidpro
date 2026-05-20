@@ -224,9 +224,7 @@
             .icon-menu-2
 
           #unnnic-content.flex.flex-col.w-full
-            -usemacro post-header
             <!-- Content -->
-            -usemacro page-container
 
           .other-orgs.hide
             -for org in user_orgs
@@ -258,10 +256,7 @@
           %span.linked(onclick="switchToNewInterface()" style="color:#43b1ff")<
             new interface
 
-        -if messages
-          -usemacro messages
-
-
+  -else
     -block post-header
     <!-- Content -->
     -block page-container

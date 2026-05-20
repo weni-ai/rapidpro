@@ -1,11 +1,12 @@
+from unittest.mock import patch
+
+from django.urls import reverse
+
 from temba.tests import MockResponse, TembaTest
 from temba.tickets.models import Ticketer
-from .type import WeniChatsType
-from django.urls import reverse
-from unittest.mock import patch
 from temba.utils import json
 
-from pprint import pprint
+from .type import WeniChatsType
 
 
 class WeniChatsTypeTest(TembaTest):
