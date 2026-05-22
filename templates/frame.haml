@@ -593,7 +593,7 @@
           announcementCollapse()
         }
 
-        $(".weni-announcement__collapse").live('click', (event) => {
+        $(document).on('click', ".weni-announcement__collapse", (event) => {
           sessionStorage.setItem('weni-announcement-state', false);
           announcementCollapse()
         })
