@@ -161,6 +161,59 @@
 
       :css
         {% if show_sidemenu and use_weni_layout %}
+          /* Layout fallback: pins Weni sidebar so it does not push content out of the viewport
+             when the Unnnic Design System CSS is not loaded (e.g. standalone deployments).
+             When Unnnic CSS is present, it overrides these rules with the full theme. */
+          .weni-side-wrapper,
+          .weni-side-inner {
+            height: 0;
+            overflow: visible;
+          }
+          #unnnic-sidebar {
+            position: fixed;
+            left: 0;
+            top: 0;
+            width: 200px;
+            height: 100vh;
+            z-index: 100;
+            overflow-y: auto;
+            background: #fff;
+            border-right: 1px solid #e0e0e0;
+          }
+          #unnnic-menu {
+            display: flex;
+            flex-direction: column;
+            padding: 16px 0;
+          }
+          #unnnic-menu > a,
+          #unnnic-menu > div[href] {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 12px 8px;
+            text-align: center;
+            text-decoration: none;
+            color: #555;
+            font-size: 11px;
+            letter-spacing: 0.05em;
+          }
+          #unnnic-menu > a:hover,
+          #unnnic-menu > a.active {
+            background-color: #f0f6ff;
+            color: var(--color-primary-dark, #1976d2);
+          }
+          #unnnic-menu > a .circle,
+          #unnnic-menu > div[href] .circle {
+            width: 28px;
+            height: 28px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 4px;
+          }
+          .unnnic-tooltip {
+            display: none;
+          }
           #unnnic-content {
             padding-left: 200px;
           }
@@ -205,10 +258,10 @@
 
   -if use_weni_layout
     -block weni-side
-      .flex.flex-col{style: "height: inherit"}
-        .flex.flex-row.h-full
-          <!-- Sidemenu -->
-          -if show_sidemenu
+      -if show_sidemenu
+        .flex.flex-col.weni-side-wrapper{style: "height: inherit"}
+          .flex.flex-row.h-full.weni-side-inner
+            <!-- Sidemenu -->
             -block sidemenu
               #unnnic-sidebar.flex-col.h-screen.bg-color-unnnic-snow.unnnic-right-menu-divider
                 -block info
