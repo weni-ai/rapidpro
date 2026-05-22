@@ -269,107 +269,108 @@
                 -block side
                   -include 'weni/side.html'
 
-  -block header
-    <!-- Header -->
-    -if user_org
-      .org-header.self-end
-        .pull-right.toggle
-          .icon-menu-2
+  .flex.flex-col.h-full
+    -block header
+      <!-- Header -->
+      -if user_org
+        .org-header.self-end
+          .pull-right.toggle
+            .icon-menu-2
 
-        .other-orgs.hide
-          -for org in user_orgs
-            -if org != user_org
-              .org.text-primary
-                %a.posterize{href:'{% url "orgs.org_choose"%}?organization={{org.pk}}'}
-                  {{ org.name }}
-          -if org_perms.orgs.org_create
-            -if "new_orgs" in user_org.features or "child_orgs" in user_org.features
-              %hr
-              .org.text-primary
-                <a onclick="handleNewWorkspaceClicked(event)">{% trans "New Workspace" %}</a>
+          .other-orgs.hide
+            -for org in user_orgs
+              -if org != user_org
+                .org.text-primary
+                  %a.posterize{href:'{% url "orgs.org_choose"%}?organization={{org.pk}}'}
+                    {{ org.name }}
+            -if org_perms.orgs.org_create
+              -if "new_orgs" in user_org.features or "child_orgs" in user_org.features
+                %hr
+                .org.text-primary
+                  <a onclick="handleNewWorkspaceClicked(event)">{% trans "New Workspace" %}</a>
 
-      #header
-        &nbsp;
-
-
-      %a#big-logo.logo.icon-logo{href:"{% if user.is_authenticated %}{% url 'msgs.msg_inbox' %}{% else %}/{% endif %}", title:"{{brand.name}}", class:"hover:no-underline"}
-        .name
-          {{brand.name}}
-
-      -block nav
-        -include 'includes/nav.html'
-
-  -block interface-option
-    -if user.is_beta
-      #preview.text-center.px-3.text-sm.py-1(style='background:rgba(0,0,0,.75);z-index:10000;position:fixed;bottom:0px;width:100%;color:#fff')
-        Preview the
-        %span.linked(onclick="switchToNewInterface()" style="color:#43b1ff")<
-          new interface
-
-  -# Main content blocks are declared once. For the Weni layout they get wrapped in #unnnic-content;
-  -# in the default layout they render directly. Only one branch executes per request, so no duplication.
-  {% if use_weni_layout and user_org %}<div id="unnnic-content" class="flex flex-col w-full">{% endif %}
-
-  -block post-header
-  <!-- Content -->
-  -block page-container
-    %temba-modax#shared-modax
-    %temba-dialog#shared-dialog
-    .flex-grow
-      .page-content
-        -block suspension
-          {% if user_org.is_suspended %}
-            .px-12.-mt-4
-              -include "org_suspended_include.haml"
-          {% endif %}
-
-        .px-12.py-4
-          -block page-top
-            .flex.items-start
-              .flex.flex-col.mr-5.leading-tight
-                .page-title
-                  -block title
-                    
-                .page-subtitle
-                  -block subtitle
-
-              .flex-grow
-                .flex.justify-end.w-full
-                  -block gear-menu
-                    -include "gear_links_include.haml"
-
-            -block post-title
+        #header
+          &nbsp;
 
 
-          .mt-6
-            -block content
-          
-          -block post-content
+        %a#big-logo.logo.icon-logo{href:"{% if user.is_authenticated %}{% url 'msgs.msg_inbox' %}{% else %}/{% endif %}", title:"{{brand.name}}", class:"hover:no-underline"}
+          .name
+            {{brand.name}}
 
-  {% if use_weni_layout and user_org %}</div>{% endif %}
+        -block nav
+          -include 'includes/nav.html'
 
-  -if not use_weni_layout
-    -block footer
-      .text-center.text-gray-500.pb-10.-mt-8.bg-gray-200.pt-4
-        :plain
-          <!--
-            This software is licensed under AGPL v3. Please review the full license:
-            https://github.com/rapidpro/rapidpro/blob/main/LICENSE
+    -block interface-option
+      -if user.is_beta
+        #preview.text-center.px-3.text-sm.py-1(style='background:rgba(0,0,0,.75);z-index:10000;position:fixed;bottom:0px;width:100%;color:#fff')
+          Preview the
+          %span.linked(onclick="switchToNewInterface()" style="color:#43b1ff")<
+            new interface
+
+    -# Main content blocks are declared once. For the Weni layout they get wrapped in #unnnic-content;
+    -# in the default layout they render directly. Only one branch executes per request, so no duplication.
+    {% if use_weni_layout and user_org %}<div id="unnnic-content" class="flex flex-col w-full">{% endif %}
+
+    -block post-header
+    <!-- Content -->
+    -block page-container
+      %temba-modax#shared-modax
+      %temba-dialog#shared-dialog
+      .flex-grow
+        .page-content
+          -block suspension
+            {% if user_org.is_suspended %}
+              .px-12.-mt-4
+                -include "org_suspended_include.haml"
+            {% endif %}
+
+          .px-12.py-4
+            -block page-top
+              .flex.items-start
+                .flex.flex-col.mr-5.leading-tight
+                  .page-title
+                    -block title
+                      
+                  .page-subtitle
+                    -block subtitle
+
+                .flex-grow
+                  .flex.justify-end.w-full
+                    -block gear-menu
+                      -include "gear_links_include.haml"
+
+              -block post-title
+
+
+            .mt-6
+              -block content
             
-            WARNING!
+            -block post-content
 
-            Hey, we get it. This is neat software, and it would be great to slap
-            the name of your company on it. While you can copyright your modifications,
-            which they themselves require careful consideration of the AGPL license,
-            you cannot claim copyright for work that is not yours. Any modified source code
-            must be shared publicly. Any related copyrights of such work much make notice
-            that it is based on this AGPL software, and also include the below notice.
-            
-            DO NOT illegally claim copyright of this work. If you want to edit the 
-            presentation of the below copyright, please contact us at legal@textit.com 
-            to discuss attribution requirements for this software.
-          -->
-          Copyright © 2012-2022 TextIt, UNICEF. All rights reserved.    
+    {% if use_weni_layout and user_org %}</div>{% endif %}
+
+    -if not use_weni_layout
+      -block footer
+        .text-center.text-gray-500.pb-10.-mt-8.bg-gray-200.pt-4
+          :plain
+            <!--
+              This software is licensed under AGPL v3. Please review the full license:
+              https://github.com/rapidpro/rapidpro/blob/main/LICENSE
+              
+              WARNING!
+
+              Hey, we get it. This is neat software, and it would be great to slap
+              the name of your company on it. While you can copyright your modifications,
+              which they themselves require careful consideration of the AGPL license,
+              you cannot claim copyright for work that is not yours. Any modified source code
+              must be shared publicly. Any related copyrights of such work much make notice
+              that it is based on this AGPL software, and also include the below notice.
+              
+              DO NOT illegally claim copyright of this work. If you want to edit the 
+              presentation of the below copyright, please contact us at legal@textit.com 
+              to discuss attribution requirements for this software.
+            -->
+            Copyright © 2012-2022 TextIt, UNICEF. All rights reserved.    
 
   -trans 'Delete' as title
   %temba-dialog#general-delete-confirmation.hidden{header:"{{title|escapejs}}", primaryButtonName:"{{title|escapejs}}", destructive: "true"}
