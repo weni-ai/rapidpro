@@ -120,9 +120,41 @@ COMPRESS_FILTERS = {
 }
 
 COMPRESS_CSS_HASHING_METHOD = "content"
-COMPRESS_OFFLINE_CONTEXT = dict(
-    STATIC_URL=STATIC_URL, base_template="frame.html", brand=BRANDING.get(DEFAULT_BRAND), debug=False, testing=False
-)
+
+# -----------------------------------------------------------------------------------
+# Offline compression context
+# -----------------------------------------------------------------------------------
+# At runtime, `{% compress %}` blocks render with several (base_template, brand)
+# combinations:
+#   - `base_template` is set by the view layer: "base.html" (smartmin default for
+#     normal pages), "spa.html" (SpaMixin when HTTP_TEMBA_SPA header is present),
+#     "frame.html" (custom views), "smartmin/modal.html" (PJAX modal forms),
+#     "smartmin/pjax.html" (PJAX).
+#   - `brand` comes from `BrandingMiddleware.get_branding_for_host()`, which iterates
+#     BOTH `BRANDS` (list, defined in settings_common.py) and `BRANDING` (dict,
+#     defined below). Hosts that don't match any brand fall back to BRANDS[0]; hosts
+#     that match a `BRANDING` entry use that. Both can occur in the same deploy.
+#
+# The offline compress command must pre-render all of these combinations, otherwise
+# the runtime will request keys that aren't in the manifest and raise
+# OfflineGenerationError. Inspired by Nyaruka's pattern (settings_common.py iterates
+# BRANDS), extended here to also cover the BRANDING dict that Weni introduced.
+_offline_brands = list(BRANDS)
+for _b in BRANDING.values():
+    if id(_b) not in {id(x) for x in _offline_brands}:
+        _offline_brands.append(_b)
+
+COMPRESS_OFFLINE_CONTEXT = [
+    dict(
+        STATIC_URL=STATIC_URL,
+        base_template=_base_tpl,
+        brand=_brand,
+        debug=False,
+        testing=False,
+    )
+    for _base_tpl in ("frame.html", "base.html", "spa.html", "smartmin/modal.html", "smartmin/pjax.html")
+    for _brand in _offline_brands
+]
 
 # ------------------------------------------------------------------------------
 # MIDDLEWARE
