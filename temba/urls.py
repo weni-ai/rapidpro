@@ -51,35 +51,3 @@ if settings.DEBUG:
 # import any additional urls
 for app in settings.APP_URLS:  # pragma: needs cover
     urlpatterns.append(re_path(r"^", include(app)))
-
-
-def handler500(request):
-    """
-    500 error handler which includes ``request`` in the context.
-
-    Templates: `500.html`
-    Context: None
-    """
-    from sentry_sdk import last_event_id
-
-    from django.conf import settings
-    from django.http import HttpResponseServerError
-    from django.template import loader
-
-    from .context_processors_weni import use_weni_layout
-
-    weni_layout = use_weni_layout(request) if hasattr(settings, "WENI_DOMAINS") else {"use_weni_layout": False}
-    branding = getattr(settings, "BRANDING", None)
-    brand = branding[settings.DEFAULT_BRAND] if branding else settings.BRANDS[0]
-
-    t = loader.get_template("weni_500.haml")
-    return HttpResponseServerError(
-        t.render(
-            {
-                "request": request,
-                "brand": brand,
-                "use_weni_layout": weni_layout["use_weni_layout"],
-                "sentry_id": last_event_id(),
-            }
-        )
-    )
