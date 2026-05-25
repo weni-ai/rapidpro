@@ -277,6 +277,9 @@
           .pull-right.toggle
             .icon-menu-2
 
+          .org
+            {{ user_org.name }}
+
           .other-orgs.hide
             -for org in user_orgs
               -if org != user_org
