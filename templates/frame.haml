@@ -314,6 +314,13 @@
     -# in the default layout they render directly. Only one branch executes per request, so no duplication.
     {% if use_weni_layout and user_org %}<div id="unnnic-content" class="flex flex-col w-full">{% endif %}
 
+    -if messages
+      -block messages
+        -if messages
+          -for msg in messages
+            %div{class:"alert alert-{{ message.tags }}"}
+              {{ msg }}
+
     -block post-header
     <!-- Content -->
     -block page-container
@@ -343,13 +350,6 @@
                       -include "gear_links_include.haml"
 
               -block post-title
-
-            -if messages
-              -block messages
-                -if messages
-                  -for msg in messages
-                    %div{class:"alert alert-{{ message.tags }}"}
-                      {{ msg }}
 
             .mt-6
               -block content
