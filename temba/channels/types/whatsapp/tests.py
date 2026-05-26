@@ -266,7 +266,7 @@ class WhatsAppTypeTest(CRUDLTestMixin, TembaTest):
             self.assertEqual(200, response.status_code)
             self.assertFalse(Channel.objects.all())
             mock_get.assert_called_with(
-                "https://example.org/v14.0/1234/message_templates", params={"access_token": "token123"}
+                "https://example.org/v3.3/1234/message_templates", params={"access_token": "token123"}
             )
 
             self.assertContains(response, "check user id and access token")
@@ -282,7 +282,7 @@ class WhatsAppTypeTest(CRUDLTestMixin, TembaTest):
             response = self.client.post(url, post_data)
             self.assertEqual(302, response.status_code)
             mock_get.assert_called_with(
-                "https://example.org/v14.0/1234/message_templates", params={"access_token": "token123"}
+                "https://example.org/v3.3/1234/message_templates", params={"access_token": "token123"}
             )
 
         channel = Channel.objects.get()

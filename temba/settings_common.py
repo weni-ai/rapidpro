@@ -163,6 +163,8 @@ TEMPLATES = [
                 "temba.context_processors.config",
                 "temba.orgs.context_processors.user_group_perms_processor",
                 "temba.orgs.context_processors.user_orgs_for_brand",
+                "temba.context_processors_weni.use_weni_layout",
+                "temba.context_processors_weni.old_design_excluded_channels_codes",
             ],
             "loaders": [
                 "temba.utils.haml.HamlFilesystemLoader",
@@ -1013,6 +1015,7 @@ CHANNEL_TYPES = [
     "temba.channels.types.slack.SlackType",
     "temba.channels.types.smscentral.SMSCentralType",
     "temba.channels.types.start.StartType",
+    "temba.channels.types.teams.TeamsType",
     "temba.channels.types.telegram.TelegramType",
     "temba.channels.types.telesom.TelesomType",
     "temba.channels.types.thinq.ThinQType",
@@ -1028,6 +1031,7 @@ CHANNEL_TYPES = [
     "temba.channels.types.vonage.VonageType",
     "temba.channels.types.wavy.WavyType",
     "temba.channels.types.wechat.WeChatType",
+    "temba.channels.types.weniwebchat.WeniWebChatType",
     "temba.channels.types.whatsapp_cloud.WhatsAppCloudType",
     "temba.channels.types.whatsapp.WhatsAppType",
     "temba.channels.types.yo.YoType",
@@ -1091,9 +1095,6 @@ ALLOWED_WHATSAPP_FACEBOOK_BUSINESS_IDS = [
     os.environ.get("WHATSAPP_FACEBOOK_BUSINESS_ID", "MISSING_WHATSAPP_FACEBOOK_BUSINESS_ID")
 ]
 
-WHATSAPP_ADMIN_SYSTEM_USER_ID = os.environ.get("WHATSAPP_ADMIN_SYSTEM_USER_ID", "")
-WHATSAPP_ADMIN_SYSTEM_USER_TOKEN = os.environ.get("WHATSAPP_ADMIN_SYSTEM_USER_TOKEN", "")
-WHATSAPP_FACEBOOK_BUSINESS_ID = os.environ.get("WHATSAPP_FACEBOOK_BUSINESS_ID", "")
 WHATSAPP_APPLICATION_ID = os.environ.get("WHATSAPP_APPLICATION_ID", "")
 WHATSAPP_APPLICATION_SECRET = os.environ.get("WHATSAPP_APPLICATION_SECRET", "")
 WHATSAPP_WEBHOOK_SECRET = os.environ.get("WHATSAPP_WEBHOOK_SECRET", "")

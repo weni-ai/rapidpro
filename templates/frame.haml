@@ -344,6 +344,12 @@
 
               -block post-title
 
+            -if messages
+              -block messages
+                -if messages
+                  -for msg in messages
+                    %div{class:"alert alert-{{ message.tags }}"}
+                      {{ msg }}
 
             .mt-6
               -block content

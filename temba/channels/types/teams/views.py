@@ -52,7 +52,7 @@ class ClaimView(ClaimViewMixin, SmartFormView):
     def form_valid(self, form):
         from .type import TeamsType
 
-        org = self.request.user.get_org()
+        org = self.request.org
 
         auth_token = form.cleaned_data["auth_token"]
         name = form.cleaned_data["bot_name"]
