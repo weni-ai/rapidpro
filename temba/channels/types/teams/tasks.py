@@ -36,9 +36,7 @@ def refresh_teams_tokens():
                 start = timezone.now()
                 resp = requests.post(url, data=request_body, headers=headers)
 
-                HTTPLog.from_response(
-                    HTTPLog.TEAMS_TOKENS_SYNCED, resp, start, timezone.now(), channel=channel
-                )
+                HTTPLog.from_response(HTTPLog.TEAMS_TOKENS_SYNCED, resp, start, timezone.now(), channel=channel)
 
                 if resp.status_code != 200:
                     continue
