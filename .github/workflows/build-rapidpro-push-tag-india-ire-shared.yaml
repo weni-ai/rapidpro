@@ -15,7 +15,7 @@ jobs:
       - name: Set variables
         run: |
             TAG="$( echo "${GITHUB_REF}" | cut -d'/' -f3 )"
-            if grep -qs -e '^.*.*-india' <<< "${TAG}" ; then
+            if grep -qs -e '^.*.*-mumbai' <<< "${TAG}" ; then
               echo "Found environment: INDIA - ${TAG}"
               echo "MANIFESTS_ENVIRONMENT=mumbai" | tee -a "${GITHUB_ENV}"
             elif grep -qs -e '^.*.*-mumbaistg' <<< "${TAG}" ; then
