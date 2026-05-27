@@ -75,7 +75,7 @@ class AssetDownloadView(NotificationTargetMixin, SmartTemplateView):
             file_error = _("You do not have permission to access this file")
         else:
             file_error = None
-            self.request.user.set_org(asset.org)
+            self.request.org = asset.org
 
         context["file_error"] = file_error
         context["download_url"] = download_url

@@ -18,13 +18,13 @@ class SlackType(ChannelType):
     code = "SL"
     slug = "slack"
     name = "Slack"
-    icon = "icon-power-cord"
+    icon = "icon-slack"
     category = ChannelType.Category.SOCIAL_MEDIA
     schemes = [URN.SLACK_SCHEME]
 
     courier_url = r"^sl/(?P<uuid>[a-z0-9\-]+)/receive$"
 
-    claim_blurb = _("Add a %(link)s bot to send and receive messages to Slack users.") % {
+    claim_blurb = _("Add a %(link)s bot to send and receive messages to Slack users, on your slack workspace.") % {
         "link": '<a href="https://slack.com">Slack</a>'
     }
 

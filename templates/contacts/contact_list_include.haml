@@ -9,17 +9,17 @@
         .list-buttons.flex.items-center.-mx-2.h-full
 
           -if 'restore' in actions
-            .button-action(onclick='runActionOnObjectRows("restore")')
+            .button-action(onclick='runActionOnObjectRows("restore", wireTableListeners)')
               .-mt-1.mr-2.glyph.icon-checkmark
               -trans "Activate"
 
           -if 'block' in actions
-            .button-action(onclick='runActionOnObjectRows("block")')
+            .button-action(onclick='runActionOnObjectRows("block", wireTableListeners)')
               .-mt-1.mr-2.glyph.icon-user-block
               -trans "Block"
 
           -if 'archive' in actions
-            .button-action(onclick='runActionOnObjectRows("archive")')
+            .button-action(onclick='runActionOnObjectRows("archive", wireTableListeners)')
               .-mt-1.mr-2.glyph.icon-box
               -trans "Archive"
 
@@ -29,7 +29,7 @@
               -trans "Delete"
 
           -if 'unlabel' in actions
-            .button-action(onclick="unlabelObjectRows({{current_group.pk}});")
+            .button-action(onclick="unlabelObjectRows({{current_group.pk}}, wireTableListeners);")
               .-mt-1.mr-2.glyph.icon-user-remove
               -trans "Remove From Group"
 
@@ -146,17 +146,17 @@
               -for field in contact_fields
                 -if field.show_in_table
                   %td.field.truncate(style="max-width:240px")
-                    {{ object|contact_field:field.key }}
-
+                    {% contact_field object field.key %}
+                    
               %td.value-received.field_received
                 .whitespace-nowrap
                   -if object.last_seen_on
-                    {% format_datetime object.last_seen_on %}
+                    %temba-date(value="{{object.last_seen_on.isoformat}}" display="date")
                   -else
                     {{ "--" }}
               %td.value-received.field_received
                 .whitespace-nowrap
-                  {% format_datetime object.created_on %}
+                  %temba-date(value="{{object.created_on.isoformat}}" display="date")
 
               // This is needed for action buttons
               %td.hide

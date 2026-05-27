@@ -1,11 +1,10 @@
 import logging
 
 import requests
+from celery import shared_task
 from django_redis import get_redis_connection
 
 from django.utils import timezone
-
-from celery import shared_task
 
 from temba.channels.models import Channel
 from temba.request_logs.models import HTTPLog
@@ -13,7 +12,7 @@ from temba.request_logs.models import HTTPLog
 logger = logging.getLogger(__name__)
 
 
-@shared_task(track_started=True, name="refresh_whatsapp_tokens")
+@shared_task
 def refresh_whatsapp_tokens():
     r = get_redis_connection()
     if r.get("refresh_whatsapp_tokens"):  # pragma: no cover
@@ -29,11 +28,7 @@ def refresh_whatsapp_tokens():
                 resp = requests.post(
                     url, auth=(channel.config[Channel.CONFIG_USERNAME], channel.config[Channel.CONFIG_PASSWORD])
                 )
-                elapsed = (timezone.now() - start).total_seconds() * 1000
-
-                HTTPLog.create_from_response(
-                    HTTPLog.WHATSAPP_TOKENS_SYNCED, url, resp, channel=channel, request_time=elapsed
-                )
+                HTTPLog.from_response(HTTPLog.WHATSAPP_TOKENS_SYNCED, resp, start, timezone.now(), channel=channel)
 
                 if resp.status_code != 200:
                     continue

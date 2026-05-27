@@ -16,8 +16,8 @@ class InstagramType(ChannelType):
 
     extra_links = [
         dict(
-            name=_("Reconnect Instagram Business Account"),
-            link="channels.types.instagram.refresh_token",
+            label=_("Reconnect Instagram Business Account"),
+            view_name="channels.types.instagram.refresh_token",
         )
     ]
 
@@ -38,7 +38,6 @@ class InstagramType(ChannelType):
 
     schemes = [URN.INSTAGRAM_SCHEME]
     max_length = 2000
-    attachment_support = True
     free_sending = True
 
     def get_urls(self):
@@ -57,3 +56,6 @@ class InstagramType(ChannelType):
             f"https://graph.facebook.com/v12.0/{channel.address}/subscribed_apps",
             params={"access_token": config[Channel.CONFIG_AUTH_TOKEN]},
         )
+
+    def get_error_ref_url(self, channel, code: str) -> str:
+        return "https://developers.facebook.com/docs/instagram-api/reference/error-codes"

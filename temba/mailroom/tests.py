@@ -10,7 +10,7 @@ from django.utils import timezone
 from temba.campaigns.models import Campaign, CampaignEvent, EventFire
 from temba.channels.models import ChannelEvent, ChannelLog
 from temba.flows.models import FlowRun, FlowStart
-from temba.ivr.models import IVRCall
+from temba.ivr.models import Call
 from temba.mailroom.client import ContactSpec, MailroomException, get_client
 from temba.msgs.models import Broadcast, Msg
 from temba.tests import MockResponse, TembaTest, matchers, mock_mailroom
@@ -126,8 +126,6 @@ class MailroomClientTest(TembaTest):
             )
 
         call = mock_post.call_args
-
-        self.maxDiff = None
 
         self.assertEqual(("http://localhost:8090/mr/flow/preview_start",), call[0])
         self.assertEqual({"User-Agent": "Temba", "Content-Type": "application/json"}, call[1]["headers"])
@@ -346,6 +344,19 @@ class MailroomClientTest(TembaTest):
             "http://localhost:8090/mr/contact/resolve",
             headers={"User-Agent": "Temba"},
             json={"org_id": self.org.id, "channel_id": 345, "urn": "tel:+1234567890"},
+        )
+
+    @patch("requests.post")
+    def test_contact_interrupt(self, mock_post):
+        mock_post.return_value = MockResponse(200, '{"sessions": 1}')
+
+        response = get_client().contact_interrupt(self.org.id, 3, 345)
+
+        self.assertEqual({"sessions": 1}, response)
+        mock_post.assert_called_once_with(
+            "http://localhost:8090/mr/contact/interrupt",
+            headers={"User-Agent": "Temba"},
+            json={"org_id": self.org.id, "user_id": 3, "contact_id": 345},
         )
 
     @patch("requests.post")
@@ -646,6 +657,20 @@ class MailroomQueueTest(TembaTest):
             },
         )
 
+    def test_queue_interrupt_channel(self):
+        self.channel.release(self.admin)
+
+        self.assert_org_queued(self.org, "batch")
+        self.assert_queued_batch_task(
+            self.org,
+            {
+                "type": "interrupt_channel",
+                "org_id": self.org.id,
+                "task": {"channel_id": self.channel.id},
+                "queued_on": matchers.ISODate(),
+            },
+        )
+
     def test_queue_interrupt_by_contacts(self):
         jim = self.create_contact("Jim", phone="+12065551212")
         bob = self.create_contact("Bob", phone="+12065551313")
@@ -659,20 +684,6 @@ class MailroomQueueTest(TembaTest):
                 "type": "interrupt_sessions",
                 "org_id": self.org.id,
                 "task": {"contact_ids": [jim.id, bob.id]},
-                "queued_on": matchers.ISODate(),
-            },
-        )
-
-    def test_queue_interrupt_by_channel(self):
-        self.channel.release(self.admin)
-
-        self.assert_org_queued(self.org, "batch")
-        self.assert_queued_batch_task(
-            self.org,
-            {
-                "type": "interrupt_sessions",
-                "org_id": self.org.id,
-                "task": {"channel_ids": [self.channel.id]},
                 "queued_on": matchers.ISODate(),
             },
         )
@@ -852,7 +863,9 @@ class EventTest(TembaTest):
         msg_out = self.create_outgoing_msg(
             contact1, "Hello", channel=self.channel, status="E", quick_replies=("yes", "no")
         )
-        log = ChannelLog.objects.create(channel=self.channel, is_error=True, description="Boom", msg=msg_out)
+        ChannelLog.objects.create(
+            channel=self.channel, is_error=True, log_type=ChannelLog.LOG_TYPE_MSG_SEND, msg=msg_out
+        )
         msg_out.refresh_from_db()
 
         self.assertEqual(
@@ -868,7 +881,7 @@ class EventTest(TembaTest):
                     "quick_replies": ["yes", "no"],
                 },
                 "status": "E",
-                "logs_url": f"/channels/channellog/read/{log.channel.uuid}/{log.id}/",
+                "logs_url": f"/channels/{str(self.channel.uuid)}/logs/msg/{msg_out.id}/",
             },
             Event.from_msg(self.org, self.admin, msg_out),
         )
@@ -922,8 +935,8 @@ class EventTest(TembaTest):
             {
                 "type": "broadcast_created",
                 "created_on": matchers.ISODate(),
-                "translations": {"base": "Hi there"},
-                "base_language": "base",
+                "translations": {"eng": "Hi there"},
+                "base_language": "eng",
                 "msg": {
                     "uuid": str(msg_out2.uuid),
                     "id": msg_out2.id,
@@ -1074,22 +1087,25 @@ class EventTest(TembaTest):
     def test_from_ivr_call(self):
         contact = self.create_contact("Jim", phone="0979111111")
 
-        call1 = IVRCall.objects.create(
+        call1 = Call.objects.create(
             org=self.org,
             contact=contact,
-            status=IVRCall.STATUS_IN_PROGRESS,
+            status=Call.STATUS_IN_PROGRESS,
             channel=self.channel,
             contact_urn=contact.urns.all().first(),
             error_count=0,
         )
-        call2 = IVRCall.objects.create(
+        call2 = Call.objects.create(
             org=self.org,
             contact=contact,
-            status=IVRCall.STATUS_ERRORED,
-            error_reason=IVRCall.ERROR_BUSY,
+            status=Call.STATUS_ERRORED,
+            error_reason=Call.ERROR_BUSY,
             channel=self.channel,
-            contact_urn=contact.urns.all().first(),
+            contact_urn=contact.urns.first(),
             error_count=0,
+        )
+        ChannelLog.objects.create(
+            channel=self.channel, is_error=True, log_type=ChannelLog.LOG_TYPE_IVR_START, call=call2
         )
 
         self.assertEqual(
@@ -1100,7 +1116,7 @@ class EventTest(TembaTest):
                 "created_on": matchers.ISODate(),
                 "logs_url": None,
             },
-            Event.from_ivr_call(self.org, self.user, call1),
+            Event.from_ivr_call(self.org, self.admin, call1),
         )
 
         self.assertEqual(
@@ -1109,7 +1125,17 @@ class EventTest(TembaTest):
                 "status": "E",
                 "status_display": "Errored (Busy)",
                 "created_on": matchers.ISODate(),
-                "logs_url": None,
+                "logs_url": None,  # user can't see logs
             },
             Event.from_ivr_call(self.org, self.user, call2),
+        )
+        self.assertEqual(
+            {
+                "type": "call_started",
+                "status": "E",
+                "status_display": "Errored (Busy)",
+                "created_on": matchers.ISODate(),
+                "logs_url": f"/channels/{call2.channel.uuid}/logs/call/{call2.id}/",
+            },
+            Event.from_ivr_call(self.org, self.admin, call2),
         )

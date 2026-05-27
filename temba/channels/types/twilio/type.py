@@ -31,8 +31,6 @@ class TwilioType(ChannelType):
     schemes = [URN.TEL_SCHEME]
     max_length = 1600
 
-    ivr_protocol = ChannelType.IVRProtocol.IVR_PROTOCOL_TWIML
-
     redact_request_keys = (
         "FromCity",
         "FromState",
@@ -45,10 +43,8 @@ class TwilioType(ChannelType):
         "CalledZip",
     )
 
-    def is_recommended_to(self, user):
-        org = user.get_org()
-        countrycode = timezone_to_country_code(org.timezone)
-        return countrycode in SUPPORTED_COUNTRIES
+    def is_recommended_to(self, org, user):
+        return timezone_to_country_code(org.timezone) in SUPPORTED_COUNTRIES
 
     def deactivate(self, channel):
         config = channel.config
@@ -85,3 +81,6 @@ class TwilioType(ChannelType):
 
     def get_urls(self):
         return [self.get_claim_url(), re_path(r"^search$", SearchView.as_view(), name="search")]
+
+    def get_error_ref_url(self, channel, code: str) -> str:
+        return f"https://www.twilio.com/docs/api/errors/{code}"

@@ -68,7 +68,7 @@
     }
   });
 
-  $(".weni-navigation-control__back").live('click', (event) => {
+  $(document).on('click', ".weni-navigation-control__back", (event) => {
 
     let currentHistory = undefined;
 

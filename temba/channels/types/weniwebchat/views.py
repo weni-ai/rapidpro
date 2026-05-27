@@ -21,8 +21,7 @@ class ClaimView(ClaimViewMixin, SmartFormView):
     def form_valid(self, form):
         from .type import CONFIG_BASE_URL
 
-        user = self.request.user
-        org = user.get_org()
+        org = self.request.org
 
         data = form.cleaned_data
 

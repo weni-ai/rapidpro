@@ -31,10 +31,12 @@ class TelegramType(ChannelType):
 
     schemes = [URN.TELEGRAM_SCHEME]
     max_length = 1600
-    attachment_support = True
     free_sending = True
 
     redact_response_keys = {"first_name", "last_name", "username"}
+
+    def is_recommended_to(self, org, user):
+        return True  # because it's super simpler to setup, free, and works everywhere
 
     def activate(self, channel):
         config = channel.config
@@ -45,3 +47,6 @@ class TelegramType(ChannelType):
         config = channel.config
         bot = telegram.Bot(config["auth_token"])
         bot.delete_webhook()
+
+    def get_error_ref_url(self, channel, code: str) -> str:
+        return "https://core.telegram.org/api/errors"

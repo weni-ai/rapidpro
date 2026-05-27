@@ -1,12 +1,12 @@
+import requests
+
 from django import forms
+from django.core.exceptions import ValidationError
 from django.utils.translation import gettext_lazy as _
-from temba.api.models import APIToken
 
 from temba.tickets.models import Ticketer
 from temba.tickets.views import BaseConnectView
 from temba.utils.uuid import uuid4
-from django.core.exceptions import ValidationError
-import requests
 
 
 class ConnectView(BaseConnectView):
@@ -28,7 +28,7 @@ class ConnectView(BaseConnectView):
             )
 
             if existing:
-                if existing.org_id == self.request.user.get_org().id:
+                if existing.org_id == self.request.org.id:
                     raise ValidationError(_("A Weni Chats ticketer for this sector already exists in this workspace."))
                 raise ValidationError(_("A Weni Chats ticketer for this sector already exists in another workspace."))
 

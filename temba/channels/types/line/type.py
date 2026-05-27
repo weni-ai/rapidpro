@@ -27,7 +27,9 @@ class LineType(ChannelType):
 
     schemes = [URN.LINE_SCHEME]
     max_length = 1600
-    attachment_support = False
     free_sending = True
 
     show_public_addresses = True
+
+    def get_error_ref_url(self, channel, code: str) -> str:
+        return "https://developers.line.biz/en/reference/messaging-api/#error-responses"

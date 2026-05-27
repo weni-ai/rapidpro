@@ -10,21 +10,22 @@ from django.views.decorators.csrf import csrf_exempt
 from temba.locations.models import AdminBoundary, BoundaryAlias
 from temba.orgs.views import OrgPermsMixin
 from temba.utils import json
+from temba.utils.views import ContentMenuMixin
 
 
 class BoundaryCRUDL(SmartCRUDL):
     actions = ("alias", "geometry", "boundaries")
     model = AdminBoundary
 
-    class Alias(OrgPermsMixin, SmartReadView):
+    class Alias(OrgPermsMixin, ContentMenuMixin, SmartReadView):
         @classmethod
         def derive_url_pattern(cls, path, action):
             # though we are a read view, we don't actually need an id passed
             # in, that is derived
             return r"^%s/%s/$" % (path, action)
 
-        def get_gear_links(self):
-            return [dict(title=_("Home"), style="button-light", href=reverse("orgs.org_home"))]
+        def build_content_menu(self, menu):
+            menu.add_link(_("Home"), reverse("orgs.org_home"))
 
         def pre_process(self, request, *args, **kwargs):
             response = super().pre_process(self, request, *args, **kwargs)
@@ -32,16 +33,14 @@ class BoundaryCRUDL(SmartCRUDL):
             # we didn't shortcut for some other reason, check that they have an
             # org
             if not response:
-                org = request.user.get_org()
-                if not org.country:
+                if not request.org.country:
                     messages.warning(request, _("You must select a country for your workspace."))
                     return HttpResponseRedirect(reverse("orgs.org_home"))
 
             return None
 
         def get_object(self, queryset=None):
-            org = self.request.user.get_org()
-            return org.country
+            return self.request.org.country
 
     class Geometry(OrgPermsMixin, SmartReadView):
         @classmethod
@@ -95,7 +94,7 @@ class BoundaryCRUDL(SmartCRUDL):
 
             # try to parse our body
             json_string = request.body
-            org = request.user.get_org()
+            org = request.org
 
             try:
                 boundary_update = json.loads(json_string)
@@ -110,7 +109,7 @@ class BoundaryCRUDL(SmartCRUDL):
             return JsonResponse(boundary_update, safe=False)
 
         def get(self, request, *args, **kwargs):
-            org = request.user.get_org()
+            org = request.org
             boundary = self.get_object()
 
             page_size = 25

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#set -o errexit
+set -o errexit
 #set -o pipefail
 #set -o nounset
 
@@ -10,9 +10,20 @@ if [ ! -z "${BRANDING_FILES}" ]; then
 fi
 
 su $PROJECT_USER -c "python manage.py collectstatic --noinput"
-if [ "${COMPRESS_ENABLED}" = true ]; then
-    python manage.py compress --extension=.haml,.html --force
-fi
+
+# Normalize COMPRESS_ENABLED so that True/TRUE/true/1 all trigger offline compression.
+# Default to "true" so the manifest is always regenerated unless explicitly disabled,
+# preventing OfflineGenerationError after deploys (was strictly "true" before).
+COMPRESS_ENABLED_NORMALIZED="$(echo "${COMPRESS_ENABLED:-true}" | tr '[:upper:]' '[:lower:]')"
+case "${COMPRESS_ENABLED_NORMALIZED}" in
+    true|1|yes|on)
+        echo "Running offline compression..."
+        python manage.py compress --extension=.haml,.html --force
+        ;;
+    *)
+        echo "Skipping offline compression (COMPRESS_ENABLED=${COMPRESS_ENABLED})"
+        ;;
+esac
 
 echo "Starting nginx..."
 service nginx start  # TODO: Update after change the user from root

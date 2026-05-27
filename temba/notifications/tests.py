@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 import pytz
 
@@ -13,21 +13,23 @@ from temba.msgs.models import ExportMessagesTask
 from temba.orgs.models import OrgRole
 from temba.tests import CRUDLTestMixin, TembaTest, matchers
 
+from .incidents.builtin import OrgFlaggedIncidentType
 from .models import Incident, Notification
-from .tasks import send_notification_emails, squash_notificationcounts
+from .tasks import send_notification_emails, squash_notification_counts
+from .types.builtin import ExportFinishedNotificationType
 
 
 class IncidentTest(TembaTest):
     def test_create(self):
         # we use a unique constraint to enforce uniqueness on org+type+scope for ongoing incidents which allows use of
         # INSERT .. ON CONFLICT DO NOTHING
-        incident1 = Incident._create(self.org, "incident:test", scope="scope1")
+        incident1 = Incident.get_or_create(self.org, "incident:test", scope="scope1")
 
         # try to create another for the same scope
-        incident2 = Incident._create(self.org, "incident:test", scope="scope1")
+        incident2 = Incident.get_or_create(self.org, "incident:test", scope="scope1")
 
         # different scope
-        incident3 = Incident._create(self.org, "incident:test", scope="scope2")
+        incident3 = Incident.get_or_create(self.org, "incident:test", scope="scope2")
 
         self.assertEqual(incident1, incident2)
         self.assertNotEqual(incident1, incident3)
@@ -40,7 +42,7 @@ class IncidentTest(TembaTest):
         # check that once incident 1 ends, new incidents can be created for same scope
         incident1.end()
 
-        incident4 = Incident._create(self.org, "incident:test", scope="scope1")
+        incident4 = Incident.get_or_create(self.org, "incident:test", scope="scope1")
 
         self.assertNotEqual(incident1, incident4)
         self.assertEqual(3, Notification.objects.count())
@@ -86,9 +88,9 @@ class IncidentCRUDLTest(TembaTest, CRUDLTestMixin):
         list_url = reverse("notifications.incident_list")
 
         # create 2 org flagged incidents (1 ended, 1 ongoing)
-        incident1 = Incident.flagged(self.org)
-        Incident.flagged(self.org).end()
-        incident2 = Incident.flagged(self.org)
+        incident1 = OrgFlaggedIncidentType.get_or_create(self.org)
+        OrgFlaggedIncidentType.get_or_create(self.org).end()
+        incident2 = OrgFlaggedIncidentType.get_or_create(self.org)
 
         # create 2 flow webhook incidents (1 ended, 1 ongoing)
         incident3 = Incident.objects.create(
@@ -132,7 +134,7 @@ class NotificationTest(TembaTest):
         export = ExportContactsTask.create(self.org, self.editor)
         export.perform()
 
-        Notification.export_finished(export)
+        ExportFinishedNotificationType.create(export)
 
         self.assertFalse(self.editor.notifications.get(contact_export=export).is_seen)
 
@@ -168,10 +170,12 @@ class NotificationTest(TembaTest):
         self.assertTrue(self.editor.notifications.get(contact_export=export).is_seen)
 
     def test_message_export_finished(self):
-        export = ExportMessagesTask.create(self.org, self.editor, system_label="I")
+        export = ExportMessagesTask.create(
+            self.org, self.editor, start_date=date.today(), end_date=date.today(), system_label="I"
+        )
         export.perform()
 
-        Notification.export_finished(export)
+        ExportFinishedNotificationType.create(export)
 
         self.assertFalse(self.editor.notifications.get(message_export=export).is_seen)
 
@@ -201,15 +205,17 @@ class NotificationTest(TembaTest):
         export = ExportFlowResultsTask.create(
             self.org,
             self.editor,
+            start_date=date.today(),
+            end_date=date.today(),
             flows=[flow1, flow2],
-            contact_fields=(),
+            with_fields=(),
+            with_groups=(),
             responded_only=True,
             extra_urns=(),
-            group_memberships=(),
         )
         export.perform()
 
-        Notification.export_finished(export)
+        ExportFinishedNotificationType.create(export)
 
         self.assertFalse(self.editor.notifications.get(results_export=export).is_seen)
 
@@ -241,7 +247,7 @@ class NotificationTest(TembaTest):
         )
 
         # mailroom will create these notifications when it's complete
-        Notification._create_all(
+        Notification.create_all(
             imp.org, "import:finished", scope=f"contact:{imp.id}", users=[self.editor], contact_import=imp
         )
         self.assertFalse(self.editor.notifications.get(contact_import=imp).is_seen)
@@ -268,7 +274,7 @@ class NotificationTest(TembaTest):
 
     def test_tickets_opened(self):
         # mailroom will create these notifications
-        Notification._create_all(self.org, "tickets:opened", scope="", users=[self.agent, self.editor])
+        Notification.create_all(self.org, "tickets:opened", scope="", users=[self.agent, self.editor])
 
         self.assert_notifications(
             expected_json={
@@ -290,7 +296,7 @@ class NotificationTest(TembaTest):
 
     def test_tickets_activity(self):
         # mailroom will create these notifications
-        Notification._create_all(self.org, "tickets:activity", scope="", users=[self.agent, self.editor])
+        Notification.create_all(self.org, "tickets:activity", scope="", users=[self.agent, self.editor])
 
         self.assert_notifications(
             expected_json={
@@ -313,7 +319,7 @@ class NotificationTest(TembaTest):
     def test_incident_started(self):
         self.org.add_user(self.editor, OrgRole.ADMINISTRATOR)  # upgrade editor to administrator
 
-        Incident.flagged(self.org)
+        OrgFlaggedIncidentType.get_or_create(self.org)
 
         self.assert_notifications(
             expected_json={
@@ -342,12 +348,12 @@ class NotificationTest(TembaTest):
         imp = ContactImport.objects.create(
             org=self.org, mappings={}, num_records=5, created_by=self.editor, modified_by=self.editor
         )
-        Notification._create_all(
+        Notification.create_all(
             imp.org, "import:finished", scope=f"contact:{imp.id}", users=[self.editor], contact_import=imp
         )
-        Notification._create_all(self.org, "tickets:opened", scope="", users=[self.agent, self.editor])
-        Notification._create_all(self.org, "tickets:activity", scope="", users=[self.agent, self.editor])
-        Notification._create_all(self.org2, "tickets:activity", scope="", users=[self.editor])  # different org
+        Notification.create_all(self.org, "tickets:opened", scope="", users=[self.agent, self.editor])
+        Notification.create_all(self.org, "tickets:activity", scope="", users=[self.agent, self.editor])
+        Notification.create_all(self.org2, "tickets:activity", scope="", users=[self.editor])  # different org
 
         self.assertEqual(2, Notification.get_unseen_count(self.org, self.agent))
         self.assertEqual(3, Notification.get_unseen_count(self.org, self.editor))
@@ -368,7 +374,7 @@ class NotificationTest(TembaTest):
         self.assertEqual(0, Notification.get_unseen_count(self.org2, self.agent))
         self.assertEqual(1, Notification.get_unseen_count(self.org2, self.editor))
 
-        squash_notificationcounts()
+        squash_notification_counts()
 
         self.assertEqual(1, Notification.get_unseen_count(self.org, self.agent))
         self.assertEqual(2, Notification.get_unseen_count(self.org, self.editor))
@@ -382,7 +388,7 @@ class NotificationCRUDLTest(TembaTest):
 
         # simulate an export finishing
         export = ExportContactsTask.create(self.org, self.editor)
-        Notification.export_finished(export)
+        ExportFinishedNotificationType.create(export)
 
         # not access for anon
         self.assertLoginRedirect(self.client.get(list_url))

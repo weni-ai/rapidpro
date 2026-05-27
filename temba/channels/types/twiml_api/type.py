@@ -35,10 +35,6 @@ class TwimlAPIType(ChannelType):
     schemes = [URN.TEL_SCHEME]
     max_length = 1600
 
-    attachment_support = True
-
-    ivr_protocol = ChannelType.IVRProtocol.IVR_PROTOCOL_TWIML
-
     claim_view = ClaimView
     claim_blurb = _(
         "Connect to a service that speaks TwiML. You can use this to connect to TwiML compatible services outside of "
@@ -62,3 +58,6 @@ class TwimlAPIType(ChannelType):
             description=_("Incoming messages for this channel will be sent to this endpoint."),
         ),
     )
+
+    def get_error_ref_url(self, channel, code: str) -> str:
+        return f"https://www.twilio.com/docs/api/errors/{code}"

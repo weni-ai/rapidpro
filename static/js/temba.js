@@ -3,6 +3,42 @@ if (typeof console == 'undefined') {
     this.console = { log: function (msg) {} };
 }
 
+function downloadFile(evt, url) {
+    evt.stopPropagation();
+    evt.preventDefault();
+    window.open(url, "_download");
+}  
+
+function openWindow(evt, url, target) {
+    evt.stopPropagation();
+    evt.preventDefault();
+    window.open(url, target);
+}
+
+function showPreview(evt, ele) {
+    evt.stopPropagation();
+    evt.preventDefault();
+
+    var dialog = document.querySelector("#shared-dialog");
+    dialog.width = "initial";
+    dialog.primaryButtonName = null;
+    dialog.cancelButtonName = "Ok";
+
+    var container = document.createElement("div");
+    container.style = "text-align:center;line-height:0px;padding:0px";
+    container.innerHTML = ele.getAttribute("attachment");
+    dialog.body = container;
+    dialog.open = true;
+}
+
+function getModax(id) {
+    var modax = document.querySelector(id);
+    if (!modax) {
+        modax = document.querySelector("#shared-modax")
+    }
+    return modax
+}
+
 function checkInner(event) {
     if (event.target) {
         var checkbox = event.target.querySelector("temba-checkbox");
@@ -258,35 +294,6 @@ function messageTextareaLengthCheck() {
     }
 }
 
-function initMessageLengthCounter(textarea, counter) {
-    function onKeyUp() {
-        var ta = $(textarea);
-        if (ta) {
-            var val = ta.val();
-            var length = 0;
-            if (val) {
-                length = val.length;
-            }
-
-            var messages = Math.ceil(length / 160);
-            var left = messages * 160 - length;
-
-            if (length == 0) {
-                $(counter).text('' + 160);
-            } else if (messages < 2) {
-                $(counter).text('' + left);
-            } else {
-                $(counter).text('' + left + ' / ' + messages);
-            }
-        }
-    }
-
-    $(textarea).live('keyup', onKeyUp);
-
-    // set our initial length
-    onKeyUp();
-}
-
 function toggle_section() {
     var shrink;
     $('.form-section').each(function () {
@@ -458,3 +465,24 @@ document.addEventListener('DOMContentLoaded', function () {
             });
         });
 });
+
+var setInnerHTML = function(ele, html) {
+
+    var scripts = ele.parentNode.querySelectorAll("script");
+    scripts.forEach(function(script){
+        script.parentNode.removeChild(script);
+    })
+
+    ele.innerHTML = html;
+
+    Array.from(ele.querySelectorAll("script")).forEach(function(oldScript) {
+
+        oldScript.parentNode.removeChild(oldScript);
+
+        var newScript = document.createElement("script");
+        Array.from(oldScript.attributes)
+            .forEach(function(attr){ newScript.setAttribute(attr.name, attr.value) });
+        newScript.appendChild(document.createTextNode(oldScript.innerHTML));
+        ele.parentNode.appendChild(newScript);
+    });
+  }

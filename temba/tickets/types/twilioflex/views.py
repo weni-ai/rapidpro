@@ -1,6 +1,6 @@
 import requests
-from django import forms
 
+from django import forms
 from django.forms import ValidationError
 from django.utils.translation import gettext_lazy as _
 

@@ -1,15 +1,14 @@
 import copy
 import datetime
 import io
-import os
 from collections import OrderedDict
 from datetime import date
 from decimal import Decimal
-from unittest.mock import PropertyMock, patch
+from unittest.mock import patch
 
 import pytz
+from celery.app.task import Task
 from django_redis import get_redis_connection
-from openpyxl import load_workbook
 
 from django.conf import settings
 from django.forms import ValidationError
@@ -17,10 +16,7 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone, translation
 
-from celery.app.task import Task
-
 from temba.campaigns.models import Campaign
-from temba.contacts.models import Contact, ExportContactsTask
 from temba.flows.models import Flow
 from temba.tests import TembaTest, matchers
 from temba.triggers.models import Trigger
@@ -28,89 +24,16 @@ from temba.utils import json, uuid
 from temba.utils.templatetags.temba import format_datetime, icon
 
 from . import chunk_list, countries, format_number, languages, percentage, redact, sizeof_fmt, str_to_bool
-from .cache import get_cacheable_result, incrby_existing
-from .celery import nonoverlapping_task
+from .crons import clear_cron_stats, cron_task
 from .dates import date_range, datetime_to_str, datetime_to_timestamp, timestamp_to_datetime
 from .email import is_valid_address, send_simple_email
-from .export import TableExporter
 from .fields import NameValidator, validate_external_url
-from .http import http_headers
-from .locks import LockNotAcquiredException, NonBlockingLock
 from .templatetags.temba import oxford, short_datetime
-from .text import (
-    clean_string,
-    decode_base64,
-    decode_stream,
-    generate_token,
-    random_string,
-    slugify_with,
-    truncate,
-    unsnakify,
-)
+from .text import clean_string, decode_stream, generate_token, random_string, slugify_with, truncate, unsnakify
 from .timezones import TimeZoneFormField, timezone_to_country_code
 
 
 class InitTest(TembaTest):
-    def test_decode_base64(self):
-
-        self.assertEqual("This test\nhas a newline", decode_base64("This test\nhas a newline"))
-
-        self.assertEqual(
-            "Please vote NO on the confirmation of Gorsuch.",
-            decode_base64("Please vote NO on the confirmation of Gorsuch."),
-        )
-
-        # length not multiple of 4
-        self.assertEqual(
-            "The aim of the game is to be the first player to score 500 points, achieved (usually over several rounds of play)",
-            decode_base64(
-                "The aim of the game is to be the first player to score 500 points, achieved (usually over several rounds of play)"
-            ),
-        )
-
-        # end not match base64 characteres
-        self.assertEqual(
-            "The aim of the game is to be the first player to score 500 points, achieved (usually over several rounds of play) by a player discarding all of their cards!!???",
-            decode_base64(
-                "The aim of the game is to be the first player to score 500 points, achieved (usually over several rounds of play) by a player discarding all of their cards!!???"
-            ),
-        )
-
-        self.assertEqual(
-            "Bannon Explains The World ...\n\u201cThe Camp of the Saints",
-            decode_base64("QmFubm9uIEV4cGxhaW5zIFRoZSBXb3JsZCAuLi4K4oCcVGhlIENhbXAgb2YgdGhlIFNhaW50c+KA\r"),
-        )
-
-        self.assertEqual(
-            "the sweat, the tears and the sacrifice of working America",
-            decode_base64("dGhlIHN3ZWF0LCB0aGUgdGVhcnMgYW5kIHRoZSBzYWNyaWZpY2Ugb2Ygd29ya2luZyBBbWVyaWNh\r"),
-        )
-
-        self.assertIn(
-            "I find them to be friendly",
-            decode_base64(
-                "Tm93IGlzDQp0aGUgdGltZQ0KZm9yIGFsbCBnb29kDQpwZW9wbGUgdG8NCnJlc2lzdC4NCg0KSG93IGFib3V0IGhhaWt1cz8NCkkgZmluZCB0aGVtIHRvIGJlIGZyaWVuZGx5Lg0KcmVmcmlnZXJhdG9yDQoNCjAxMjM0NTY3ODkNCiFAIyQlXiYqKCkgW117fS09Xys7JzoiLC4vPD4/fFx+YA0KQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5eg=="
-            ),
-        )
-
-        # not 50% ascii letters
-        self.assertEqual(
-            "8J+YgvCfmITwn5iA8J+YhvCfkY3wn5ii8J+Yn/CfmK3wn5it4pi677iP8J+YjPCfmInwn5iK8J+YivCfmIrwn5iK8J+YivCfmIrwn5iK8J+ko/CfpKPwn6Sj8J+ko/CfpKNvaw==",
-            decode_base64(
-                "8J+YgvCfmITwn5iA8J+YhvCfkY3wn5ii8J+Yn/CfmK3wn5it4pi677iP8J+YjPCfmInwn5iK8J+YivCfmIrwn5iK8J+YivCfmIrwn5iK8J+ko/CfpKPwn6Sj8J+ko/CfpKNvaw=="
-            ),
-        )
-
-        with patch("temba.utils.text.Counter") as mock_decode:
-            mock_decode.side_effect = Exception("blah")
-
-            self.assertEqual(
-                "Tm93IGlzDQp0aGUgdGltZQ0KZm9yIGFsbCBnb29kDQpwZW9wbGUgdG8NCnJlc2lzdC4NCg0KSG93IGFib3V0IGhhaWt1cz8NCkkgZmluZCB0aGVtIHRvIGJlIGZyaWVuZGx5Lg0KcmVmcmlnZXJhdG9yDQoNCjAxMjM0NTY3ODkNCiFAIyQlXiYqKCkgW117fS09Xys7JzoiLC4vPD4/fFx+YA0KQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5eg==",
-                decode_base64(
-                    "Tm93IGlzDQp0aGUgdGltZQ0KZm9yIGFsbCBnb29kDQpwZW9wbGUgdG8NCnJlc2lzdC4NCg0KSG93IGFib3V0IGhhaWt1cz8NCkkgZmluZCB0aGVtIHRvIGJlIGZyaWVuZGx5Lg0KcmVmcmlnZXJhdG9yDQoNCjAxMjM0NTY3ODkNCiFAIyQlXiYqKCkgW117fS09Xys7JzoiLC4vPD4/fFx+YA0KQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5eg=="
-                ),
-            )
-
     def test_sizeof_fmt(self):
         self.assertEqual("512.0 b", sizeof_fmt(512))
         self.assertEqual("1.0 Kb", sizeof_fmt(1024))
@@ -120,6 +43,8 @@ class InitTest(TembaTest):
         self.assertEqual("1.0 Pb", sizeof_fmt(1024**5))
         self.assertEqual("1.0 Eb", sizeof_fmt(1024**6))
         self.assertEqual("1.0 Zb", sizeof_fmt(1024**7))
+        self.assertEqual("1.0 Yb", sizeof_fmt(1024**8))
+        self.assertEqual("1024.0 Yb", sizeof_fmt(1024**9))
 
     def test_str_to_bool(self):
         self.assertFalse(str_to_bool(None))
@@ -189,13 +114,6 @@ class InitTest(TembaTest):
 
     def test_replace_non_characters(self):
         self.assertEqual(clean_string("Bangsa\ufddfBangsa"), "Bangsa\ufffdBangsa")
-
-    def test_http_headers(self):
-        headers = http_headers(extra={"Foo": "Bar"})
-        headers["Token"] = "123456"
-
-        self.assertEqual(headers, {"User-agent": "RapidPro", "Foo": "Bar", "Token": "123456"})
-        self.assertEqual(http_headers(), {"User-agent": "RapidPro"})  # check changes don't leak
 
     def test_generate_token(self):
         self.assertEqual(len(generate_token()), 8)
@@ -488,56 +406,6 @@ class TemplateTagTestSimple(TestCase):
         )
 
 
-class CacheTest(TembaTest):
-    def test_get_cacheable_result(self):
-        self.create_contact("Bob", phone="1234")
-
-        def calculate():
-            return Contact.objects.all().count(), 60
-
-        with self.assertNumQueries(1):
-            self.assertEqual(get_cacheable_result("test_contact_count", calculate), 1)  # from db
-        with self.assertNumQueries(0):
-            self.assertEqual(get_cacheable_result("test_contact_count", calculate), 1)  # from cache
-
-        self.create_contact("Jim", phone="2345")
-
-        with self.assertNumQueries(0):
-            self.assertEqual(get_cacheable_result("test_contact_count", calculate), 1)  # not updated
-
-        get_redis_connection().delete("test_contact_count")  # delete from cache for force re-fetch from db
-
-        with self.assertNumQueries(1):
-            self.assertEqual(get_cacheable_result("test_contact_count", calculate), 2)  # from db
-        with self.assertNumQueries(0):
-            self.assertEqual(get_cacheable_result("test_contact_count", calculate), 2)  # from cache
-
-    def test_incrby_existing(self):
-        r = get_redis_connection()
-        r.setex("foo", 100, 10)
-        r.set("bar", 20)
-
-        incrby_existing("foo", 3, r)  # positive delta
-        self.assertEqual(r.get("foo"), b"13")
-        self.assertTrue(r.ttl("foo") > 0)
-
-        incrby_existing("foo", -1, r)  # negative delta
-        self.assertEqual(r.get("foo"), b"12")
-        self.assertTrue(r.ttl("foo") > 0)
-
-        r.setex("foo", 100, 0)
-        incrby_existing("foo", 5, r)  # zero val key
-        self.assertEqual(r.get("foo"), b"5")
-        self.assertTrue(r.ttl("foo") > 0)
-
-        incrby_existing("bar", 5, r)  # persistent key
-        self.assertEqual(r.get("bar"), b"25")
-        self.assertTrue(r.ttl("bar") < 0)
-
-        incrby_existing("xxx", -2, r)  # non-existent key
-        self.assertIsNone(r.get("xxx"))
-
-
 class EmailTest(TembaTest):
     @override_settings(SEND_EMAILS=True)
     def test_send_simple_email(self):
@@ -669,22 +537,26 @@ class JsonTest(TembaTest):
             json.dumps(dict(foo=Exception("invalid")))
 
 
-class CeleryTest(TembaTest):
+class CronsTest(TembaTest):
     @patch("redis.client.StrictRedis.lock")
     @patch("redis.client.StrictRedis.get")
-    def test_nonoverlapping_task(self, mock_redis_get, mock_redis_lock):
+    def test_cron_task(self, mock_redis_get, mock_redis_lock):
+        clear_cron_stats()
+
         mock_redis_get.return_value = None
         task_calls = []
 
-        @nonoverlapping_task()
+        @cron_task()
         def test_task1(foo, bar):
             task_calls.append("1-%d-%d" % (foo, bar))
+            return {"foo": 1}
 
-        @nonoverlapping_task(name="task2", time_limit=100)
+        @cron_task(name="task2", time_limit=100)
         def test_task2(foo, bar):
             task_calls.append("2-%d-%d" % (foo, bar))
+            return 1234
 
-        @nonoverlapping_task(name="task3", time_limit=100, lock_key="test_key", lock_timeout=55)
+        @cron_task(name="task3", time_limit=100, lock_timeout=55)
         def test_task3(foo, bar):
             task_calls.append("3-%d-%d" % (foo, bar))
 
@@ -702,12 +574,21 @@ class CeleryTest(TembaTest):
 
         mock_redis_get.assert_any_call("celery-task-lock:test_task1")
         mock_redis_get.assert_any_call("celery-task-lock:task2")
-        mock_redis_get.assert_any_call("test_key")
+        mock_redis_get.assert_any_call("celery-task-lock:task3")
         mock_redis_lock.assert_any_call("celery-task-lock:test_task1", timeout=900)
         mock_redis_lock.assert_any_call("celery-task-lock:task2", timeout=100)
-        mock_redis_lock.assert_any_call("test_key", timeout=55)
+        mock_redis_lock.assert_any_call("celery-task-lock:task3", timeout=55)
 
         self.assertEqual(task_calls, ["1-11-12", "2-21-22", "3-31-32"])
+
+        r = get_redis_connection()
+        self.assertEqual({b"test_task1", b"task2", b"task3"}, set(r.hkeys("cron_stats:last_start")))
+        self.assertEqual({b"test_task1", b"task2", b"task3"}, set(r.hkeys("cron_stats:last_time")))
+        self.assertEqual(
+            {b"test_task1": b'{"foo": 1}', b"task2": b"1234", b"task3": b"null"}, r.hgetall("cron_stats:last_result")
+        )
+        self.assertEqual({b"test_task1": b"1", b"task2": b"1", b"task3": b"1"}, r.hgetall("cron_stats:call_count"))
+        self.assertEqual({b"test_task1", b"task2", b"task3"}, set(r.hkeys("cron_stats:total_time")))
 
         # simulate task being already running
         mock_redis_get.reset_mock()
@@ -723,105 +604,12 @@ class CeleryTest(TembaTest):
         self.assertEqual(task_calls, ["1-11-12", "2-21-22", "3-31-32"])
 
 
-class ExportTest(TembaTest):
-    def setUp(self):
-        super().setUp()
-
-        self.group = self.create_group("New contacts", [])
-        self.task = ExportContactsTask.objects.create(
-            org=self.org, group=self.group, created_by=self.admin, modified_by=self.admin
-        )
-
-    def test_prepare_value(self):
-        self.assertEqual(self.task.prepare_value(None), "")
-        self.assertEqual(self.task.prepare_value("=()"), "'=()")  # escape formulas
-        self.assertEqual(self.task.prepare_value(123), "123")
-        self.assertEqual(self.task.prepare_value(True), True)
-        self.assertEqual(self.task.prepare_value(False), False)
-
-        dt = pytz.timezone("Africa/Nairobi").localize(datetime.datetime(2017, 2, 7, 15, 41, 23, 123_456))
-        self.assertEqual(self.task.prepare_value(dt), datetime.datetime(2017, 2, 7, 14, 41, 23, 0))
-
-    def test_task_status(self):
-        self.assertEqual(self.task.status, ExportContactsTask.STATUS_PENDING)
-
-        self.task.perform()
-
-        self.assertEqual(self.task.status, ExportContactsTask.STATUS_COMPLETE)
-
-        task2 = ExportContactsTask.objects.create(
-            org=self.org, group=self.group, created_by=self.admin, modified_by=self.admin
-        )
-
-        # if task throws exception, will be marked as failed
-        with patch.object(task2, "write_export") as mock_write_export:
-            mock_write_export.side_effect = ValueError("Problem!")
-
-            with self.assertRaises(Exception):
-                task2.perform()
-
-            self.assertEqual(task2.status, ExportContactsTask.STATUS_FAILED)
-
-    @patch("temba.utils.export.BaseExportTask.MAX_EXCEL_ROWS", new_callable=PropertyMock)
-    def test_tableexporter_xls(self, mock_max_rows):
-        test_max_rows = 1500
-        mock_max_rows.return_value = test_max_rows
-
-        cols = []
-        for i in range(32):
-            cols.append("Column %d" % i)
-
-        extra_cols = []
-        for i in range(16):
-            extra_cols.append("Extra Column %d" % i)
-
-        exporter = TableExporter(self.task, "test", cols + extra_cols)
-
-        values = []
-        for i in range(32):
-            values.append("Value %d" % i)
-
-        extra_values = []
-        for i in range(16):
-            extra_values.append("Extra Value %d" % i)
-
-        # write out 1050000 rows, that'll make two sheets
-        for i in range(test_max_rows + 200):
-            exporter.write_row(values + extra_values)
-
-        temp_file, file_ext = exporter.save_file()
-        workbook = load_workbook(filename=temp_file.name)
-
-        self.assertEqual(2, len(workbook.worksheets))
-
-        # check our sheet 1 values
-        sheet1 = workbook.worksheets[0]
-
-        rows = tuple(sheet1.rows)
-
-        self.assertEqual(cols + extra_cols, [cell.value for cell in rows[0]])
-        self.assertEqual(values + extra_values, [cell.value for cell in rows[1]])
-
-        self.assertEqual(test_max_rows, len(list(sheet1.rows)))
-        self.assertEqual(32 + 16, len(list(sheet1.columns)))
-
-        sheet2 = workbook.worksheets[1]
-        rows = tuple(sheet2.rows)
-        self.assertEqual(cols + extra_cols, [cell.value for cell in rows[0]])
-        self.assertEqual(values + extra_values, [cell.value for cell in rows[1]])
-
-        self.assertEqual(200 + 2, len(list(sheet2.rows)))
-        self.assertEqual(32 + 16, len(list(sheet2.columns)))
-
-        os.unlink(temp_file.name)
-
-
 class MiddlewareTest(TembaTest):
     def test_org(self):
         response = self.client.get(reverse("public.public_index"))
         self.assertFalse(response.has_header("X-Temba-Org"))
 
-        self.login(self.superuser)
+        self.login(self.customer_support)
 
         response = self.client.get(reverse("public.public_index"))
         self.assertFalse(response.has_header("X-Temba-Org"))
@@ -832,28 +620,40 @@ class MiddlewareTest(TembaTest):
         self.assertEqual(response["X-Temba-Org"], str(self.org.id))
 
     def test_branding(self):
-        response = self.client.get(reverse("public.public_index"))
-        self.assertEqual(response.context["request"].branding, settings.BRANDING["rapidpro.io"])
+        def assert_branding(request_host, brand: str):
+            response = self.client.get(reverse("public.public_index"), HTTP_HOST=request_host)
+            self.assertEqual(
+                brand, response.context["request"].branding["slug"], f"brand mismatch for host {request_host}"
+            )
+
+        assert_branding("localhost", "rapidpro")  # uses default
+        assert_branding("localhost:8888", "rapidpro")  # port stripped
+        assert_branding("rapidpro.io", "rapidpro")
+        assert_branding("app.rapidpro.io", "rapidpro")  # subdomains ignored
+        assert_branding("custom-brand.io", "custom")
+        assert_branding("subdomain.custom-brand.io", "custom")
+        assert_branding("custom-brand.org", "custom")  # by alias
+        assert_branding("api.custom-brand.org", "custom")  # by alias
 
     def test_redirect(self):
         self.assertNotRedirect(self.client.get(reverse("public.public_index")), None)
 
         # now set our brand to redirect
-        branding = copy.deepcopy(settings.BRANDING)
-        branding["rapidpro.io"]["redirect"] = "/redirect"
-        with self.settings(BRANDING=branding):
+        brands = copy.deepcopy(settings.BRANDS)
+        brands[0]["redirect"] = "/redirect"
+        with self.settings(BRANDS=brands):
             self.assertRedirect(self.client.get(reverse("public.public_index")), "/redirect")
 
     def test_language(self):
         def assert_text(text: str):
-            self.assertContains(self.client.get(reverse("public.public_index")), text)
+            self.assertContains(self.client.get(reverse("users.user_login")), text)
 
         # default is English
-        assert_text("Visually build nationally scalable mobile applications")
+        assert_text("Sign In")
 
         # can be overridden in Django settings
         with override_settings(DEFAULT_LANGUAGE="es"):
-            assert_text("Cree visualmente aplicaciones móviles")
+            assert_text("Ingresar")
 
         # if we have an authenticated user, their setting takes priority
         self.login(self.admin)
@@ -861,7 +661,7 @@ class MiddlewareTest(TembaTest):
         self.admin.settings.language = "fr"
         self.admin.settings.save(update_fields=("language",))
 
-        assert_text("Créez visuellement des applications mobiles")
+        assert_text("Se connecter")
 
 
 class LanguagesTest(TembaTest):
@@ -958,29 +758,6 @@ class MatchersTest(TembaTest):
         self.assertEqual({"a": "b"}, matchers.Dict())
         self.assertNotEqual(None, matchers.Dict())
         self.assertNotEqual([], matchers.Dict())
-
-
-class NonBlockingLockTest(TestCase):
-    def test_nonblockinglock(self):
-        with NonBlockingLock(redis=get_redis_connection(), name="test_nonblockinglock", timeout=5) as lock:
-            # we are able to get the initial lock
-            self.assertTrue(lock.acquired)
-
-            with NonBlockingLock(redis=get_redis_connection(), name="test_nonblockinglock", timeout=5) as lock:
-                # but we are not able to get it the second time
-                self.assertFalse(lock.acquired)
-                # we need to terminate the execution
-                lock.exit_if_not_locked()
-
-        def raise_exception():
-            with NonBlockingLock(redis=get_redis_connection(), name="test_nonblockinglock", timeout=5) as lock:
-                if not lock.acquired:
-                    raise LockNotAcquiredException
-
-                raise Exception
-
-        # any other exceptions are handled as usual
-        self.assertRaises(Exception, raise_exception)
 
 
 class JSONTest(TestCase):

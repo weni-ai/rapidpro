@@ -80,7 +80,7 @@
   :javascript
 
     function resetWarnings() {
-      var modax = document.querySelector("#start-flow, #shared-modax");
+      var modax = getModax("#start-flow");
       var modalBody = modax.shadowRoot;
   
       var warnings = modalBody.querySelector(".warnings");
@@ -111,7 +111,7 @@
       return operands.join(" OR ");
     }
 
-    var modax = document.querySelector("#start-flow, #shared-modax");
+    var modax = getModax("#start-flow");
     var modalBody = modax.shadowRoot;
     var queryField = modalBody.querySelector('.query');
     var flowSelect = modalBody.querySelector("temba-select[name='flow']");
@@ -120,7 +120,6 @@
     var startForm = modalBody.querySelector('.start-form');
     var omnibox = modalBody.querySelector('temba-omnibox');
     var modeSelect = modalBody.querySelector("temba-select[name='mode']");
-    modax.disabled = true;
 
     flowSelect.addEventListener("change", function(evt) {
       var inFlowCheckbox = modalBody.querySelector("temba-checkbox[name='in_a_flow']");
@@ -177,7 +176,7 @@
 
     var handleDialogButton = function(event){
 
-      var modax = document.querySelector("#start-flow, #shared-modax");
+      var modax = getModax("#start-flow");
       var modalBody = modax.shadowRoot;
 
       if (modax.suspendSubmit) {

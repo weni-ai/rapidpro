@@ -4,8 +4,9 @@ from django.conf import settings
 def use_weni_layout(request):
 
     host = request.get_host().split(":")[0]
+    weni_domain = getattr(settings, "WENI_DOMAINS", {}).get("weni", "")
 
-    return {"use_weni_layout": host.endswith(settings.WENI_DOMAINS["weni"])}
+    return {"use_weni_layout": bool(weni_domain) and host.endswith(weni_domain)}
 
 
 def show_sidemenu(request):
@@ -38,4 +39,4 @@ def logrocket(request):
 
 
 def old_design_excluded_channels_codes(request):
-    return {"old_design_excluded_channels_codes": settings.OLD_DESIGN_EXCLUDED_CHANNELS_CODES}
+    return {"old_design_excluded_channels_codes": getattr(settings, "OLD_DESIGN_EXCLUDED_CHANNELS_CODES", [])}
