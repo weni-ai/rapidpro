@@ -105,15 +105,7 @@ jobs:
         run: |
           poetry run coverage run manage.py test --keepdb --noinput --verbosity=2
           poetry run coverage report -i
-          poetry run coverage xml
 
       - name: Mailroom log
         if: failure()
         run: cat mailroom.log
-
-      - name: Upload coverage
-        if: success()
-        uses: codecov/codecov-action@v2
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: true
