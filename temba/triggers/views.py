@@ -24,7 +24,7 @@ from temba.utils.fields import (
     TembaChoiceField,
     TembaMultipleChoiceField,
 )
-from temba.utils.views import BulkActionMixin, ComponentFormMixin, SpaMixin
+from temba.utils.views import BulkActionMixin, ComponentFormMixin, ContentMenuMixin, SpaMixin
 
 from .models import Trigger
 
@@ -37,6 +37,7 @@ class BaseTriggerForm(forms.ModelForm):
     flow = TembaChoiceField(
         Flow.objects.none(),
         label=_("Flow"),
+        help_text=_("Which flow will be started."),
         required=True,
         widget=SelectWidget(attrs={"placeholder": _("Select a flow"), "searchable": True}),
     )
@@ -219,24 +220,24 @@ class TriggerCRUDL(SmartCRUDL):
             menu.append(
                 self.create_menu_item(
                     name=_("Active"),
-                    verbose_name=_("Active Triggers"),
                     count=org_triggers.filter(is_archived=False).count(),
                     href=reverse("triggers.trigger_list"),
-                    icon="icon.active",
+                    icon="trigger_active",
                 )
             )
 
             menu.append(
                 self.create_menu_item(
                     name=_("Archived"),
-                    verbose_name=_("Archived Triggers"),
-                    icon="icon.archive",
+                    icon="trigger_archived",
                     count=org_triggers.filter(is_archived=True).count(),
                     href=reverse("triggers.trigger_archived"),
                 )
             )
 
-            menu.append(self.create_menu_item(name=_("New Trigger"), icon="plus", href="triggers.trigger_create"))
+            menu.append(
+                self.create_menu_item(name=_("New Trigger"), icon="trigger_new", href="triggers.trigger_create")
+            )
 
             menu.append(self.create_divider())
 
@@ -255,6 +256,7 @@ class TriggerCRUDL(SmartCRUDL):
 
     class Create(SpaMixin, FormaxMixin, OrgFilterMixin, OrgPermsMixin, SmartTemplateView):
         title = _("New Trigger")
+        menu_path = "/trigger/new-trigger"
 
         def derive_formax_sections(self, formax, context):
             def add_section(name, url, icon):
@@ -262,22 +264,22 @@ class TriggerCRUDL(SmartCRUDL):
 
             org_schemes = self.org.get_schemes(Channel.ROLE_RECEIVE)
 
-            add_section("trigger-keyword", "triggers.trigger_create_keyword", "icon-tree")
-            add_section("trigger-register", "triggers.trigger_create_register", "icon-users-2")
-            add_section("trigger-catchall", "triggers.trigger_create_catchall", "icon-bubble")
-            add_section("trigger-schedule", "triggers.trigger_create_schedule", "icon-clock")
-            add_section("trigger-inboundcall", "triggers.trigger_create_inbound_call", "icon-phone2")
+            add_section("trigger-keyword", "triggers.trigger_create_keyword", "flow")
+            add_section("trigger-register", "triggers.trigger_create_register", "group")
+            add_section("trigger-catchall", "triggers.trigger_create_catchall", "topic")
+            add_section("trigger-schedule", "triggers.trigger_create_schedule", "calendar")
+            add_section("trigger-inboundcall", "triggers.trigger_create_inbound_call", "incoming_call")
 
             if self.org.channels.filter(is_active=True, channel_type=AndroidType.code).exists():
-                add_section("trigger-missedcall", "triggers.trigger_create_missed_call", "icon-phone")
+                add_section("trigger-missedcall", "triggers.trigger_create_missed_call", "missed_call")
 
             if ContactURN.SCHEMES_SUPPORTING_NEW_CONVERSATION.intersection(org_schemes):
-                add_section("trigger-new-conversation", "triggers.trigger_create_new_conversation", "icon-bubbles-2")
+                add_section("trigger-new-conversation", "triggers.trigger_create_new_conversation", "conversation")
 
             if ContactURN.SCHEMES_SUPPORTING_REFERRALS.intersection(org_schemes):
-                add_section("trigger-referral", "triggers.trigger_create_referral", "icon-exit")
+                add_section("trigger-referral", "triggers.trigger_create_referral", "referral")
 
-            add_section("trigger-closed-ticket", "triggers.trigger_create_closed_ticket", "icon-ticket")
+            add_section("trigger-closed-ticket", "triggers.trigger_create_closed_ticket", "agent")
 
     class BaseCreate(OrgPermsMixin, ComponentFormMixin, SmartCreateView):
         trigger_type = None
@@ -322,7 +324,7 @@ class TriggerCRUDL(SmartCRUDL):
         trigger_type = Trigger.TYPE_KEYWORD
 
         def get_create_kwargs(self, user, cleaned_data):
-            return {"keyword": cleaned_data["keyword"]}
+            return {"keyword": cleaned_data["keyword"], "match_type": cleaned_data["match_type"]}
 
     class CreateRegister(BaseCreate):
         form_class = RegisterTriggerForm
@@ -346,6 +348,7 @@ class TriggerCRUDL(SmartCRUDL):
                 groups=groups,
                 exclude_groups=exclude_groups,
                 keyword=keyword,
+                match_type=Trigger.MATCH_ONLY_WORD,
             )
 
             response = self.render_to_response(self.get_context_data(form=form))
@@ -509,6 +512,7 @@ class TriggerCRUDL(SmartCRUDL):
 
         bulk_actions = ("archive",)
         title = _("Active Triggers")
+        menu_path = "/trigger/active"
 
         def pre_process(self, request, *args, **kwargs):
             # if they have no triggers and no search performed, send them to create page
@@ -520,13 +524,17 @@ class TriggerCRUDL(SmartCRUDL):
         def get_queryset(self, *args, **kwargs):
             return super().get_queryset(*args, **kwargs).filter(is_archived=False)
 
-    class Archived(BaseList):
+    class Archived(ContentMenuMixin, BaseList):
         """
         Archived triggers of all types
         """
 
-        bulk_actions = ("restore",)
+        bulk_actions = ("restore", "delete")
         title = _("Archived Triggers")
+        menu_path = "/trigger/archived"
+
+        def build_content_menu(self, menu):
+            menu.add_js("triggers_delete_all", _("Delete All"))
 
         def get_queryset(self, *args, **kwargs):
             return super().get_queryset(*args, **kwargs).filter(is_archived=True)
@@ -547,6 +555,9 @@ class TriggerCRUDL(SmartCRUDL):
         @property
         def trigger_type(self):
             return Trigger.get_type(slug=self.kwargs["type"])
+
+        def derive_menu_path(self):
+            return f"/trigger/{self.trigger_type.slug}"
 
         def derive_title(self):
             return self.trigger_type.title

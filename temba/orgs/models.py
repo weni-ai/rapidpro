@@ -3,7 +3,10 @@ import logging
 import os
 from abc import ABCMeta
 from collections import defaultdict
+from datetime import timedelta
 from enum import Enum
+from pathlib import Path
+from typing import Any
 from urllib.parse import quote, urlencode, urlparse
 
 import pycountry
@@ -12,7 +15,6 @@ import pytz
 from packaging.version import Version
 from smartmin.models import SmartModel
 from timezone_field import TimeZoneField
-from twilio.rest import Client as TwilioClient
 
 from django.conf import settings
 from django.contrib.auth.models import Group, Permission, User as AuthUser
@@ -21,6 +23,7 @@ from django.contrib.postgres.validators import ArrayMinLengthValidator
 from django.db import models, transaction
 from django.db.models import Prefetch
 from django.utils import timezone
+from django.utils.encoding import force_str
 from django.utils.functional import cached_property
 from django.utils.text import slugify
 from django.utils.translation import gettext_lazy as _
@@ -28,10 +31,10 @@ from django.utils.translation import gettext_lazy as _
 from temba import mailroom
 from temba.archives.models import Archive
 from temba.locations.models import AdminBoundary
-from temba.utils import brands, chunk_list, json, languages
+from temba.utils import json, languages, on_transaction_commit
 from temba.utils.dates import datetime_to_str
 from temba.utils.email import send_template_email
-from temba.utils.models import JSONAsTextField, JSONField
+from temba.utils.models import JSONField, delete_in_batches
 from temba.utils.text import generate_token, random_string
 from temba.utils.timezones import timezone_to_country_code
 from temba.utils.uuid import uuid4
@@ -149,28 +152,31 @@ class User(AuthUser):
 
         return cls.create(email, first_name, last_name, password=password, language=language)
 
+    @classmethod
+    def get_orgs_for_request(cls, request, *, roles=None):
+        """
+        Gets the orgs that the logged in user has access to (i.e. a role in).
+        """
+        user = request.user
+        orgs = user.orgs.filter(is_active=True).order_by("name")
+        if roles is not None:
+            orgs = orgs.filter(orgmembership__user=user, orgmembership__role_code__in=[r.code for r in roles])
+
+        return orgs
+
     @property
     def name(self) -> str:
         return self.get_full_name()
 
-    def get_orgs(self, *, brand: str = None, roles=None):
-        """
-        Gets the orgs in the given brands that this user has access to (i.e. a role in).
-        """
-        orgs = self.orgs.filter(is_active=True).order_by("name")
-        if brand:
-            orgs = orgs.filter(brand=brand)
-        if roles is not None:
-            orgs = orgs.filter(orgmembership__user=self, orgmembership__role_code__in=[r.code for r in roles])
+    def get_orgs(self):
+        return self.orgs.filter(is_active=True).order_by("name")
 
-        return orgs
-
-    def get_owned_orgs(self, *, brand=None):
+    def get_owned_orgs(self):
         """
-        Gets the orgs in the given brands where this user is the only user.
+        Gets the orgs where this user is the only user.
         """
         owned_orgs = []
-        for org in self.get_orgs(brand=brand):
+        for org in self.get_orgs():
             if not org.users.exclude(id=self.id).exists():
                 owned_orgs.append(org)
         return owned_orgs
@@ -265,28 +271,25 @@ class User(AuthUser):
     def as_engine_ref(self) -> dict:
         return {"email": self.email, "name": self.name}
 
-    def release(self, user, *, brand):
+    def release(self, user):
         """
         Releases this user, and any orgs of which they are the sole owner.
         """
+        user_uuid = str(uuid4())
+        self.first_name = ""
+        self.last_name = ""
+        self.email = f"{user_uuid}@rapidpro.io"
+        self.username = f"{user_uuid}@rapidpro.io"
+        self.password = ""
+        self.is_active = False
+        self.save()
 
-        # if our user exists across brands don't muck with the user
-        if self.get_orgs().order_by("brand").distinct("brand").count() < 2:
-            user_uuid = str(uuid4())
-            self.first_name = ""
-            self.last_name = ""
-            self.email = f"{user_uuid}@rapidpro.io"
-            self.username = f"{user_uuid}@rapidpro.io"
-            self.password = ""
-            self.is_active = False
-            self.save()
-
-        # release any orgs we own on this brand
-        for org in self.get_owned_orgs(brand=brand):
+        # release any orgs we own
+        for org in self.get_owned_orgs():
             org.release(user, release_users=False)
 
-        # remove user from all roles on any org for our brand
-        for org in self.get_orgs(brand=brand):
+        # remove user from all roles on other orgs
+        for org in self.get_orgs():
             org.remove_user(self)
 
     def __str__(self):
@@ -399,10 +402,12 @@ class Org(SmartModel):
     CURRENT_EXPORT_VERSION = "13"
 
     FEATURE_USERS = "users"  # can invite users to this org
+    FEATURE_VIEWERS = "viewers"  # users with read-only Viewer role
     FEATURE_NEW_ORGS = "new_orgs"  # can create new workspace with same login
     FEATURE_CHILD_ORGS = "child_orgs"  # can create child workspaces of this org
     FEATURES_CHOICES = (
         (FEATURE_USERS, _("Users")),
+        (FEATURE_VIEWERS, _("Viewers")),
         (FEATURE_NEW_ORGS, _("New Orgs")),
         (FEATURE_CHILD_ORGS, _("Child Orgs")),
     )
@@ -427,21 +432,9 @@ class Org(SmartModel):
     )
 
     uuid = models.UUIDField(unique=True, default=uuid4)
-
     name = models.CharField(verbose_name=_("Name"), max_length=128)
+    parent = models.ForeignKey("orgs.Org", on_delete=models.PROTECT, null=True, related_name="children")
     brand = models.CharField(max_length=128, default="rapidpro", verbose_name=_("Brand"))
-    plan = models.CharField(verbose_name=_("Plan"), max_length=16, null=True, blank=True)
-    plan_start = models.DateTimeField(null=True)
-    plan_end = models.DateTimeField(null=True)
-
-    stripe_customer = models.CharField(
-        verbose_name=_("Stripe Customer"),
-        max_length=32,
-        null=True,
-        blank=True,
-        help_text=_("Our Stripe customer id for your organization"),
-    )
-
     users = models.ManyToManyField(User, through="OrgMembership", related_name="orgs")
 
     language = models.CharField(
@@ -450,34 +443,22 @@ class Org(SmartModel):
         null=True,
         choices=settings.LANGUAGES,
         default=settings.DEFAULT_LANGUAGE,
-        help_text=_("The default website language for new users."),
+        help_text=_("Default website language for new users."),
     )
 
+    # environment for flows and messages
     timezone = TimeZoneField(verbose_name=_("Timezone"))
-
     date_format = models.CharField(
         verbose_name=_("Date Format"),
         max_length=1,
         choices=DATE_FORMAT_CHOICES,
         default=DATE_FORMAT_DAY_FIRST,
-        help_text=_("Whether day comes first or month comes first in dates"),
+        help_text=_("Default formatting and parsing of dates in flows and messages."),
     )
+    country = models.ForeignKey("locations.AdminBoundary", null=True, on_delete=models.PROTECT)
+    flow_languages = ArrayField(models.CharField(max_length=3), default=list, validators=[ArrayMinLengthValidator(1)])
 
-    country = models.ForeignKey(
-        "locations.AdminBoundary",
-        null=True,
-        blank=True,
-        on_delete=models.PROTECT,
-        help_text="The country this organization should map results for.",
-    )
-
-    config = JSONAsTextField(
-        null=True,
-        default=dict,
-        verbose_name=_("Configuration"),
-        help_text=_("More Organization specific configuration"),
-    )
-
+    config = models.JSONField(default=dict)
     slug = models.SlugField(
         verbose_name=_("Slug"),
         max_length=255,
@@ -494,17 +475,12 @@ class Org(SmartModel):
     is_anon = models.BooleanField(
         default=False, help_text=_("Whether this organization anonymizes the phone numbers of contacts within it")
     )
-
     is_flagged = models.BooleanField(default=False, help_text=_("Whether this organization is currently flagged."))
     is_suspended = models.BooleanField(default=False, help_text=_("Whether this organization is currently suspended."))
-
-    flow_languages = ArrayField(models.CharField(max_length=3), default=list, validators=[ArrayMinLengthValidator(1)])
 
     surveyor_password = models.CharField(
         null=True, max_length=128, default=None, help_text=_("A password that allows users to register as surveyors")
     )
-
-    parent = models.ForeignKey("orgs.Org", on_delete=models.PROTECT, null=True, related_name="children")
 
     # when this org was released and when it was actually deleted
     released_on = models.DateTimeField(null=True)
@@ -531,7 +507,7 @@ class Org(SmartModel):
             return unique_slug
 
     @classmethod
-    def create(cls, user, branding, name: str, tz):
+    def create(cls, user, name: str, tz):
         """
         Creates a new workspace.
         """
@@ -549,7 +525,6 @@ class Org(SmartModel):
             date_format=date_format,
             language=settings.DEFAULT_LANGUAGE,
             flow_languages=flow_languages,
-            brand=branding["slug"],
             slug=cls.get_unique_slug(name),
             created_by=user,
             modified_by=user,
@@ -566,7 +541,7 @@ class Org(SmartModel):
 
         if as_child:
             assert Org.FEATURE_CHILD_ORGS in self.features, "only orgs with this feature enabled can create child orgs"
-            assert not self.parent_id, "child orgs can't create children"
+            assert not self.is_child, "child orgs can't create children"
         else:
             assert Org.FEATURE_NEW_ORGS in self.features, "only orgs with this feature enabled can create new orgs"
 
@@ -576,7 +551,6 @@ class Org(SmartModel):
             date_format=self.date_format,
             language=self.language,
             flow_languages=self.flow_languages,
-            brand=self.brand,
             parent=self if as_child else None,
             slug=self.get_unique_slug(name),
             created_by=user,
@@ -587,9 +561,23 @@ class Org(SmartModel):
         org.initialize()
         return org
 
+    @property
+    def is_child(self) -> bool:
+        return bool(self.parent_id)
+
+    @property
+    def is_verified(self):
+        """
+        A verified org is not subject to automatic flagging for suspicious activity
+        """
+        return self.config.get(Org.CONFIG_VERIFIED, False)
+
     @cached_property
     def branding(self):
-        return brands.get_by_slug(self.brand)
+        return self.get_brand()
+
+    def get_brand(self):
+        return settings.BRAND
 
     def get_brand_domain(self):
         return self.branding["domain"]
@@ -604,22 +592,56 @@ class Org(SmartModel):
     def get_limit(self, limit_type):
         return int(self.limits.get(limit_type, settings.ORG_LIMIT_DEFAULTS.get(limit_type)))
 
+    def suspend(self):
+        """
+        Suspends this org and any children.
+        """
+        from temba.notifications.incidents.builtin import OrgSuspendedIncidentType
+
+        assert not self.is_child
+
+        if not self.is_suspended:
+            self.is_suspended = True
+            self.modified_on = timezone.now()
+            self.save(update_fields=("is_suspended", "modified_on"))
+
+            self.children.filter(is_active=True).update(is_suspended=True, modified_on=timezone.now())
+
+            OrgSuspendedIncidentType.get_or_create(self)  # create incident which will notify admins
+
+    def unsuspend(self):
+        """
+        Unsuspends this org and any children.
+        """
+        from temba.notifications.incidents.builtin import OrgSuspendedIncidentType
+
+        assert not self.is_child
+
+        if self.is_suspended:
+            self.is_suspended = False
+            self.modified_on = timezone.now()
+            self.save(update_fields=("is_suspended", "modified_on"))
+
+            self.children.filter(is_active=True).update(is_suspended=False, modified_on=timezone.now())
+
+            OrgSuspendedIncidentType.get_or_create(self).end()
+
     def flag(self):
         """
         Flags this org for suspicious activity
         """
         from temba.notifications.incidents.builtin import OrgFlaggedIncidentType
 
-        self.is_flagged = True
-        self.save(update_fields=("is_flagged", "modified_on"))
+        if not self.is_flagged:
+            self.is_flagged = True
+            self.save(update_fields=("is_flagged", "modified_on"))
 
-        OrgFlaggedIncidentType.get_or_create(self)  # create incident which will notify admins
+            OrgFlaggedIncidentType.get_or_create(self)  # create incident which will notify admins
 
     def unflag(self):
         """
         Unflags this org if they previously were flagged
         """
-
         from temba.notifications.incidents.builtin import OrgFlaggedIncidentType
 
         if self.is_flagged:
@@ -635,12 +657,6 @@ class Org(SmartModel):
         self.unflag()
         self.config[Org.CONFIG_VERIFIED] = True
         self.save(update_fields=("config", "modified_on"))
-
-    def is_verified(self):
-        """
-        A verified org is not subject to automatic flagging for suspicious activity
-        """
-        return self.config.get(Org.CONFIG_VERIFIED, False)
 
     def import_app(self, export_json, user, site=None):
         """
@@ -779,9 +795,6 @@ class Org(SmartModel):
         send_channel = self.get_send_channel(URN.TEL_SCHEME)
         return send_channel and send_channel.is_android()
 
-    def can_add_caller(self):  # pragma: needs cover
-        return not self.supports_ivr() and self.is_connected_to_twilio()
-
     def supports_ivr(self):
         return self.get_call_channel() or self.get_answer_channel()
 
@@ -899,64 +912,6 @@ class Org(SmartModel):
 
         return AirtimeTransfer.objects.filter(org=self).exists()
 
-    def connect_vonage(self, api_key, api_secret, user):
-        self.config.update({Org.CONFIG_VONAGE_KEY: api_key.strip(), Org.CONFIG_VONAGE_SECRET: api_secret.strip()})
-        self.modified_by = user
-        self.save(update_fields=("config", "modified_by", "modified_on"))
-
-    def connect_twilio(self, account_sid, account_token, user):
-        self.config.update({Org.CONFIG_TWILIO_SID: account_sid, Org.CONFIG_TWILIO_TOKEN: account_token})
-        self.modified_by = user
-        self.save(update_fields=("config", "modified_by", "modified_on"))
-
-    def is_connected_to_vonage(self):
-        if self.config:
-            return self.config.get(Org.CONFIG_VONAGE_KEY) and self.config.get(Org.CONFIG_VONAGE_SECRET)
-        return False
-
-    def is_connected_to_twilio(self):
-        if self.config:
-            return self.config.get(Org.CONFIG_TWILIO_SID) and self.config.get(Org.CONFIG_TWILIO_TOKEN)
-        return False
-
-    def remove_vonage_account(self, user):
-        if self.config:
-            # release any vonage channels
-            for channel in self.channels.filter(is_active=True, channel_type="NX"):  # pragma: needs cover
-                channel.release(user)
-
-            self.config.pop(Org.CONFIG_VONAGE_KEY, None)
-            self.config.pop(Org.CONFIG_VONAGE_SECRET, None)
-            self.modified_by = user
-            self.save(update_fields=("config", "modified_by", "modified_on"))
-
-    def remove_twilio_account(self, user):
-        if self.config:
-            # release any Twilio and Twilio Messaging Service channels
-            for channel in self.channels.filter(is_active=True, channel_type__in=["T", "TMS"]):
-                channel.release(user)
-
-            self.config.pop(Org.CONFIG_TWILIO_SID, None)
-            self.config.pop(Org.CONFIG_TWILIO_TOKEN, None)
-            self.modified_by = user
-            self.save(update_fields=("config", "modified_by", "modified_on"))
-
-    def get_twilio_client(self):
-        account_sid = self.config.get(Org.CONFIG_TWILIO_SID)
-        auth_token = self.config.get(Org.CONFIG_TWILIO_TOKEN)
-        if account_sid and auth_token:
-            return TwilioClient(account_sid, auth_token)
-        return None
-
-    def get_vonage_client(self):
-        from temba.channels.types.vonage.client import VonageClient
-
-        api_key = self.config.get(Org.CONFIG_VONAGE_KEY)
-        api_secret = self.config.get(Org.CONFIG_VONAGE_SECRET)
-        if api_key and api_secret:
-            return VonageClient(api_key, api_secret)
-        return None
-
     @property
     def default_country_code(self) -> str:
         """
@@ -1025,6 +980,20 @@ class Org(SmartModel):
         formats = self.get_datetime_formats(seconds=seconds)
         format = formats[1] if show_time else formats[0]
         return datetime_to_str(d, format, self.timezone)
+
+    def get_allowed_user_roles(self) -> list[OrgRole]:
+        """
+        Gets the allowed user roles which always includes any roles in use (can't take away roles).
+        """
+        roles = [r for r in OrgRole]
+        codes_in_use = set(OrgMembership.objects.filter(org=self).values_list("role_code", flat=True).distinct())
+
+        if "surveyor" not in settings.FEATURES and OrgRole.SURVEYOR.code not in codes_in_use:
+            roles.remove(OrgRole.SURVEYOR)
+        if Org.FEATURE_VIEWERS not in self.features and OrgRole.VIEWER.code not in codes_in_use:
+            roles.remove(OrgRole.VIEWER)
+
+        return roles
 
     def get_users(self, *, roles: list = None, with_perm: str = None):
         """
@@ -1245,12 +1214,15 @@ class Org(SmartModel):
 
     def release(self, user, *, release_users=True):
         """
-        Releases this org, marking it as inactive. Actual deletion of org data won't happen until after 7 days unless
-        delete is True.
+        Releases this org, marking it as inactive. Actual deletion of org data won't happen until after 7 days.
         """
 
-        # free our children
-        Org.objects.filter(parent=self).update(parent=None)
+        if not self.is_active:  # already released, nothing to do here
+            return
+
+        # release any child orgs
+        for child in self.children.all():
+            child.release(user, release_users=release_users)
 
         # deactivate ourselves
         self.is_active = False
@@ -1265,81 +1237,87 @@ class Org(SmartModel):
         # release any user that belongs only to us
         if release_users:
             for org_user in self.users.all():
-                # check if this user is a member of any org on any brand
+                # check if this user is a member of any org
                 other_orgs = org_user.get_orgs().exclude(id=self.id)
                 if not other_orgs:
-                    org_user.release(user, brand=self.brand)
+                    org_user.release(user)
 
         # remove all the org users
         for org_user in self.users.all():
             self.remove_user(org_user)
 
-    def delete(self):
+    def delete(self) -> dict:
         """
-        Does an actual delete of this org
+        Does an actual delete of this org, returning counts of what was deleted.
         """
 
-        assert not self.is_active and self.released_on, "can't delete an org which hasn't been released"
-        assert not self.deleted_on, "can't delete an org twice"
+        from temba.msgs.models import Msg
+
+        assert not self.is_active and self.released_on, "can't delete org which hasn't been released"
+        assert self.released_on < timezone.now() - timedelta(days=7), "can't delete org which was released recently"
+        assert not self.deleted_on, "can't delete org twice"
 
         user = self.modified_by
+        counts = defaultdict(int)
 
         # delete notifications and exports
-        self.incidents.all().delete()
-        self.notifications.all().delete()
-        self.exportcontactstasks.all().delete()
-        self.exportmessagestasks.all().delete()
-        self.exportflowresultstasks.all().delete()
-        self.exportticketstasks.all().delete()
+        delete_in_batches(self.notifications.all())
+        delete_in_batches(self.notification_counts.all())
+        delete_in_batches(self.incidents.all())
+        delete_in_batches(self.exportcontactstasks.all())
+        delete_in_batches(self.exportmessagestasks.all())
+        delete_in_batches(self.exportflowresultstasks.all())
+        delete_in_batches(self.exportticketstasks.all())
+
+        for imp in self.contact_imports.all():
+            imp.delete()
 
         for label in self.msgs_labels.all():
             label.release(user)
             label.delete()
 
-        msg_ids = self.msgs.all().values_list("id", flat=True)
-
-        # might be a lot of messages, batch this
-        for id_batch in chunk_list(msg_ids, 1000):
-            for msg in self.msgs.filter(id__in=id_batch):
-                msg.delete()
-
-        # our system label counts
-        self.system_labels.all().delete()
+        while True:
+            msg_batch = list(self.msgs.all()[:1000])
+            if not msg_batch:
+                break
+            Msg.bulk_delete(msg_batch)
+            counts["messages"] += len(msg_batch)
 
         # delete all our campaigns and associated events
         for c in self.campaigns.all():
             c.delete()
 
-        # delete everything associated with our flows
+        # release flows (actual deletion occurs later after contacts and tickets are gone)
+        # we want to manually release runs so we don't fire a mailroom task to do it
         for flow in self.flows.all():
-            # we want to manually release runs so we don't fire a mailroom task to do it
             flow.release(user, interrupt_sessions=False)
-            flow.delete()
+            counts["runs"] += flow.delete_runs()
 
         # delete our flow labels (deleting a label deletes its children)
         for flow_label in self.flow_labels.filter(parent=None):
             flow_label.delete()
 
         # delete contact-related data
-        self.http_logs.all().delete()
-        self.sessions.all().delete()
-        self.ticket_events.all().delete()
-        self.tickets.all().delete()
-        self.topics.all().delete()
-        self.airtime_transfers.all().delete()
+        delete_in_batches(self.http_logs.all())
+        delete_in_batches(self.sessions.all())
+        delete_in_batches(self.ticket_events.all())
+        delete_in_batches(self.tickets.all())
+        delete_in_batches(self.ticket_counts.all())
+        delete_in_batches(self.topics.all())
+        delete_in_batches(self.airtime_transfers.all())
 
         # delete our contacts
         for contact in self.contacts.all():
             contact.release(user, immediately=True)
             contact.delete()
+            counts["contacts"] += 1
 
         # delete all our URNs
         self.urns.all().delete()
 
         # delete our fields
-        for contactfield in self.fields.all():
-            contactfield.release(user)
-            contactfield.delete()
+        for field in self.fields.all():
+            field.delete()
 
         # delete our groups
         for group in self.groups.all():
@@ -1348,49 +1326,43 @@ class Org(SmartModel):
 
         # delete our channels
         for channel in self.channels.all():
-            channel.counts.all().delete()
-            channel.logs.all().delete()
-            channel.template_translations.all().delete()
-
             channel.delete()
 
-        for g in self.globals.all():
-            g.release(user)
+        for glob in self.globals.all():
+            glob.delete()
 
-        # delete our classifiers
         for classifier in self.classifiers.all():
             classifier.release(user)
             classifier.delete()
 
-        # delete our ticketers
         for ticketer in self.ticketers.all():
             ticketer.release(user)
             ticketer.delete()
 
-        # release all archives objects and files for this org
-        Archive.release_org_archives(self)
+        for flow in self.flows.all():
+            flow.delete()
 
-        self.webhookevent_set.all().delete()
+        delete_in_batches(self.webhookevent_set.all())
 
         for resthook in self.resthooks.all():
             resthook.release(user)
-            for sub in resthook.subscribers.all():
-                sub.delete()
             resthook.delete()
 
         # release our broadcasts
-        for bcast in self.broadcast_set.filter(parent=None):
+        for bcast in self.broadcasts.filter(parent=None):
             bcast.delete(user, soft=False)
 
+        Archive.delete_for_org(self)
+
         # delete other related objects
-        self.api_tokens.all().delete()
-        self.invitations.all().delete()
-        self.schedules.all().delete()
-        self.boundaryalias_set.all().delete()
-        self.templates.all().delete()
+        delete_in_batches(self.api_tokens.all(), pk="key")
+        delete_in_batches(self.invitations.all())
+        delete_in_batches(self.schedules.all())
+        delete_in_batches(self.boundaryalias_set.all())
+        delete_in_batches(self.templates.all())
 
         # needs to come after deletion of msgs and broadcasts as those insert new counts
-        self.system_labels.all().delete()
+        delete_in_batches(self.system_labels.all())
 
         # save when we were actually deleted
         self.modified_on = timezone.now()
@@ -1398,6 +1370,8 @@ class Org(SmartModel):
         self.config = {}
         self.surveyor_password = None
         self.save()
+
+        return counts
 
     def as_environment_def(self):
         """
@@ -1412,6 +1386,9 @@ class Org(SmartModel):
             "default_country": self.default_country_code,
             "redaction_policy": "urns" if self.is_anon else "none",
         }
+
+    def __repr__(self):
+        return f'<Org: name="{self.name}">'
 
     def __str__(self):
         return self.name
@@ -1428,6 +1405,56 @@ class OrgMembership(models.Model):
 
     class Meta:
         unique_together = (("org", "user"),)
+
+
+def get_import_upload_path(instance: Any, filename: str):
+    ext = Path(filename).suffix.lower()
+    return f"{settings.STORAGE_ROOT_DIR}/{instance.org_id}/org_imports/{uuid4()}{ext}"
+
+
+class OrgImport(SmartModel):
+    STATUS_PENDING = "P"
+    STATUS_PROCESSING = "O"
+    STATUS_COMPLETE = "C"
+    STATUS_FAILED = "F"
+    STATUS_CHOICES = (
+        (STATUS_PENDING, "Pending"),
+        (STATUS_PROCESSING, "Processing"),
+        (STATUS_COMPLETE, "Complete"),
+        (STATUS_FAILED, "Failed"),
+    )
+
+    org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="imports")
+    file = models.FileField(upload_to=get_import_upload_path)
+    status = models.CharField(max_length=1, default=STATUS_PENDING, choices=STATUS_CHOICES)
+
+    def start_async(self):
+        from .tasks import start_org_import_task
+
+        on_transaction_commit(lambda: start_org_import_task.delay(self.id))
+
+    def start(self):
+        assert self.status == self.STATUS_PENDING, "trying to start an already started import"
+
+        # mark us as processing to prevent double starting
+        self.status = self.STATUS_PROCESSING
+        self.save(update_fields=("status",))
+        try:
+            org = self.org
+            link = org.get_brand()["link"]
+            data = json.loads(force_str(self.file.read()))
+            org.import_app(data, self.created_by, link)
+        except Exception as e:
+            self.status = self.STATUS_FAILED
+            self.save(update_fields=("status",))
+
+            # this is an unexpected error, report it to sentry
+            logger = logging.getLogger(__name__)
+            logger.error("Exception on app import: %s" % str(e), exc_info=True)
+
+        else:
+            self.status = self.STATUS_COMPLETE
+            self.save(update_fields=("status", "modified_on"))
 
 
 class Invitation(SmartModel):

@@ -1,17 +1,17 @@
 import io
 import smtplib
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import patch
 from urllib.parse import urlencode
 
 import pytz
-from bs4 import BeautifulSoup
 from smartmin.users.models import FailedLogin, RecoveryToken
 
 from django.conf import settings
 from django.contrib.auth.models import Group
 from django.core import mail
+from django.db.models import Model
 from django.test.utils import override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -21,7 +21,7 @@ from temba.airtime.models import AirtimeTransfer
 from temba.api.models import APIToken, Resthook, WebHookEvent
 from temba.archives.models import Archive
 from temba.campaigns.models import Campaign, CampaignEvent, EventFire
-from temba.channels.models import Alert, Channel, SyncEvent
+from temba.channels.models import Alert, Channel, ChannelLog, SyncEvent
 from temba.classifiers.models import Classifier
 from temba.classifiers.types.wit import WitType
 from temba.contacts.models import (
@@ -34,33 +34,26 @@ from temba.contacts.models import (
     ContactURN,
     ExportContactsTask,
 )
-from temba.flows.models import ExportFlowResultsTask, Flow, FlowLabel, FlowRun, FlowStart
+from temba.flows.models import ExportFlowResultsTask, Flow, FlowLabel, FlowRun, FlowSession, FlowStart, FlowStartCount
 from temba.globals.models import Global
 from temba.locations.models import AdminBoundary
-from temba.msgs.models import Broadcast, ExportMessagesTask, Label, Msg
+from temba.msgs.models import ExportMessagesTask, Label, Msg
 from temba.notifications.types.builtin import ExportFinishedNotificationType
 from temba.request_logs.models import HTTPLog
-from temba.templates.models import Template, TemplateTranslation
-from temba.tests import (
-    CRUDLTestMixin,
-    ESMockWithScroll,
-    MigrationTest,
-    MockResponse,
-    TembaNonAtomicTest,
-    TembaTest,
-    matchers,
-    mock_mailroom,
-)
-from temba.tests.engine import MockSessionWriter
+from temba.schedules.models import Schedule
+from temba.templates.models import TemplateTranslation
+from temba.tests import CRUDLTestMixin, ESMockWithScroll, TembaTest, matchers, mock_mailroom
+from temba.tests.base import get_contact_search
 from temba.tests.s3 import MockS3Client, jsonlgz_encode
-from temba.tests.twilio import MockRequestValidator, MockTwilioClient
-from temba.tickets.models import Ticketer
+from temba.tickets.models import ExportTicketsTask, Ticketer
 from temba.tickets.types.mailgun import MailgunType
 from temba.triggers.models import Trigger
-from temba.utils import brands, json, languages
+from temba.utils import json, languages
+from temba.utils.uuid import uuid4
+from temba.utils.views import TEMBA_MENU_SELECTION
 
 from .context_processors import RolePermsWrapper
-from .models import BackupToken, Invitation, Org, OrgMembership, OrgRole, User
+from .models import BackupToken, Invitation, Org, OrgImport, OrgMembership, OrgRole, User
 from .tasks import delete_released_orgs, resume_failed_tasks
 
 
@@ -86,21 +79,21 @@ class OrgContextProcessorTest(TembaTest):
         self.assertTrue(perms["contacts"]["contact_update"])
         self.assertTrue(perms["orgs"]["org_country"])
         self.assertTrue(perms["orgs"]["org_manage_accounts"])
-        self.assertTrue(perms["orgs"]["org_delete"])
+        self.assertTrue(perms["orgs"]["org_delete_child"])
 
         perms = RolePermsWrapper(OrgRole.EDITOR)
 
         self.assertTrue(perms["msgs"]["msg_list"])
         self.assertTrue(perms["contacts"]["contact_update"])
         self.assertFalse(perms["orgs"]["org_manage_accounts"])
-        self.assertFalse(perms["orgs"]["org_delete"])
+        self.assertFalse(perms["orgs"]["org_delete_child"])
 
         perms = RolePermsWrapper(OrgRole.VIEWER)
 
         self.assertTrue(perms["msgs"]["msg_list"])
         self.assertFalse(perms["contacts"]["contact_update"])
         self.assertFalse(perms["orgs"]["org_manage_accounts"])
-        self.assertFalse(perms["orgs"]["org_delete"])
+        self.assertFalse(perms["orgs"]["org_delete_child"])
 
         self.assertFalse(perms["msgs"]["foo"])  # no blow up if perm doesn't exist
         self.assertFalse(perms["chickens"]["foo"])  # or app doesn't exist
@@ -120,8 +113,6 @@ class UserTest(TembaTest):
         self.assertFalse(user.is_beta)
         self.assertEqual({"email": "jim@rapidpro.io", "name": "Jim McFlow"}, user.as_engine_ref())
         self.assertEqual([self.org, self.org2], list(user.get_orgs().order_by("id")))
-        self.assertEqual([], list(user.get_orgs(roles=[OrgRole.ADMINISTRATOR]).order_by("id")))
-        self.assertEqual([self.org, self.org2], list(user.get_orgs(roles=[OrgRole.EDITOR]).order_by("id")))
 
         user.last_name = ""
         user.save(update_fields=("last_name",))
@@ -212,7 +203,7 @@ class UserTest(TembaTest):
                 },
             ),
         )
-        for (org, perm, checks) in tests:
+        for org, perm, checks in tests:
             for user, has_perm in checks.items():
                 self.assertEqual(
                     has_perm,
@@ -230,7 +221,7 @@ class UserTest(TembaTest):
         # try to access a non-public page
         response = self.client.get(reverse("msgs.msg_inbox"))
         self.assertLoginRedirect(response)
-        self.assertTrue(response.url.endswith("?next=/msg/inbox/"))
+        self.assertTrue(response.url.endswith("?next=/msg/"))
 
         # view login page
         response = self.client.get(login_url)
@@ -242,7 +233,7 @@ class UserTest(TembaTest):
         self.assertFormError(
             response,
             "form",
-            "__all__",
+            None,
             "Please enter a correct username and password. Note that both fields may be case-sensitive.",
         )
 
@@ -263,10 +254,10 @@ class UserTest(TembaTest):
 
         # login via login page again
         response = self.client.post(
-            login_url + "?next=/msg/inbox/", {"username": "admin@nyaruka.com", "password": "Qwerty123"}
+            login_url + "?next=/msg/", {"username": "admin@nyaruka.com", "password": "Qwerty123"}
         )
         self.assertRedirect(response, verify_url)
-        self.assertTrue(response.url.endswith("?next=/msg/inbox/"))
+        self.assertTrue(response.url.endswith("?next=/msg/"))
 
         # view two-factor verify page
         response = self.client.get(verify_url)
@@ -327,7 +318,7 @@ class UserTest(TembaTest):
         self.assertFormError(
             response,
             "form",
-            "__all__",
+            None,
             "Please enter a correct username and password. Note that both fields may be case-sensitive.",
         )
 
@@ -432,12 +423,13 @@ class UserTest(TembaTest):
         enable_url = reverse("orgs.user_two_factor_enable")
         tokens_url = reverse("orgs.user_two_factor_tokens")
         disable_url = reverse("orgs.user_two_factor_disable")
+        menu_url = reverse("orgs.org_menu") + "settings/"
 
-        self.login(self.admin, update_last_auth_on=False)
+        self.login(self.admin, update_last_auth_on=True)
 
-        # org home page tells us 2FA is disabled, links to page to enable it
-        response = self.client.get(reverse("orgs.org_home"))
-        self.assertContains(response, "Two-factor authentication is <b>disabled</b>")
+        # settings menu gives us option to enable
+        response = self.client.get(menu_url)
+        self.assertContains(response, "Enable 2FA")
         self.assertContains(response, enable_url)
 
         # view form to enable 2FA
@@ -458,11 +450,14 @@ class UserTest(TembaTest):
         with patch("pyotp.TOTP.verify", return_value=True):
             response = self.client.post(enable_url, {"otp": "123456", "password": "Qwerty123"})
         self.assertRedirect(response, tokens_url)
+
+        del self.admin.settings  # clear cached_property
         self.assertTrue(self.admin.settings.two_factor_enabled)
 
-        # org home page now tells us 2FA is enabled, links to page manage tokens
-        response = self.client.get(reverse("orgs.org_home"))
-        self.assertContains(response, "Two-factor authentication is <b>enabled</b>")
+        # settings menu now has a Security option which links to tokens page
+        response = self.client.get(menu_url)
+        self.assertContains(response, "Security")
+        self.assertContains(response, tokens_url)
 
         # view backup tokens page
         response = self.client.get(tokens_url)
@@ -490,7 +485,7 @@ class UserTest(TembaTest):
 
         # submit with valid password
         response = self.client.post(disable_url, {"password": "Qwerty123"})
-        self.assertRedirect(response, reverse("orgs.org_home"))
+        self.assertRedirect(response, reverse("orgs.user_two_factor_enable"))
 
         del self.admin.settings  # clear cached_property
         self.assertFalse(self.admin.settings.two_factor_enabled)
@@ -523,13 +518,14 @@ class UserTest(TembaTest):
 
     def test_two_factor_confirm_access(self):
         tokens_url = reverse("orgs.user_two_factor_tokens")
+        menu_url = reverse("orgs.org_menu") + "settings/"
 
         self.admin.enable_2fa()
         self.login(self.admin, update_last_auth_on=False)
 
-        # org home page tells us 2FA is enabled, links to page manage tokens
-        response = self.client.get(reverse("orgs.org_home"))
-        self.assertContains(response, "Two-factor authentication is <b>enabled</b>")
+        # settings menu tells us 2FA is enabled, links to page manage tokens
+        response = self.client.get(menu_url)
+        self.assertContains(response, "Security")
         self.assertContains(response, tokens_url)
 
         # but navigating to tokens page redirects to confirm auth
@@ -556,7 +552,7 @@ class UserTest(TembaTest):
 
     @override_settings(USER_LOCKOUT_TIMEOUT=1, USER_FAILED_LOGIN_LIMIT=3)
     def test_confirm_access(self):
-        confirm_url = reverse("users.confirm_access") + "?next=/msg/inbox/"
+        confirm_url = reverse("users.confirm_access") + "?next=/msg/"
         failed_url = reverse("users.user_failed")
 
         # try to access before logging in
@@ -589,7 +585,7 @@ class UserTest(TembaTest):
 
         # and also correct ones
         response = self.client.post(confirm_url, {"password": "Qwerty123"})
-        self.assertRedirect(response, "/msg/inbox/")
+        self.assertRedirect(response, "/msg/")
 
     def test_ui_permissions(self):
         # non-logged in users can't go here
@@ -609,18 +605,13 @@ class UserTest(TembaTest):
         self.assertTrue(self.editor.is_active)
 
     def test_ui_management(self):
-
         # only customer support gets in on this sweet action
         self.login(self.customer_support)
 
         # one of our users should belong to a bunch of orgs
         for i in range(5):
             org = Org.objects.create(
-                name=f"Org {i}",
-                timezone=pytz.timezone("Africa/Kigali"),
-                brand=settings.DEFAULT_BRAND,
-                created_by=self.user,
-                modified_by=self.user,
+                name=f"Org {i}", timezone=pytz.timezone("Africa/Kigali"), created_by=self.user, modified_by=self.user
             )
             org.add_user(self.admin, OrgRole.ADMINISTRATOR)
 
@@ -633,81 +624,15 @@ class UserTest(TembaTest):
         self.editor.refresh_from_db()
         self.assertFalse(self.editor.is_active)
 
-    def test_release_cross_brand(self):
-        # create a second org
-        branded_org = Org.objects.create(
-            name="Other Brand Org",
-            timezone=pytz.timezone("Africa/Kigali"),
-            brand="some-other-brand",
-            created_by=self.admin,
-            modified_by=self.admin,
-        )
-
-        branded_org.add_user(self.admin, OrgRole.ADMINISTRATOR)
-
-        # now release our user on our primary brand
-        self.admin.release(self.customer_support, brand=settings.DEFAULT_BRAND)
-
-        # our admin should still be good
-        self.admin.refresh_from_db()
-        self.assertTrue(self.admin.is_active)
-        self.assertEqual("admin@nyaruka.com", self.admin.email)
-
-        # but she should be removed from org
-        self.assertFalse(self.admin.get_orgs(brand="rapidpro").exists())
-
-        # now lets release her from the branded org
-        self.admin.release(self.customer_support, brand="some-other-brand")
-
-        # now she gets deactivated and ambiguated and belongs to no orgs
-        self.assertFalse(self.admin.is_active)
-        self.assertNotEqual("admin@nyaruka.com", self.admin.email)
-        self.assertFalse(self.admin.get_orgs().exists())
-
-    def test_brand_aliases(self):
-        # set our brand to our custom org
-        self.org.brand = "custom"
-        self.org.save(update_fields=("brand",))
-
-        # create a second org on the .org version
-        branded_org = Org.objects.create(
-            name="Other Brand Org",
-            timezone=pytz.timezone("Africa/Kigali"),
-            brand="custom",
-            created_by=self.admin,
-            modified_by=self.admin,
-        )
-        branded_org.add_user(self.admin, OrgRole.ADMINISTRATOR)
-        self.org2.add_user(self.admin, OrgRole.ADMINISTRATOR)
-
-        # log in as admin
-        self.login(self.admin)
-
-        # check our choose page
-        response = self.client.get(reverse("orgs.org_choose"), SERVER_NAME="custom-brand.org")
-        self.assertEqual("custom", response.context["request"].branding["slug"])
-
-        # should contain both orgs
-        self.assertContains(response, "Other Brand Org")
-        self.assertContains(response, "Nyaruka")
-        self.assertNotContains(response, "Trileet Inc")
-
-        # choose it
-        response = self.client.post(
-            reverse("orgs.org_choose"), dict(organization=self.org.id), SERVER_NAME="custom-brand.org"
-        )
-        self.assertRedirect(response, "/msg/inbox/")
-
     def test_release(self):
-
         # admin doesn't "own" any orgs
         self.assertEqual(0, len(self.admin.get_owned_orgs()))
 
         # release all but our admin
-        self.surveyor.release(self.customer_support, brand=self.org.brand)
-        self.editor.release(self.customer_support, brand=self.org.brand)
-        self.user.release(self.customer_support, brand=self.org.brand)
-        self.agent.release(self.customer_support, brand=self.org.brand)
+        self.surveyor.release(self.customer_support)
+        self.editor.release(self.customer_support)
+        self.user.release(self.customer_support)
+        self.agent.release(self.customer_support)
 
         # still a user left, our org remains active
         self.org.refresh_from_db()
@@ -715,400 +640,27 @@ class UserTest(TembaTest):
 
         # now that we are the last user, we own it now
         self.assertEqual(1, len(self.admin.get_owned_orgs()))
-        self.admin.release(self.customer_support, brand=self.org.brand)
+        self.admin.release(self.customer_support)
 
         # and we take our org with us
         self.org.refresh_from_db()
         self.assertFalse(self.org.is_active)
 
 
-class OrgDeleteTest(TembaNonAtomicTest):
-    def setUp(self):
-        self.setUpOrgs()
-        self.setUpLocations()
-
-        # set up a sync event and alert on our channel
-        SyncEvent.create(
-            self.channel,
-            dict(pending=[], retry=[], power_source="P", power_status="full", power_level="100", network_type="W"),
-            [],
-        )
-        Alert.objects.create(
-            channel=self.channel, alert_type=Alert.TYPE_SMS, created_by=self.admin, modified_by=self.admin
-        )
-
-        # create a second child org
-        self.child_org = Org.objects.create(
-            name="Child Org",
-            timezone=pytz.timezone("Africa/Kigali"),
-            country=self.country,
-            brand=settings.DEFAULT_BRAND,
-            flow_languages=["eng"],
-            created_by=self.user,
-            modified_by=self.user,
-        )
-
-        # and give it its own channel
-        self.child_channel = self.create_channel(
-            "A",
-            "Test Channel",
-            "+250785551212",
-            secret="54321",
-            config={Channel.CONFIG_FCM_ID: "123"},
-            country="RW",
-            org=self.child_org,
-        )
-
-        # add a classifier
-        self.c1 = Classifier.create(self.org, self.admin, WitType.slug, "Booker", {}, sync=False)
-
-        # add a global
-        self.global1 = Global.get_or_create(self.org, self.admin, "org_name", "Org Name", "Acme Ltd")
-
-        HTTPLog.objects.create(
-            classifier=self.c1,
-            url="http://org2.bar/zap",
-            request="GET /zap",
-            response=" OK 200",
-            is_error=False,
-            log_type=HTTPLog.CLASSIFIER_CALLED,
-            request_time=10,
-            org=self.org,
-        )
-
-        # our user is a member of two orgs
-        self.parent_org = self.org
-        self.child_org.add_user(self.user, OrgRole.ADMINISTRATOR)
-        self.child_org.initialize()
-        self.child_org.parent = self.parent_org
-        self.child_org.save()
-
-        parent_contact = self.create_contact("Parent Contact", phone="+2345123", org=self.parent_org)
-        child_contact = self.create_contact("Child Contact", phone="+3456123", org=self.child_org)
-
-        # add some fields
-        parent_field = self.create_field("age", "Parent Age", org=self.parent_org)
-        parent_datetime_field = self.create_field(
-            "planting_date", "Planting Date", value_type=ContactField.TYPE_DATETIME, org=self.parent_org
-        )
-        child_field = self.create_field("age", "Child Age", org=self.child_org)
-
-        # add some groups
-        parent_group = self.create_group("Parent Customers", contacts=[parent_contact], org=self.parent_org)
-        child_group = self.create_group("Parent Customers", contacts=[child_contact], org=self.child_org)
-
-        # create an import for child group
-        im = ContactImport.objects.create(
-            org=self.org, group=child_group, mappings={}, num_records=0, created_by=self.admin, modified_by=self.admin
-        )
-
-        # and a batch for that import
-        ContactImportBatch.objects.create(contact_import=im, specs={}, record_start=0, record_end=0)
-
-        # add some labels
-        parent_label = self.create_label("Parent Spam", org=self.parent_org)
-        child_label = self.create_label("Child Spam", org=self.child_org)
-
-        # bring in some flows
-        parent_flow = self.get_flow("color_v13")
-        flow_nodes = parent_flow.get_definition()["nodes"]
-        (
-            MockSessionWriter(parent_contact, parent_flow)
-            .visit(flow_nodes[0])
-            .send_msg("What is your favorite color?", self.channel)
-            .visit(flow_nodes[4])
-            .wait()
-            .resume(msg=self.create_incoming_msg(parent_contact, "blue"))
-            .set_result("Color", "blue", "Blue", "blue")
-            .complete()
-            .save()
-        )
-        parent_flow.channel_dependencies.add(self.channel)
-
-        # and our child org too
-        self.org = self.child_org
-        child_flow = self.get_flow("color")
-
-        FlowRun.objects.create(
-            org=self.org,
-            flow=child_flow,
-            contact=child_contact,
-            status=FlowRun.STATUS_COMPLETED,
-            exited_on=timezone.now(),
-        )
-
-        # labels for our flows
-        flow_label1 = FlowLabel.create(self.parent_org, self.admin, "Cool Flows")
-        flow_label2 = FlowLabel.create(self.parent_org, self.admin, "Crazy Flows")
-        parent_flow.labels.add(flow_label1)
-        child_flow.labels.add(flow_label2)
-
-        # add a campaign, event and fire to our parent org
-        campaign = Campaign.create(self.parent_org, self.admin, "Reminders", parent_group)
-        event1 = CampaignEvent.create_flow_event(
-            self.parent_org,
-            self.admin,
-            campaign,
-            parent_datetime_field,
-            offset=1,
-            unit="W",
-            flow=parent_flow,
-            delivery_hour="13",
-        )
-        EventFire.objects.create(event=event1, contact=parent_contact, scheduled=timezone.now())
-
-        # triggers for our flows
-        parent_trigger = Trigger.create(
-            self.parent_org,
-            flow=parent_flow,
-            trigger_type=Trigger.TYPE_KEYWORD,
-            user=self.user,
-            channel=self.channel,
-            keyword="favorites",
-        )
-        parent_trigger.groups.add(self.parent_org.groups.all().first())
-
-        FlowStart.objects.create(org=self.parent_org, flow=parent_flow)
-
-        child_trigger = Trigger.create(
-            self.child_org,
-            flow=child_flow,
-            trigger_type=Trigger.TYPE_KEYWORD,
-            user=self.user,
-            channel=self.child_channel,
-            keyword="color",
-        )
-        child_trigger.groups.add(self.child_org.groups.all().first())
-
-        # use a credit on each
-        self.create_outgoing_msg(parent_contact, "Hola hija!", channel=self.channel)
-        self.create_outgoing_msg(child_contact, "Hola mama!", channel=self.child_channel)
-
-        # create a broadcast and some counts
-        bcast1 = self.create_broadcast(self.user, "Broadcast with messages", contacts=[parent_contact])
-        self.create_broadcast(self.user, "Broadcast with messages", contacts=[parent_contact], parent=bcast1)
-
-        # create some archives
-        self.mock_s3 = MockS3Client()
-
-        # make some exports with logs
-        export = ExportFlowResultsTask.create(
-            self.parent_org,
-            self.admin,
-            start_date=date.today(),
-            end_date=date.today(),
-            flows=[parent_flow],
-            with_fields=[parent_field],
-            with_groups=(),
-            responded_only=True,
-            extra_urns=(),
-        )
-        ExportFinishedNotificationType.create(export)
-        ExportFlowResultsTask.create(
-            self.child_org,
-            self.admin,
-            start_date=date.today(),
-            end_date=date.today(),
-            flows=[child_flow],
-            with_fields=[child_field],
-            with_groups=(),
-            responded_only=True,
-            extra_urns=(),
-        )
-
-        export = ExportContactsTask.create(self.parent_org, self.admin, group=parent_group)
-        ExportFinishedNotificationType.create(export)
-        ExportContactsTask.create(self.child_org, self.admin, group=child_group)
-
-        export = ExportMessagesTask.create(
-            self.parent_org, self.admin, start_date=date.today(), end_date=date.today(), label=parent_label
-        )
-        ExportFinishedNotificationType.create(export)
-        ExportMessagesTask.create(
-            self.child_org,
-            self.admin,
-            start_date=date.today(),
-            end_date=date.today(),
-            label=child_label,
-        )
-
-        def create_archive(org, period, rollup=None):
-            file = f"{org.id}/archive{Archive.objects.all().count()}.jsonl.gz"
-            body, md5, size = jsonlgz_encode([{"id": 1}])
-            archive = Archive.objects.create(
-                org=org,
-                url=f"http://{settings.ARCHIVE_BUCKET}.aws.com/{file}",
-                start_date=timezone.now(),
-                build_time=100,
-                archive_type=Archive.TYPE_MSG,
-                period=period,
-                rollup=rollup,
-                size=size,
-                hash=md5,
-            )
-            self.mock_s3.put_object(settings.ARCHIVE_BUCKET, file, body)
-            return archive
-
-        # parent archives
-        daily = create_archive(self.parent_org, Archive.PERIOD_DAILY)
-        create_archive(self.parent_org, Archive.PERIOD_MONTHLY, daily)
-
-        # child archives
-        daily = create_archive(self.child_org, Archive.PERIOD_DAILY)
-        create_archive(self.child_org, Archive.PERIOD_MONTHLY, daily)
-
-        # extra S3 file in child archive dir
-        self.mock_s3.put_object(settings.ARCHIVE_BUCKET, f"{self.child_org.id}/extra_file.json", io.StringIO("[]"))
-
-        # add a ticketer and ticket
-        ticketer = Ticketer.create(self.org, self.admin, MailgunType.slug, "Email (bob)", {})
-        ticket = self.create_ticket(ticketer, self.org.contacts.first(), "Help")
-        ticket.events.create(org=self.org, contact=ticket.contact, event_type="N", note="spam", created_by=self.admin)
-
-    def release_org(self, org, child_org=None, delete=False, expected_files=3):
-
-        with patch("temba.utils.s3.client", return_value=self.mock_s3):
-            # save off the ids of our current users
-            org_user_ids = list(org.users.values_list("id", flat=True))
-
-            # we should be starting with some mock s3 objects
-            self.assertEqual(5, len(self.mock_s3.objects))
-
-            # add in some webhook results
-            resthook = Resthook.get_or_create(org, "registration", self.admin)
-            resthook.subscribers.create(target_url="http://foo.bar", created_by=self.admin, modified_by=self.admin)
-            WebHookEvent.objects.create(org=org, resthook=resthook, data={})
-
-            TemplateTranslation.get_or_create(
-                self.channel,
-                "hello",
-                "eng",
-                "US",
-                "Hello {{1}}",
-                1,
-                TemplateTranslation.STATUS_APPROVED,
-                "1234",
-                "foo_namespace",
-            )
-
-            # release our primary org
-            org.release(self.customer_support)
-            if delete:
-                org.delete()
-
-            # all our users not in the other org should be inactive
-            self.assertEqual(len(org_user_ids) - 1, User.objects.filter(id__in=org_user_ids, is_active=False).count())
-            self.assertEqual(1, User.objects.filter(id__in=org_user_ids, is_active=True).count())
-
-            # our child org lost it's parent, but maintains an active lifestyle
-            if child_org:
-                child_org.refresh_from_db()
-                self.assertIsNone(child_org.parent)
-
-            if delete:
-                # oh noes, we deleted our archive files!
-                self.assertEqual(expected_files, len(self.mock_s3.objects))
-
-                # no template translations
-                self.assertFalse(TemplateTranslation.objects.filter(template__org=org).exists())
-                self.assertFalse(Template.objects.filter(org=org).exists())
-
-                # our channels are gone too
-                self.assertFalse(Channel.objects.filter(org=org).exists())
-
-                # as are our webhook events
-                self.assertFalse(WebHookEvent.objects.filter(org=org).exists())
-
-                # and labels
-                self.assertFalse(org.msgs_labels.exists())
-
-                # contacts, groups
-                self.assertFalse(Contact.objects.filter(org=org).exists())
-                self.assertFalse(ContactGroup.objects.filter(org=org).exists())
-
-                # flows, campaigns
-                self.assertFalse(Flow.objects.filter(org=org).exists())
-                self.assertFalse(Campaign.objects.filter(org=org).exists())
-
-                # msgs, broadcasts
-                self.assertFalse(Msg.objects.filter(org=org).exists())
-                self.assertFalse(Broadcast.objects.filter(org=org).exists())
-
-                # org is still around but has been released
-                self.assertTrue(Org.objects.filter(id=org.id, is_active=False).exclude(deleted_on=None).exists())
-            else:
-
-                org.refresh_from_db()
-                self.assertIsNone(org.deleted_on)
-                self.assertFalse(org.is_active)
-
-                # our channel should have been made inactive
-                self.assertFalse(Channel.objects.filter(org=org, is_active=True).exists())
-                self.assertTrue(Channel.objects.filter(org=org, is_active=False).exists())
-
-    def test_release_parent(self):
-        self.release_org(self.parent_org, self.child_org)
-
-    def test_release_child(self):
-        self.release_org(self.child_org)
-
-    def test_release_parent_and_delete(self):
-        with patch("temba.mailroom.client.MailroomClient.ticket_close"):
-            self.release_org(self.parent_org, self.child_org, delete=True)
-
-    def test_release_child_and_delete(self):
-        self.release_org(self.child_org, delete=True, expected_files=2)
-
-    def test_delete_task(self):
-        # can't delete an unreleased org
-        with self.assertRaises(AssertionError):
-            self.child_org.delete()
-
-        self.release_org(self.child_org, delete=False)
-
-        self.child_org.refresh_from_db()
-        self.assertFalse(self.child_org.is_active)
-        self.assertIsNotNone(self.child_org.released_on)
-        self.assertIsNone(self.child_org.deleted_on)
-
-        # push the released on date back in time
-        Org.objects.filter(id=self.child_org.id).update(released_on=timezone.now() - timedelta(days=10))
-
-        with patch("temba.utils.s3.client", return_value=self.mock_s3):
-            delete_released_orgs()
-
-        self.child_org.refresh_from_db()
-        self.assertFalse(self.child_org.is_active)
-        self.assertIsNotNone(self.child_org.released_on)
-        self.assertIsNotNone(self.child_org.deleted_on)
-
-        # parent org unaffected
-        self.parent_org.refresh_from_db()
-        self.assertTrue(self.parent_org.is_active)
-        self.assertIsNone(self.parent_org.released_on)
-        self.assertIsNone(self.parent_org.deleted_on)
-
-        # can't double delete an org
-        with self.assertRaises(AssertionError):
-            self.child_org.delete()
-
-
 class OrgTest(TembaTest):
     def test_create(self):
-        new_org = Org.create(self.admin, brands.get_by_slug("rapidpro"), "Cool Stuff", pytz.timezone("Africa/Kigali"))
+        new_org = Org.create(self.admin, "Cool Stuff", pytz.timezone("Africa/Kigali"))
         self.assertEqual("Cool Stuff", new_org.name)
-        self.assertEqual("rapidpro", new_org.brand)
         self.assertEqual(self.admin, new_org.created_by)
         self.assertEqual("en-us", new_org.language)
         self.assertEqual(["eng"], new_org.flow_languages)
         self.assertEqual("D", new_org.date_format)
         self.assertEqual(str(new_org.timezone), "Africa/Kigali")
         self.assertIn(self.admin, self.org.get_admins())
+        self.assertEqual('<Org: name="Cool Stuff">', repr(new_org))
 
         # if timezone is US, should get MMDDYYYY dates
-        new_org = Org.create(
-            self.admin, brands.get_by_slug("rapidpro"), "Cool Stuff", pytz.timezone("America/Los_Angeles")
-        )
+        new_org = Org.create(self.admin, "Cool Stuff", pytz.timezone("America/Los_Angeles"))
         self.assertEqual("M", new_org.date_format)
         self.assertEqual(str(new_org.timezone), "America/Los_Angeles")
 
@@ -1139,6 +691,31 @@ class OrgTest(TembaTest):
         self.assertEqual([self.admin, admin3], list(self.org.get_admins().order_by("id")))
         self.assertEqual([self.admin, self.admin2], list(self.org2.get_admins().order_by("id")))
 
+    def test_get_allowed_user_roles(self):
+        self.assertEqual(
+            [OrgRole.ADMINISTRATOR, OrgRole.EDITOR, OrgRole.VIEWER, OrgRole.AGENT, OrgRole.SURVEYOR],
+            self.org.get_allowed_user_roles(),
+        )
+
+        self.user.release(self.customer_support)
+        self.surveyor.release(self.customer_support)
+
+        # should lose viewer because org doesn't have that feature but keep surveyor because deploy has that feature
+        self.assertEqual(
+            [OrgRole.ADMINISTRATOR, OrgRole.EDITOR, OrgRole.AGENT, OrgRole.SURVEYOR],
+            self.org.get_allowed_user_roles(),
+        )
+
+        self.org.features = [Org.FEATURE_VIEWERS]
+        self.org.save(update_fields=("features",))
+
+        with self.settings(FEATURES=[]):
+            # should gain viewer because it's a feature and lose surveyor
+            self.assertEqual(
+                [OrgRole.ADMINISTRATOR, OrgRole.EDITOR, OrgRole.VIEWER, OrgRole.AGENT],
+                self.org.get_allowed_user_roles(),
+            )
+
     def test_get_owner(self):
         # admins take priority
         self.assertEqual(self.admin, self.org.get_owner())
@@ -1164,6 +741,38 @@ class OrgTest(TembaTest):
         self.assertEqual(Org.get_unique_slug("Which part?"), "which-part")
         self.assertEqual(Org.get_unique_slug("Allo"), "allo-2")
 
+    def test_suspend_and_unsuspend(self):
+        def assert_org(org, is_suspended):
+            org.refresh_from_db()
+            self.assertEqual(is_suspended, org.is_suspended)
+
+        self.org.features += [Org.FEATURE_CHILD_ORGS]
+        org1_child1 = self.org.create_new(self.admin, "Child 1", timezone.utc, as_child=True)
+        org1_child2 = self.org.create_new(self.admin, "Child 2", timezone.utc, as_child=True)
+
+        self.org.suspend()
+
+        assert_org(self.org, is_suspended=True)
+        assert_org(org1_child1, is_suspended=True)
+        assert_org(org1_child2, is_suspended=True)
+        assert_org(self.org2, is_suspended=False)
+
+        self.assertEqual(1, self.org.incidents.filter(incident_type="org:suspended", ended_on=None).count())
+
+        self.org.suspend()  # noop
+
+        assert_org(self.org, is_suspended=True)
+
+        self.assertEqual(1, self.org.incidents.filter(incident_type="org:suspended", ended_on=None).count())
+
+        self.org.unsuspend()
+
+        assert_org(self.org, is_suspended=False)
+        assert_org(org1_child1, is_suspended=False)
+        assert_org(self.org2, is_suspended=False)
+
+        self.assertEqual(0, self.org.incidents.filter(incident_type="org:suspended", ended_on=None).count())
+
     def test_set_flow_languages(self):
         self.org.set_flow_languages(self.admin, ["eng", "fra"])
         self.org.refresh_from_db()
@@ -1181,7 +790,7 @@ class OrgTest(TembaTest):
     def test_country_view(self):
         self.setUpLocations()
 
-        home_url = reverse("orgs.org_home")
+        settings_url = reverse("orgs.org_workspace")
         country_url = reverse("orgs.org_country")
 
         rwanda = AdminBoundary.objects.get(name="Rwanda")
@@ -1202,12 +811,12 @@ class OrgTest(TembaTest):
         self.assertEqual("Rwanda", str(self.org.country))
         self.assertEqual("RW", self.org.default_country_code)
 
-        response = self.client.get(home_url)
+        response = self.client.get(settings_url)
         self.assertContains(response, "Rwanda")
 
         # if location support is disabled in the settings, don't display country formax
-        with override_settings(FEATURES={}):
-            response = self.client.get(home_url)
+        with override_settings(FEATURES=[]):
+            response = self.client.get(settings_url)
             self.assertNotContains(response, "Rwanda")
 
     def test_default_country(self):
@@ -1243,7 +852,6 @@ class OrgTest(TembaTest):
 
     @patch("temba.utils.email.send_temba_email")
     def test_user_forget(self, mock_send_temba_email):
-
         invitation = Invitation.objects.create(
             org=self.org,
             user_group="A",
@@ -1356,12 +964,13 @@ class OrgTest(TembaTest):
         response = self.client.get(reverse("msgs.broadcast_send"))
         self.assertContains(response, expected_message)
 
+        start_url = f"{reverse('flows.flow_start', args=[])}?flow={flow.id}"
         # we also can't start flows
         self.assertRaises(
             AssertionError,
             self.client.post,
-            reverse("flows.flow_broadcast", args=[]),
-            {"flow": flow.id, "query": f'uuid="{mark.uuid}"', "type": "contact"},
+            start_url,
+            {"flow": flow.id, "contact_search": get_contact_search(query='uuid="{mark.uuid}"')},
         )
 
         response = send_broadcast_via_api()
@@ -1384,8 +993,8 @@ class OrgTest(TembaTest):
         self.assertRaises(
             AssertionError,
             self.client.post,
-            reverse("flows.flow_broadcast", args=[]),
-            {"flow": flow.id, "query": f'uuid="{mark.uuid}"', "type": "contact"},
+            start_url,
+            {"flow": flow.id, "contact_search": get_contact_search(query='uuid="{mark.uuid}"')},
         )
 
         response = send_broadcast_via_api()
@@ -1407,51 +1016,16 @@ class OrgTest(TembaTest):
         self.org.save(update_fields=("is_suspended",))
 
         self.client.post(
-            reverse("flows.flow_broadcast", args=[]),
-            {"flow": flow.id, "query": f'uuid="{mark.uuid}"', "type": "contact"},
+            start_url,
+            {"flow": flow.id, "contact_search": get_contact_search(query='uuid="{mark.uuid}"')},
         )
 
         mock_async_start.assert_called_once()
 
-    def test_accounts(self):
-        url = reverse("orgs.org_accounts")
-        self.login(self.admin)
-        response = self.client.get(url)
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "If you use the RapidPro Surveyor application to run flows offline")
-
-        Org.objects.create(
-            name="Another Org",
-            timezone="Africa/Kigali",
-            brand="rapidpro",
-            created_by=self.user,
-            modified_by=self.user,
-            surveyor_password="nyaruka",
-        )
-
-        response = self.client.post(url, dict(surveyor_password="nyaruka"))
-        self.org.refresh_from_db()
-        self.assertContains(response, "This password is not valid. Choose a new password and try again.")
-        self.assertIsNone(self.org.surveyor_password)
-
-        # now try again, but with a unique password
-        response = self.client.post(url, dict(surveyor_password="unique password"))
-        self.org.refresh_from_db()
-        self.assertEqual("unique password", self.org.surveyor_password)
-
-        # add an extra editor
-        editor = self.create_user("EditorTwo")
-        self.org.add_user(editor, OrgRole.EDITOR)
-        self.surveyor.delete()
-
-        # fetch it as a formax so we can inspect the summary
-        response = self.client.get(url, HTTP_X_FORMAX=1, HTTP_X_PJAX=1)
-        self.assertContains(response, "1 Administrator, 2 Editors, 1 Viewer, and 1 Agent.")
-
     def test_refresh_tokens(self):
         self.login(self.admin)
-        url = reverse("orgs.org_home")
-        response = self.client.get(url)
+        settings_url = reverse("orgs.org_workspace")
+        response = self.client.get(settings_url)
 
         # admin should have a token
         token = APIToken.objects.get(user=self.admin)
@@ -1463,7 +1037,7 @@ class OrgTest(TembaTest):
         self.client.post(reverse("api.apitoken_refresh"))
 
         # visit our account page again
-        response = self.client.get(url)
+        response = self.client.get(settings_url)
 
         # old token no longer there
         self.assertNotContains(response, token.key)
@@ -1489,14 +1063,14 @@ class OrgTest(TembaTest):
 
         # but can see it as an editor
         self.login(self.editor)
-        response = self.client.get(url)
+        response = self.client.get(settings_url)
         token = APIToken.objects.get(user=self.editor)
         self.assertContains(response, token.key)
 
     @override_settings(SEND_EMAILS=True)
     def test_manage_accounts(self):
         url = reverse("orgs.org_manage_accounts")
-        home_url = reverse("orgs.org_home")
+        settings_url = reverse("orgs.org_workspace")
 
         # can't access as editor
         self.login(self.editor)
@@ -1506,9 +1080,9 @@ class OrgTest(TembaTest):
         # can't access as admin either because we don't have that feature enabled
         self.login(self.admin)
         response = self.client.get(url)
-        self.assertRedirect(response, home_url)
+        self.assertRedirect(response, settings_url)
 
-        self.org.features = [Org.FEATURE_USERS]
+        self.org.features = [Org.FEATURE_USERS, Org.FEATURE_VIEWERS]
         self.org.save(update_fields=("features",))
 
         response = self.client.get(url)
@@ -1669,7 +1243,7 @@ class OrgTest(TembaTest):
                 "invite_role": "V",
             },
         )
-        self.assertFormError(response, "form", "__all__", "A workspace must have at least one administrator.")
+        self.assertFormError(response, "form", None, "A workspace must have at least one administrator.")
 
         # try to downgrade ourselves to an editor
         response = self.client.post(
@@ -1683,7 +1257,7 @@ class OrgTest(TembaTest):
                 "invite_role": "V",
             },
         )
-        self.assertFormError(response, "form", "__all__", "A workspace must have at least one administrator.")
+        self.assertFormError(response, "form", None, "A workspace must have at least one administrator.")
 
         # finally upgrade agent to admin, downgrade editor to surveyor, remove ourselves entirely and remove last invite
         last_invite = Invitation.objects.last()
@@ -1799,6 +1373,18 @@ class OrgTest(TembaTest):
         self.assertEqual(2, Invitation.objects.filter(is_active=True).count())
         self.assertTrue(Invitation.objects.filter(is_active=True, email="code@temba.com").exists())
         self.assertEqual(4, len(mail.outbox))
+
+        # check restriction of roles - remove viewer (org level) and surveyor (deploy level) features
+        self.org.features = [Org.FEATURE_USERS]
+        self.org.save(update_fields=("features",))
+
+        with self.settings(FEATURES=[]):
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                [("A", "Administrator"), ("E", "Editor"), ("T", "Agent")],
+                response.context["form"].fields["invite_role"].choices,
+            )
 
     @patch("temba.utils.email.send_temba_email")
     def test_join(self, mock_send_temba_email):
@@ -2015,9 +1601,7 @@ class OrgTest(TembaTest):
         # try creating a surveyor account with a bogus password
         post_data = dict(surveyor_password="badpassword")
         response = self.client.post(url, post_data)
-        self.assertContains(
-            response, "Invalid surveyor password, please check with your project leader and try again."
-        )
+        self.assertContains(response, "Invalid surveyor password, please check with your project leader and try again.")
 
         # put a space in the org name to test URL encoding and set a surveyor password
         self.org.name = "Temba Org"
@@ -2080,129 +1664,6 @@ class OrgTest(TembaTest):
         # and that we have the surveyor role
         self.assertEqual(OrgRole.SURVEYOR, self.org.get_user_role(User.objects.get(username="beastmode@seahawks.com")))
 
-    @patch("temba.orgs.views.Client", MockTwilioClient)
-    @patch("twilio.request_validator.RequestValidator", MockRequestValidator)
-    def test_twilio_connect(self):
-        with patch("temba.tests.twilio.MockTwilioClient.MockAccounts.get") as mock_get:
-            mock_get.return_value = MockTwilioClient.MockAccount("Full")
-
-            connect_url = reverse("orgs.org_twilio_connect")
-
-            self.login(self.admin)
-
-            response = self.client.get(connect_url)
-            self.assertEqual(200, response.status_code)
-            self.assertEqual(list(response.context["form"].fields.keys()), ["account_sid", "account_token", "loc"])
-
-            # try posting without an account token
-            post_data = {"account_sid": "AccountSid"}
-            response = self.client.post(connect_url, post_data)
-            self.assertFormError(response, "form", "account_token", "This field is required.")
-
-            # now add the account token and try again
-            post_data["account_token"] = "AccountToken"
-
-            # but with an unexpected exception
-            with patch("temba.tests.twilio.MockTwilioClient.__init__") as mock:
-                mock.side_effect = Exception("Unexpected")
-                response = self.client.post(connect_url, post_data)
-                self.assertFormError(
-                    response,
-                    "form",
-                    "__all__",
-                    "The Twilio account SID and Token seem invalid. " "Please check them again and retry.",
-                )
-
-            self.client.post(connect_url, post_data)
-
-            self.org.refresh_from_db()
-            self.assertEqual(self.org.config["ACCOUNT_SID"], "AccountSid")
-            self.assertEqual(self.org.config["ACCOUNT_TOKEN"], "AccountToken")
-
-            # when the user submit the secondary token, we use it to get the primary one from the rest API
-            with patch("temba.tests.twilio.MockTwilioClient.MockAccounts.get") as mock_get_primary:
-                with patch("twilio.rest.api.v2010.account.AccountContext.fetch") as mock_account_fetch:
-                    mock_get_primary.return_value = MockTwilioClient.MockAccount("Full", "PrimaryAccountToken")
-                    mock_account_fetch.return_value = MockTwilioClient.MockAccount("Full", "PrimaryAccountToken")
-
-                    response = self.client.post(connect_url, post_data)
-                    self.assertEqual(response.status_code, 302)
-
-                    response = self.client.post(connect_url, post_data, follow=True)
-                    self.assertEqual(response.request["PATH_INFO"], reverse("channels.types.twilio.claim"))
-
-                    self.org.refresh_from_db()
-                    self.assertEqual(self.org.config["ACCOUNT_SID"], "AccountSid")
-                    self.assertEqual(self.org.config["ACCOUNT_TOKEN"], "PrimaryAccountToken")
-
-                    twilio_account_url = reverse("orgs.org_twilio_account")
-                    response = self.client.get(twilio_account_url)
-                    self.assertEqual("AccountSid", response.context["account_sid"])
-
-                    self.org.refresh_from_db()
-                    config = self.org.config
-                    self.assertEqual("AccountSid", config["ACCOUNT_SID"])
-                    self.assertEqual("PrimaryAccountToken", config["ACCOUNT_TOKEN"])
-
-                    # post without a sid or token, should get a form validation error
-                    response = self.client.post(twilio_account_url, dict(disconnect="false"), follow=True)
-                    self.assertEqual(
-                        '[{"message": "You must enter your Twilio Account SID", "code": ""}]',
-                        response.context["form"].errors["__all__"].as_json(),
-                    )
-
-                    # all our twilio creds should remain the same
-                    self.org.refresh_from_db()
-                    config = self.org.config
-                    self.assertEqual(config["ACCOUNT_SID"], "AccountSid")
-                    self.assertEqual(config["ACCOUNT_TOKEN"], "PrimaryAccountToken")
-
-                    # now try with all required fields, and a bonus field we shouldn't change
-                    self.client.post(
-                        twilio_account_url,
-                        dict(
-                            account_sid="AccountSid",
-                            account_token="SecondaryToken",
-                            disconnect="false",
-                            name="DO NOT CHANGE ME",
-                        ),
-                        follow=True,
-                    )
-                    # name shouldn't change
-                    self.org.refresh_from_db()
-                    self.assertEqual(self.org.name, "Nyaruka")
-
-                    # now disconnect our twilio connection
-                    self.assertTrue(self.org.is_connected_to_twilio())
-                    self.client.post(twilio_account_url, dict(disconnect="true", follow=True))
-
-                    self.org.refresh_from_db()
-                    self.assertFalse(self.org.is_connected_to_twilio())
-
-                    response = self.client.post(
-                        f'{reverse("orgs.org_twilio_connect")}?claim_type=twilio', post_data, follow=True
-                    )
-                    self.assertEqual(response.request["PATH_INFO"], reverse("channels.types.twilio.claim"))
-
-                    response = self.client.post(
-                        f'{reverse("orgs.org_twilio_connect")}?claim_type=twilio_messaging_service',
-                        post_data,
-                        follow=True,
-                    )
-                    self.assertEqual(
-                        response.request["PATH_INFO"], reverse("channels.types.twilio_messaging_service.claim")
-                    )
-
-                    response = self.client.post(
-                        f'{reverse("orgs.org_twilio_connect")}?claim_type=twilio_whatsapp', post_data, follow=True
-                    )
-                    self.assertEqual(response.request["PATH_INFO"], reverse("channels.types.twilio_whatsapp.claim"))
-
-                    response = self.client.post(
-                        f'{reverse("orgs.org_twilio_connect")}?claim_type=unknown', post_data, follow=True
-                    )
-                    self.assertEqual(response.request["PATH_INFO"], reverse("channels.channel_claim"))
-
     def test_has_airtime_transfers(self):
         AirtimeTransfer.objects.filter(org=self.org).delete()
         self.assertFalse(self.org.has_airtime_transfers())
@@ -2222,15 +1683,15 @@ class OrgTest(TembaTest):
     def test_prometheus(self):
         # visit as viewer, no prometheus section
         self.login(self.user)
-        org_home_url = reverse("orgs.org_home")
-        response = self.client.get(org_home_url)
+        settings_url = reverse("orgs.org_workspace")
+        response = self.client.get(settings_url)
 
         self.assertNotContains(response, "Prometheus")
 
         # admin can see it though
         self.login(self.admin)
 
-        response = self.client.get(org_home_url)
+        response = self.client.get(settings_url)
         self.assertContains(response, "Prometheus")
         self.assertContains(response, "Enable Prometheus")
 
@@ -2248,7 +1709,7 @@ class OrgTest(TembaTest):
         self.org.add_user(self.other_admin, OrgRole.ADMINISTRATOR)
         self.login(self.other_admin)
 
-        response = self.client.get(org_home_url)
+        response = self.client.get(settings_url)
         self.assertContains(response, "Prometheus")
         self.assertContains(response, "Disable Prometheus")
 
@@ -2258,7 +1719,6 @@ class OrgTest(TembaTest):
         self.assertContains(response, "Enable Prometheus")
 
     def test_resthooks(self):
-        home_url = reverse("orgs.org_home")
         resthook_url = reverse("orgs.org_resthooks")
 
         # no hitting this page without auth
@@ -2272,9 +1732,6 @@ class OrgTest(TembaTest):
 
         # shouldn't have any resthooks listed yet
         self.assertFalse(response.context["current_resthooks"])
-
-        response = self.client.get(home_url)
-        self.assertContains(response, "You have <b>no flow events</b> configured.")
 
         # try to create one with name that's too long
         response = self.client.post(resthook_url, {"new_slug": "x" * 100})
@@ -2296,10 +1753,6 @@ class OrgTest(TembaTest):
             [{"field": f"resthook_{mother_reg.id}", "resthook": mother_reg}],
             list(response.context["current_resthooks"]),
         )
-
-        # and summarized on org home page
-        response = self.client.get(home_url)
-        self.assertContains(response, "You have <b>1 flow event</b> configured.")
 
         # let's try to create a repeat, should fail due to duplicate slug
         response = self.client.post(resthook_url, {"new_slug": "Mother-Registration"})
@@ -2325,11 +1778,11 @@ class OrgTest(TembaTest):
     def test_smtp_server(self):
         self.login(self.admin)
 
-        home_url = reverse("orgs.org_home")
+        settings_url = reverse("orgs.org_workspace")
         config_url = reverse("orgs.org_smtp_server")
 
         # orgs without SMTP settings see default from address
-        response = self.client.get(home_url)
+        response = self.client.get(settings_url)
         self.assertContains(response, "Emails sent from flows will be sent from <b>no-reply@temba.io</b>.")
         self.assertEqual("no-reply@temba.io", response.context["from_email_default"])
         self.assertEqual(None, response.context["from_email_custom"])
@@ -2585,102 +2038,6 @@ class OrgTest(TembaTest):
             },
         )
 
-    @patch("temba.channels.types.vonage.client.VonageClient.check_credentials")
-    def test_connect_vonage(self, mock_check_credentials):
-        self.login(self.admin)
-
-        connect_url = reverse("orgs.org_vonage_connect")
-        account_url = reverse("orgs.org_vonage_account")
-
-        # simulate invalid credentials on both pages
-        mock_check_credentials.return_value = False
-
-        response = self.client.post(connect_url, {"api_key": "key", "api_secret": "secret"})
-        self.assertContains(response, "Your API key and secret seem invalid.")
-        self.assertFalse(self.org.is_connected_to_vonage())
-
-        response = self.client.post(account_url, {"api_key": "key", "api_secret": "secret"})
-        self.assertContains(response, "Your API key and secret seem invalid.")
-
-        # ok, now with a success
-        mock_check_credentials.return_value = True
-
-        response = self.client.post(connect_url, {"api_key": "key", "api_secret": "secret"})
-        self.assertEqual(response.status_code, 302)
-
-        response = self.client.get(account_url)
-        self.assertEqual("key", response.context["api_key"])
-
-        self.org.refresh_from_db()
-        self.assertEqual("key", self.org.config[Org.CONFIG_VONAGE_KEY])
-        self.assertEqual("secret", self.org.config[Org.CONFIG_VONAGE_SECRET])
-
-        # post without API token, should get validation error
-        response = self.client.post(account_url, {"disconnect": "false"})
-        self.assertFormError(response, "form", "__all__", "You must enter your account API Key")
-
-        # vonage config should remain the same
-        self.org.refresh_from_db()
-        self.assertEqual("key", self.org.config[Org.CONFIG_VONAGE_KEY])
-        self.assertEqual("secret", self.org.config[Org.CONFIG_VONAGE_SECRET])
-
-        # now try with all required fields, and a bonus field we shouldn't change
-        self.client.post(
-            account_url,
-            {"api_key": "other_key", "api_secret": "secret-too", "disconnect": "false", "name": "DO NOT CHANGE ME"},
-        )
-        # name shouldn't change
-        self.org.refresh_from_db()
-        self.assertEqual(self.org.name, "Nyaruka")
-
-        # should change vonage config
-        self.client.post(account_url, {"api_key": "other_key", "api_secret": "secret-too", "disconnect": "false"})
-
-        self.org.refresh_from_db()
-        self.assertEqual("other_key", self.org.config[Org.CONFIG_VONAGE_KEY])
-        self.assertEqual("secret-too", self.org.config[Org.CONFIG_VONAGE_SECRET])
-
-        self.assertTrue(self.org.is_connected_to_vonage())
-        self.client.post(account_url, dict(disconnect="true"), follow=True)
-
-        self.org.refresh_from_db()
-        self.assertFalse(self.org.is_connected_to_vonage())
-
-        # and disconnect
-        self.org.remove_vonage_account(self.admin)
-        self.assertFalse(self.org.is_connected_to_vonage())
-        self.assertNotIn("NEXMO_KEY", self.org.config)
-        self.assertNotIn("NEXMO_SECRET", self.org.config)
-
-    def test_connect_plivo(self):
-        self.login(self.admin)
-
-        # connect plivo
-        connect_url = reverse("orgs.org_plivo_connect")
-
-        # simulate invalid credentials
-        with patch("requests.get") as mock_get:
-            mock_get.return_value = MockResponse(
-                401, "Could not verify your access level for that URL." "\nYou have to login with proper credentials"
-            )
-            response = self.client.post(connect_url, dict(auth_id="auth-id", auth_token="auth-token"))
-            self.assertContains(
-                response, "Your Plivo auth ID and auth token seem invalid. Please check them again and retry."
-            )
-            self.assertFalse(Channel.CONFIG_PLIVO_AUTH_ID in self.client.session)
-            self.assertFalse(Channel.CONFIG_PLIVO_AUTH_TOKEN in self.client.session)
-
-        # ok, now with a success
-        with patch("requests.get") as mock_get:
-            mock_get.return_value = MockResponse(200, json.dumps(dict()))
-            response = self.client.post(connect_url, dict(auth_id="auth-id", auth_token="auth-token"))
-
-            # plivo should be added to the session
-            self.assertEqual(self.client.session[Channel.CONFIG_PLIVO_AUTH_ID], "auth-id")
-            self.assertEqual(self.client.session[Channel.CONFIG_PLIVO_AUTH_TOKEN], "auth-token")
-
-            self.assertRedirect(response, reverse("channels.types.plivo.claim"))
-
     def test_org_get_limit(self):
         self.assertEqual(self.org.get_limit(Org.LIMIT_FIELDS), 250)
         self.assertEqual(self.org.get_limit(Org.LIMIT_GROUPS), 250)
@@ -2712,26 +2069,12 @@ class OrgTest(TembaTest):
 
         sub_org = self.org.create_new(self.admin, "Sub Org", self.org.timezone, as_child=True)
 
-        # we should be linked to our parent with the same brand
+        # we should be linked to our parent
         self.assertEqual(self.org, sub_org.parent)
-        self.assertEqual(self.org.brand, sub_org.brand)
         self.assertEqual(self.admin, sub_org.created_by)
 
         # default values should be the same as parent
         self.assertEqual(self.org.timezone, sub_org.timezone)
-
-        self.login(self.admin, choose_org=self.org)
-
-        response = self.client.get(reverse("orgs.org_edit"))
-        self.assertEqual(200, response.status_code)
-        self.assertEqual(len(response.context["sub_orgs"]), 1)
-
-        # sub_org is deleted
-        sub_org.release(self.customer_support)
-
-        response = self.client.get(reverse("orgs.org_edit"))
-        self.assertEqual(200, response.status_code)
-        self.assertEqual(len(response.context["sub_orgs"]), 0)
 
     @patch("temba.msgs.tasks.export_messages_task.delay")
     @patch("temba.flows.tasks.export_flow_results_task.delay")
@@ -2778,6 +2121,406 @@ class OrgTest(TembaTest):
         mock_export_contacts_task.assert_called_once()
         mock_export_flow_results_task.assert_called_once()
         mock_export_messages_task.assert_called_once()
+
+
+class OrgDeleteTest(TembaTest):
+    def setUp(self):
+        super().setUp()
+
+        self.mock_s3 = MockS3Client()
+
+    def create_content(self, org, user) -> list:
+        # add child workspaces
+        org.features = [Org.FEATURE_CHILD_ORGS]
+        org.save(update_fields=("features",))
+        org.create_new(user, "Child 1", "Africa/Kigali", as_child=True)
+        org.create_new(user, "Child 2", "Africa/Kigali", as_child=True)
+
+        content = []
+
+        def add(obj):
+            content.append(obj)
+            return obj
+
+        channels = self._create_channel_content(org, add)
+        contacts, fields, groups = self._create_contact_content(org, add)
+        flows = self._create_flow_content(org, user, channels, contacts, groups, add)
+        labels = self._create_message_content(org, user, channels, contacts, groups, add)
+        self._create_campaign_content(org, user, fields, groups, flows, contacts, add)
+        self._create_ticket_content(org, user, contacts, flows, add)
+        self._create_export_content(org, user, flows, groups, fields, labels, add)
+        self._create_archive_content(org, add)
+
+        # suspend and flag org to generate incident and notifications
+        org.suspend()
+        org.unsuspend()
+        org.flag()
+        org.unflag()
+        for incident in org.incidents.all():
+            add(incident)
+
+        return content
+
+    def _create_channel_content(self, org, add) -> tuple:
+        channel1 = add(self.create_channel("TG", "Telegram", "+250785551212", org=org))
+        channel2 = add(self.create_channel("A", "Android", "+1234567890", org=org))
+        channel3 = add(self.create_channel("T", "Twilio", "+1098765432", parent=channel2, org=org))
+        add(
+            SyncEvent.create(
+                channel2,
+                dict(pending=[], retry=[], power_source="P", power_status="full", power_level="100", network_type="W"),
+                [],
+            )
+        )
+        add(
+            Alert.objects.create(
+                channel=channel2, alert_type=Alert.TYPE_POWER, created_by=self.admin, modified_by=self.admin
+            )
+        )
+        add(ChannelLog.objects.create(channel=channel1, log_type=ChannelLog.LOG_TYPE_MSG_SEND))
+        add(
+            HTTPLog.objects.create(
+                org=org, channel=channel2, log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, request_time=10, is_error=False
+            )
+        )
+
+        return (channel1, channel2, channel3)
+
+    def _create_flow_content(self, org, user, channels, contacts, groups, add) -> tuple:
+        flow1 = add(self.create_flow("Registration", org=org))
+        flow2 = add(self.create_flow("Goodbye", org=org))
+
+        start1 = add(FlowStart.objects.create(org=org, flow=flow1))
+        add(FlowStartCount.objects.create(start=start1, count=1))
+
+        add(
+            Trigger.create(
+                org,
+                user,
+                flow=flow1,
+                trigger_type=Trigger.TYPE_KEYWORD,
+                keyword="color",
+                match_type=Trigger.MATCH_FIRST_WORD,
+                groups=groups,
+            )
+        )
+        add(
+            Trigger.create(
+                org,
+                user,
+                flow=flow1,
+                trigger_type=Trigger.TYPE_NEW_CONVERSATION,
+                channel=channels[0],
+                groups=groups,
+            )
+        )
+        session1 = add(
+            FlowSession.objects.create(
+                uuid=uuid4(),
+                org=org,
+                contact=contacts[0],
+                current_flow=flow1,
+                status=FlowSession.STATUS_WAITING,
+                output_url="http://sessions.com/123.json",
+                wait_started_on=datetime(2022, 1, 1, 0, 0, 0, 0, pytz.UTC),
+                wait_expires_on=datetime(2022, 1, 2, 0, 0, 0, 0, pytz.UTC),
+                wait_resume_on_expire=False,
+            )
+        )
+        add(
+            FlowRun.objects.create(
+                org=org,
+                flow=flow1,
+                contact=contacts[0],
+                session=session1,
+                status=FlowRun.STATUS_COMPLETED,
+                exited_on=timezone.now(),
+            )
+        )
+        contacts[0].current_flow = flow1
+        contacts[0].save(update_fields=("current_flow",))
+
+        flow_label1 = add(FlowLabel.create(org, user, "Cool Flows"))
+        flow_label2 = add(FlowLabel.create(org, user, "Crazy Flows"))
+        flow1.labels.add(flow_label1)
+        flow2.labels.add(flow_label2)
+
+        global1 = add(Global.get_or_create(org, user, "org_name", "Org Name", "Acme Ltd"))
+        flow1.global_dependencies.add(global1)
+
+        classifier1 = add(Classifier.create(org, user, WitType.slug, "Booker", {}, sync=False))
+        add(
+            HTTPLog.objects.create(
+                classifier=classifier1,
+                url="http://org2.bar/zap",
+                request="GET /zap",
+                response=" OK 200",
+                is_error=False,
+                log_type=HTTPLog.CLASSIFIER_CALLED,
+                request_time=10,
+                org=org,
+            )
+        )
+        flow1.classifier_dependencies.add(classifier1)
+
+        resthook = add(Resthook.get_or_create(org, "registration", user))
+        resthook.subscribers.create(target_url="http://foo.bar", created_by=user, modified_by=user)
+
+        add(WebHookEvent.objects.create(org=org, resthook=resthook, data={}))
+
+        template_trans1 = add(
+            TemplateTranslation.get_or_create(
+                channels[0],
+                "hello",
+                "eng",
+                "US",
+                "Hello {{1}}",
+                1,
+                TemplateTranslation.STATUS_APPROVED,
+                "1234",
+                "foo_namespace",
+            )
+        )
+        add(template_trans1.template)
+        flow1.template_dependencies.add(template_trans1.template)
+
+        return (flow1, flow2)
+
+    def _create_contact_content(self, org, add) -> tuple[tuple]:
+        contact1 = add(self.create_contact("Bob", phone="+5931234111111", org=org))
+        contact2 = add(self.create_contact("Jim", phone="+5931234222222", org=org))
+
+        field1 = add(self.create_field("age", "Age", org=org))
+        field2 = add(self.create_field("joined", "Joined", value_type=ContactField.TYPE_DATETIME, org=org))
+
+        group1 = add(self.create_group("Adults", query="age >= 18", org=org))
+        group2 = add(self.create_group("Testers", contacts=[contact1, contact2], org=org))
+
+        # create a contact import
+        group3 = add(self.create_group("Imported", contacts=[], org=org))
+        imp = ContactImport.objects.create(
+            org=self.org, group=group3, mappings={}, num_records=0, created_by=self.admin, modified_by=self.admin
+        )
+        ContactImportBatch.objects.create(contact_import=imp, specs={}, record_start=0, record_end=0)
+
+        return (contact1, contact2), (field1, field2), (group1, group2, group3)
+
+    def _create_message_content(self, org, user, channels, contacts, groups, add) -> tuple:
+        msg1 = add(self.create_incoming_msg(contact=contacts[0], text="hi", channel=channels[0]))
+        add(self.create_outgoing_msg(contact=contacts[0], text="cool story", channel=channels[0]))
+        add(self.create_outgoing_msg(contact=contacts[0], text="synced", channel=channels[1]))
+
+        add(self.create_broadcast(user, "Announcement", contacts=contacts, groups=groups, org=org))
+
+        scheduled = add(
+            self.create_broadcast(
+                user,
+                "Reminder",
+                contacts=contacts,
+                groups=groups,
+                org=org,
+                schedule=Schedule.create_schedule(org, user, timezone.now(), Schedule.REPEAT_DAILY),
+            )
+        )
+        add(self.create_broadcast(user, "Reminder", contacts=contacts, groups=groups, org=org, parent=scheduled))
+
+        label1 = add(self.create_label("Spam", org=org))
+        label2 = add(self.create_label("Important", org=org))
+
+        label1.toggle_label([msg1], add=True)
+        label2.toggle_label([msg1], add=True)
+
+        return (label1, label2)
+
+    def _create_campaign_content(self, org, user, fields, groups, flows, contacts, add):
+        campaign = add(Campaign.create(org, user, "Reminders", groups[0]))
+        event1 = add(
+            CampaignEvent.create_flow_event(
+                org, user, campaign, fields[1], offset=1, unit="W", flow=flows[0], delivery_hour="13"
+            )
+        )
+        add(EventFire.objects.create(event=event1, contact=contacts[0], scheduled=timezone.now()))
+        start1 = add(FlowStart.objects.create(org=org, flow=flows[0], campaign_event=event1))
+        add(FlowStartCount.objects.create(start=start1, count=1))
+
+    def _create_ticket_content(self, org, user, contacts, flows, add):
+        ticket1 = add(self.create_ticket(org.ticketers.get(), contacts[0], "Help"))
+        ticket1.events.create(org=org, contact=contacts[0], event_type="N", note="spam", created_by=user)
+
+        ticketer = add(Ticketer.create(org, user, MailgunType.slug, "Email (bob)", {}))
+        add(self.create_ticket(ticketer, contacts[0], "Help", opened_in=flows[0]))
+
+    def _create_export_content(self, org, user, flows, groups, fields, labels, add):
+        results = add(
+            ExportFlowResultsTask.create(
+                org,
+                user,
+                start_date=date.today(),
+                end_date=date.today(),
+                flows=flows,
+                with_fields=fields,
+                with_groups=groups,
+                responded_only=True,
+                extra_urns=(),
+            )
+        )
+        ExportFinishedNotificationType.create(results)
+
+        contacts = add(ExportContactsTask.create(org, user, group=groups[0]))
+        ExportFinishedNotificationType.create(contacts)
+
+        messages = add(
+            ExportMessagesTask.create(org, user, start_date=date.today(), end_date=date.today(), label=labels[0])
+        )
+        ExportFinishedNotificationType.create(messages)
+
+        tickets = add(
+            ExportTicketsTask.create(
+                org, user, start_date=date.today(), end_date=date.today(), with_groups=groups, with_fields=fields
+            )
+        )
+        ExportFinishedNotificationType.create(tickets)
+
+    def _create_archive_content(self, org, add):
+        def create_archive(org, period, rollup=None):
+            file = f"{org.id}/archive{Archive.objects.all().count()}.jsonl.gz"
+            body, md5, size = jsonlgz_encode([{"id": 1}])
+            archive = Archive.objects.create(
+                org=org,
+                url=f"http://temba-archives.aws.com/{file}",
+                start_date=timezone.now(),
+                build_time=100,
+                archive_type=Archive.TYPE_MSG,
+                period=period,
+                rollup=rollup,
+                size=size,
+                hash=md5,
+            )
+            self.mock_s3.put_object("temba-archives", file, body)
+            return archive
+
+        daily = add(create_archive(org, Archive.PERIOD_DAILY))
+        add(create_archive(org, Archive.PERIOD_MONTHLY, daily))
+
+        # extra S3 file in archive dir
+        self.mock_s3.put_object("temba-archives", f"{org.id}/extra_file.json", io.StringIO("[]"))
+
+    def _exists(self, obj) -> bool:
+        return obj._meta.model.objects.filter(id=obj.id).exists()
+
+    def assertOrgActive(self, org, org_content=()):
+        org.refresh_from_db()
+
+        self.assertTrue(org.is_active)
+        self.assertIsNone(org.released_on)
+        self.assertIsNone(org.deleted_on)
+
+        for o in org_content:
+            self.assertTrue(self._exists(o), f"{repr(o)} should still exist")
+
+    def assertOrgReleased(self, org, org_content=()):
+        org.refresh_from_db()
+
+        self.assertFalse(org.is_active)
+        self.assertIsNotNone(org.released_on)
+        self.assertIsNone(org.deleted_on)
+
+        for o in org_content:
+            self.assertTrue(self._exists(o), f"{repr(o)} should still exist")
+
+    def assertOrgDeleted(self, org, org_content=()):
+        org.refresh_from_db()
+
+        self.assertFalse(org.is_active)
+        self.assertEqual({}, org.config)
+        self.assertIsNotNone(org.released_on)
+        self.assertIsNotNone(org.deleted_on)
+
+        for o in org_content:
+            self.assertFalse(self._exists(o), f"{repr(o)} shouldn't still exist")
+
+    def assertUserActive(self, user):
+        user.refresh_from_db()
+
+        self.assertTrue(user.is_active)
+        self.assertNotEqual("", user.password)
+
+    def assertUserReleased(self, user):
+        user.refresh_from_db()
+
+        self.assertFalse(user.is_active)
+        self.assertEqual("", user.password)
+
+    @mock_mailroom
+    def test_release_and_delete(self, mr_mocks):
+        org1_content = self.create_content(self.org, self.admin)
+        org2_content = self.create_content(self.org2, self.admin2)
+
+        org1_child1 = self.org.children.get(name="Child 1")
+        org1_child2 = self.org.children.get(name="Child 2")
+
+        # add editor to second org as agent
+        self.org2.add_user(self.editor, OrgRole.AGENT)
+
+        # can't delete an org that wasn't previously released
+        with self.assertRaises(AssertionError):
+            self.org.delete()
+
+        self.assertOrgActive(self.org, org1_content)
+        self.assertOrgActive(self.org2, org2_content)
+
+        self.org.release(self.customer_support)
+
+        # org and its children should be marked for deletion
+        self.assertOrgReleased(self.org, org1_content)
+        self.assertOrgReleased(org1_child1)
+        self.assertOrgReleased(org1_child2)
+        self.assertOrgActive(self.org2, org2_content)
+
+        self.assertUserReleased(self.admin)
+        self.assertUserActive(self.editor)  # because they're also in org #2
+        self.assertUserReleased(self.user)
+        self.assertUserReleased(self.agent)
+        self.assertUserReleased(self.admin)
+        self.assertUserActive(self.admin2)
+
+        delete_released_orgs()
+
+        self.assertOrgReleased(self.org, org1_content)  # deletion hasn't occured yet because releasing was too soon
+        self.assertOrgReleased(org1_child1)
+        self.assertOrgReleased(org1_child2)
+        self.assertOrgActive(self.org2, org2_content)
+
+        # make it look like released orgs were released over a week ago
+        Org.objects.exclude(released_on=None).update(released_on=timezone.now() - timedelta(days=8))
+
+        with patch("temba.utils.s3.client", return_value=self.mock_s3):
+            delete_released_orgs()
+
+        self.assertOrgDeleted(self.org, org1_content)
+        self.assertOrgDeleted(org1_child1)
+        self.assertOrgDeleted(org1_child2)
+        self.assertOrgActive(self.org2, org2_content)
+
+        # only org 2 files left in S3
+        self.assertEqual(
+            [
+                ("temba-archives", f"{self.org2.id}/archive2.jsonl.gz"),
+                ("temba-archives", f"{self.org2.id}/archive3.jsonl.gz"),
+                ("temba-archives", f"{self.org2.id}/extra_file.json"),
+            ],
+            list(self.mock_s3.objects.keys()),
+        )
+
+        # we don't actually delete org objects but at this point there should be no related fields preventing that
+        Model.delete(org1_child1)
+        Model.delete(org1_child2)
+        Model.delete(self.org)
+
+        # releasing an already released org won't do anything
+        prev_released_on = self.org.released_on
+        self.org.release(self.customer_support)
+        self.assertEqual(prev_released_on, self.org.released_on)
 
 
 class AnonOrgTest(TembaTest):
@@ -2827,7 +2570,8 @@ class AnonOrgTest(TembaTest):
         self.assertContains(response, masked)
 
         # create an incoming flow message, check number doesn't appear in inbox
-        msg3 = self.create_incoming_msg(contact, "ok", msg_type="F")
+        flow = self.create_flow("Test")
+        msg3 = self.create_incoming_msg(contact, "ok", flow=flow)
 
         response = self.client.get(reverse("msgs.msg_flow"))
 
@@ -2842,78 +2586,71 @@ class AnonOrgTest(TembaTest):
 
 
 class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
-    def test_spa(self):
-        Group.objects.get(name="Beta").user_set.add(self.admin)
+    def test_manage_sub_orgs(self):
+        # give our org the multi users feature
+        self.org.features = [Org.FEATURE_USERS, Org.FEATURE_CHILD_ORGS]
+        self.org.save()
 
-        self.login(self.admin)
+        # add a sub org
+        self.child = Org.objects.create(
+            name="Child Workspace",
+            timezone=pytz.timezone("US/Pacific"),
+            flow_languages=["eng"],
+            created_by=self.admin,
+            modified_by=self.admin,
+            parent=self.org,
+        )
+        self.child.initialize()
+        self.child.add_user(self.admin, OrgRole.ADMINISTRATOR)
 
-        deep_link = reverse("spa.level_2", args=["tickets", "all", "open"])
-        response = self.client.get(deep_link)
-        self.assertEqual(200, response.status_code)
-
-    def assertMenu(self, url, count):
-        response = self.assertListFetch(url, allow_viewers=True, allow_editors=True, allow_agents=True)
-        menu = response.json()["results"]
-        self.assertEqual(count, len(menu))
-
-    def test_home(self):
-        home_url = reverse("orgs.org_home")
-
-        self.login(self.user)
-
-        with self.assertNumQueries(13):
-            response = self.client.get(home_url)
-
-        # not so many options for viewers
-        self.assertEqual(200, response.status_code)
-        self.assertEqual(2, len(response.context["formax"].sections))
-
-        self.login(self.admin)
-
-        with self.assertNumQueries(46):
-            response = self.client.get(home_url)
-
-        # more options for admins
-        self.assertEqual(200, response.status_code)
-        self.assertEqual(13, len(response.context["formax"].sections))
-
-        # set a plan and add the users feature
-        self.org.plan = "unicef"
-        self.org.features = [Org.FEATURE_USERS]
-        self.org.save(update_fields=("plan", "features"))
-
-        response = self.client.get(home_url)
-        self.assertEqual(15, len(response.context["formax"].sections))
+        self.assertListFetch(reverse("orgs.org_sub_orgs"), allow_viewers=False, allow_editors=False)
+        response = self.client.get(reverse("orgs.org_sub_orgs"), HTTP_TEMBA_SPA=True)
+        self.assertContains(response, "Child Workspace")
+        self.assertContains(response, reverse("orgs.org_manage_accounts_sub_org"))
 
     def test_menu(self):
         self.login(self.admin)
-        self.assertMenu(reverse("orgs.org_menu"), 7)
-        self.assertMenu(f"{reverse('orgs.org_menu')}settings/", 7)
 
+        # add a sub org
+        self.child = Org.objects.create(
+            name="Child Workspace",
+            timezone=pytz.timezone("US/Pacific"),
+            flow_languages=["eng"],
+            created_by=self.admin,
+            modified_by=self.admin,
+            parent=self.org,
+        )
+        self.child.initialize()
+        self.child.add_user(self.admin, OrgRole.ADMINISTRATOR)
         menu_url = reverse("orgs.org_menu")
-        response = self.assertListFetch(menu_url, allow_viewers=True, allow_editors=True, allow_agents=True)
-        menu = response.json()["results"]
-        self.assertEqual(7, len(menu))
+
+        self.assertMenu(menu_url, 9, ["Workspace/Child Workspace"])
+        self.assertMenu(f"{menu_url}settings/", 6)
 
         # agents should only see tickets and settings
         self.login(self.agent)
 
-        with self.assertNumQueries(9):
+        with self.assertNumQueries(10):
             response = self.client.get(menu_url)
 
         menu = response.json()["results"]
-        self.assertEqual(2, len(menu))
+        self.assertEqual(4, len(menu))
 
         # customer support should only see the staff option
         self.login(self.customer_support)
         menu = self.client.get(menu_url).json()["results"]
-        self.assertEqual(1, len(menu))
-        self.assertEqual("Staff", menu[0]["name"])
+        self.assertEqual(2, len(menu))
+        self.assertEqual("Staff", menu[1]["name"])
 
         menu = self.client.get(f"{menu_url}staff/").json()["results"]
         self.assertEqual(2, len(menu))
         self.assertEqual("Workspaces", menu[0]["name"])
         self.assertEqual("Users", menu[1]["name"])
+
+        # if our org has new orgs but not child orgs, we should have a New Workspace button in the menu
+        self.org.features = [Org.FEATURE_NEW_ORGS]
+        self.org.save()
+        self.assertMenu(menu_url, 9, ["Workspace/New Workspace"])
 
     def test_read(self):
         read_url = reverse("orgs.org_read", args=[self.org.id])
@@ -2927,13 +2664,16 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
         # we should have a child in our context
         self.assertEqual(1, len(response.context["children"]))
 
-        # we should have an option to flag
-        self.assertContentMenu(read_url, self.customer_support, ["Edit", "Flag", "Verify", "Delete", "-", "Service"])
+        # we should have options to flag and suspend
+        self.assertContentMenu(read_url, self.customer_support, ["Edit", "Flag", "Suspend", "Verify", "-", "Service"])
 
         # flag and content menu option should be inverted
         self.org.flag()
-        response = self.client.get(read_url)
-        self.assertContentMenu(read_url, self.customer_support, ["Edit", "Unflag", "Verify", "Delete", "-", "Service"])
+        self.org.suspend()
+
+        self.assertContentMenu(
+            read_url, self.customer_support, ["Edit", "Unflag", "Unsuspend", "Verify", "-", "Service"]
+        )
 
         # no menu for inactive orgs
         self.org.is_active = False
@@ -2947,31 +2687,26 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # make sure we have the appropriate number of sections
         self.assertEqual(7, len(response.context["formax"].sections))
+        self.assertMenu(f"{reverse('orgs.org_menu')}settings/", 6)
 
+        # enable child workspaces and users
         self.org.features = [Org.FEATURE_USERS, Org.FEATURE_CHILD_ORGS]
         self.org.save(update_fields=("features",))
 
-        response = self.assertListFetch(workspace_url, allow_viewers=True, allow_editors=True, allow_agents=False)
-
-        # we now have workspace management
-        self.assertEqual(8, len(response.context["formax"].sections))
-
-        # create a child org
         self.child_org = Org.objects.create(
             name="Child Org",
             timezone=pytz.timezone("Africa/Kigali"),
             country=self.org.country,
-            plan="parent",
             created_by=self.user,
             modified_by=self.user,
             parent=self.org,
         )
 
-        with self.assertNumQueries(22):
-            response = self.client.get(reverse("orgs.org_workspace"))
+        with self.assertNumQueries(14):
+            response = self.client.get(workspace_url)
 
-        # should have an extra menu option for our child (and section header)
-        self.assertMenu(f"{reverse('orgs.org_menu')}settings/", 9)
+        # should have an extra menu options for workspaces and users
+        self.assertMenu(f"{reverse('orgs.org_menu')}settings/", 8)
 
     def test_org_grant(self):
         grant_url = reverse("orgs.org_grant")
@@ -3088,8 +2823,12 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
             response, "form", "last_name", "Ensure this value has at most 150 characters (it has 162)."
         )
         self.assertFormError(response, "form", "name", "Ensure this value has at most 128 characters (it has 136).")
-        self.assertFormError(response, "form", "email", "Ensure this value has at most 150 characters (it has 159).")
-        self.assertFormError(response, "form", "email", "Enter a valid email address.")
+        self.assertFormError(
+            response,
+            "form",
+            "email",
+            ["Enter a valid email address.", "Ensure this value has at most 150 characters (it has 159)."],
+        )
 
     def test_org_grant_form_clean(self):
         grant_url = reverse("orgs.org_grant")
@@ -3314,13 +3053,6 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
         response = self.client.get(reverse("channels.channel_claim"))
         self.assertEqual(200, response.status_code)
 
-        # check that we have all the tabs
-        self.assertContains(response, reverse("msgs.msg_inbox"))
-        self.assertContains(response, reverse("flows.flow_list"))
-        self.assertContains(response, reverse("contacts.contact_list"))
-        self.assertContains(response, reverse("channels.channel_list"))
-        self.assertContains(response, reverse("orgs.org_home"))
-
         # can't signup again with same email
         response = self.client.post(
             signup_url,
@@ -3346,12 +3078,12 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertRedirect(response, reverse("users.user_login"))
 
         # try going to the org home page, no dice
-        response = self.client.get(reverse("orgs.org_home"))
+        response = self.client.get(reverse("orgs.org_workspace"))
         self.assertRedirect(response, reverse("users.user_login"))
 
         # log in as the user
         self.client.login(username="myal12345678901234567890@relieves.org", password="HelloWorld1")
-        response = self.client.get(reverse("orgs.org_home"))
+        response = self.client.get(reverse("orgs.org_workspace"))
 
         self.assertEqual(200, response.status_code)
 
@@ -3399,28 +3131,27 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertTrue(user.check_password("Password123"))
 
     def test_create_new(self):
-        home_url = reverse("orgs.org_home")
+        children_url = reverse("orgs.org_sub_orgs")
         create_url = reverse("orgs.org_create")
 
         self.login(self.admin)
 
         # by default orgs don't have this feature
-        response = self.client.get(home_url)
-
-        self.assertNotContains(response, ">New Workspace</a>")
+        response = self.client.get(children_url)
+        self.assertContentMenu(children_url, self.admin, [])
 
         # trying to access the modal directly should redirect
         response = self.client.get(create_url)
-        self.assertRedirect(response, "/org/home/")
+        self.assertRedirect(response, "/org/workspace/")
 
         self.org.features = [Org.FEATURE_NEW_ORGS]
         self.org.save(update_fields=("features",))
 
-        response = self.client.get(home_url)
-        self.assertContains(response, ">New Workspace</a>")
+        response = self.client.get(children_url)
+        self.assertContentMenu(children_url, self.admin, ["New Workspace"])
 
         # give org2 the same feature
-        self.org2.features = [Org.FEATURE_CHILD_ORGS]
+        self.org2.features = [Org.FEATURE_NEW_ORGS]
         self.org2.save(update_fields=("features",))
 
         # since we can only create new orgs, we don't show type as an option
@@ -3444,30 +3175,29 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual(OrgRole.ADMINISTRATOR, new_org.get_user_role(self.admin))
 
         # should be now logged into that org
-        self.assertRedirect(response, "/msg/inbox/")
-        response = self.client.get("/msg/inbox/")
+        self.assertRedirect(response, "/msg/")
+        response = self.client.get("/msg/")
         self.assertEqual(str(new_org.id), response.headers["X-Temba-Org"])
 
     def test_create_child(self):
-        home_url = reverse("orgs.org_home")
+        children_url = reverse("orgs.org_sub_orgs")
         create_url = reverse("orgs.org_create")
 
         self.login(self.admin)
 
         # by default orgs don't have the new_orgs or child_orgs feature
-        response = self.client.get(home_url)
-
-        self.assertNotContains(response, ">New Workspace</a>")
+        response = self.client.get(children_url)
+        self.assertContentMenu(children_url, self.admin, [])
 
         # trying to access the modal directly should redirect
         response = self.client.get(create_url)
-        self.assertRedirect(response, "/org/home/")
+        self.assertRedirect(response, "/org/workspace/")
 
         self.org.features = [Org.FEATURE_CHILD_ORGS]
         self.org.save(update_fields=("features",))
 
-        response = self.client.get(home_url)
-        self.assertContains(response, ">New Workspace</a>")
+        response = self.client.get(children_url)
+        self.assertContentMenu(children_url, self.admin, ["New Workspace"])
 
         # give org2 the same feature
         self.org2.features = [Org.FEATURE_CHILD_ORGS]
@@ -3540,37 +3270,39 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
 
         response = self.client.post(create_url, {"name": "Child Org", "timezone": "Africa/Nairobi"}, HTTP_TEMBA_SPA=1)
 
-        self.assertRedirect(response, "/org/manage_accounts_sub_org/")
+        self.assertRedirect(response, reverse("orgs.org_sub_orgs"))
 
     def test_child_management(self):
         sub_orgs_url = reverse("orgs.org_sub_orgs")
-        home_url = reverse("orgs.org_home")
+        menu_url = reverse("orgs.org_menu") + "settings/"
 
         self.login(self.admin)
 
-        # we don't see button if we don't have child orgs
-        response = self.client.get(home_url)
-        self.assertNotContains(response, "Manage Workspaces")
+        response = self.client.get(menu_url)
+        self.assertNotContains(response, "Workspaces")
+        self.assertNotContains(response, sub_orgs_url)
 
         # enable child orgs and create some child orgs
-        self.org.features = [Org.FEATURE_CHILD_ORGS]
+        self.org.features = [Org.FEATURE_CHILD_ORGS, Org.FEATURE_USERS]
         self.org.save(update_fields=("features",))
         child1 = self.org.create_new(self.admin, "Child Org 1", self.org.timezone, as_child=True)
         child2 = self.org.create_new(self.admin, "Child Org 2", self.org.timezone, as_child=True)
 
-        # now we see the button and can view that page
+        # now we see the Workspaces menu item
         self.login(self.admin, choose_org=self.org)
-        response = self.client.get(home_url)
-        self.assertContains(response, "Manage Workspaces")
+
+        response = self.client.get(menu_url)
+        self.assertContains(response, "Workspaces")
+        self.assertContains(response, sub_orgs_url)
 
         response = self.assertListFetch(
-            sub_orgs_url, allow_viewers=False, allow_editors=False, context_objects=[self.org, child1, child2]
+            sub_orgs_url, allow_viewers=False, allow_editors=False, context_objects=[child1, child2]
         )
 
         child1_edit_url = reverse("orgs.org_edit_sub_org") + f"?org={child1.id}"
         child1_accounts_url = reverse("orgs.org_manage_accounts_sub_org") + f"?org={child1.id}"
 
-        self.assertContains(response, child1_edit_url)
+        self.assertContains(response, "Child Org 1")
         self.assertContains(response, child1_accounts_url)
 
         # we can also access the manage accounts page
@@ -3578,7 +3310,7 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual(200, response.status_code)
 
         response = self.client.get(child1_accounts_url, HTTP_TEMBA_SPA=1)
-        self.assertContains(response, "Edit Workspace")
+        self.assertContains(response, child1.name)
 
         # edit our sub org's details
         response = self.client.post(
@@ -3598,7 +3330,7 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
             HTTP_TEMBA_SPA=1,
         )
 
-        self.assertEqual(child1_accounts_url, response.url)
+        self.assertEqual(reverse("orgs.org_sub_orgs"), response.url)
 
         child1.refresh_from_db()
         self.assertEqual("Spa Child Name", child1.name)
@@ -3616,31 +3348,41 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
         response = self.client.get(f"{reverse('orgs.org_edit_sub_org')}?org={child1.id}")
         self.assertEqual(404, response.status_code)
 
+    def test_start(self):
+        # the start view routes users based on their role
+        start_url = reverse("orgs.org_start")
+
+        # not authenticated, you should get a login redirect
+        self.assertLoginRedirect(self.client.get(start_url))
+
+        # now for all our roles
+        self.assertRedirect(self.requestView(start_url, self.admin), "/msg/")
+        self.assertRedirect(self.requestView(start_url, self.editor), "/msg/")
+        self.assertRedirect(self.requestView(start_url, self.user), "/msg/")
+        self.assertRedirect(self.requestView(start_url, self.agent), "/ticket/")
+        self.assertRedirect(self.requestView(start_url, self.surveyor), "/org/surveyor/")
+
+        # now try as customer support
+        self.assertRedirect(self.requestView(start_url, self.customer_support), "/org/manage/")
+
     def test_choose(self):
         choose_url = reverse("orgs.org_choose")
 
         # create an inactive org which should never appear as an option
         org3 = Org.objects.create(
-            name="Deactivated",
-            timezone=pytz.UTC,
-            brand=settings.DEFAULT_BRAND,
-            created_by=self.user,
-            modified_by=self.user,
-            is_active=False,
+            name="Deactivated", timezone=pytz.UTC, created_by=self.user, modified_by=self.user, is_active=False
         )
         org3.add_user(self.editor, OrgRole.EDITOR)
 
         # and another org that none of our users belong to
-        org4 = Org.objects.create(
-            name="Other", timezone=pytz.UTC, brand=settings.DEFAULT_BRAND, created_by=self.user, modified_by=self.user
-        )
+        org4 = Org.objects.create(name="Other", timezone=pytz.UTC, created_by=self.user, modified_by=self.user)
 
         self.assertLoginRedirect(self.client.get(choose_url))
 
         # users with a single org are always redirected right away to a page in that org that they have access to
-        self.assertRedirect(self.requestView(choose_url, self.admin), "/msg/inbox/")
-        self.assertRedirect(self.requestView(choose_url, self.editor), "/msg/inbox/")
-        self.assertRedirect(self.requestView(choose_url, self.user), "/msg/inbox/")
+        self.assertRedirect(self.requestView(choose_url, self.admin), "/msg/")
+        self.assertRedirect(self.requestView(choose_url, self.editor), "/msg/")
+        self.assertRedirect(self.requestView(choose_url, self.user), "/msg/")
         self.assertRedirect(self.requestView(choose_url, self.agent), "/ticket/")
         self.assertRedirect(self.requestView(choose_url, self.surveyor), "/org/surveyor/")
 
@@ -3648,7 +3390,7 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
         response = self.requestView(choose_url, self.non_org_user)
         self.assertLoginRedirect(response)
         response = self.client.get("/users/login/")
-        self.assertContains(response, "No organizations for this account, please contact your administrator.")
+        self.assertContains(response, "No workspaces for this account, please contact your administrator.")
 
         # unless they are staff
         self.assertRedirect(self.requestView(choose_url, self.customer_support), "/org/manage/")
@@ -3670,7 +3412,7 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # user clicks org 2...
         response = self.client.post(choose_url, {"organization": self.org2.id})
-        self.assertRedirect(response, "/msg/inbox/")
+        self.assertRedirect(response, "/msg/")
 
     def test_edit(self):
         edit_url = reverse("orgs.org_edit")
@@ -3711,88 +3453,25 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual("Y", self.org.date_format)
         self.assertEqual("es", self.org.language)
 
-    def test_org_timezone(self):
-        self.assertEqual(self.org.timezone, pytz.timezone("Africa/Kigali"))
-        self.assertEqual(("%d-%m-%Y", "%d-%m-%Y %H:%M"), self.org.get_datetime_formats())
-        self.assertEqual(("%d-%m-%Y", "%d-%m-%Y %H:%M:%S"), self.org.get_datetime_formats(seconds=True))
-
-        contact = self.create_contact("Bob", phone="+250788382382")
-        self.create_incoming_msg(contact, "My name is Frank")
-
-        self.login(self.admin)
-        response = self.client.get(reverse("msgs.msg_inbox"), follow=True)
-
-        # Check the message datetime
-        created_on = response.context["object_list"][0].created_on.astimezone(self.org.timezone)
-        self.assertContains(response, created_on.strftime("%H:%M").lower())
-
-        # change the org timezone to "Africa/Nairobi"
-        self.org.timezone = pytz.timezone("Africa/Nairobi")
-        self.org.save()
-
-        response = self.client.get(reverse("msgs.msg_inbox"), follow=True)
-
-        # checkout the message should have the datetime changed by timezone
-        created_on = response.context["object_list"][0].created_on.astimezone(self.org.timezone)
-        self.assertContains(response, created_on.strftime("%H:%M").lower())
-
-        self.org.date_format = "M"
-        self.org.save()
-
-        self.assertEqual(("%m-%d-%Y", "%m-%d-%Y %H:%M"), self.org.get_datetime_formats())
-
-        response = self.client.get(reverse("msgs.msg_inbox"), follow=True)
-
-        created_on = response.context["object_list"][0].created_on.astimezone(self.org.timezone)
-        self.assertContains(response, created_on.strftime("%I:%M %p").lower().lstrip("0"))
-
-        self.org.date_format = "Y"
-        self.org.save()
-
-        self.assertEqual(("%Y-%m-%d", "%Y-%m-%d %H:%M"), self.org.get_datetime_formats())
-
-        response = self.client.get(reverse("msgs.msg_inbox"), follow=True)
-
-        created_on = response.context["object_list"][0].created_on.astimezone(self.org.timezone)
-        self.assertContains(response, created_on.strftime("%H:%M").lower())
-
-    def test_delete(self):
+    def test_delete_child(self):
         self.org.features = [Org.FEATURE_CHILD_ORGS]
         self.org.save(update_fields=("features",))
 
-        workspace = self.org.create_new(self.admin, "Child Workspace", self.org.timezone, as_child=True)
-        delete_workspace = reverse("orgs.org_delete", args=[workspace.id])
+        child = self.org.create_new(self.admin, "Child Workspace", self.org.timezone, as_child=True)
+        delete_url = reverse("orgs.org_delete_child", args=[child.id])
 
-        # choose the parent org, try to delete the workspace
-        self.assertDeleteFetch(delete_workspace)
+        self.assertDeleteFetch(delete_url)
 
         # schedule for deletion
-        response = self.client.get(delete_workspace)
+        response = self.client.get(delete_url)
         self.assertContains(response, "You are about to delete the workspace <b>Child Workspace</b>")
 
         # go through with it, redirects to main workspace page
-        response = self.client.post(delete_workspace)
-        self.assertEqual(reverse("orgs.org_workspace"), response["Temba-Success"])
+        response = self.client.post(delete_url)
+        self.assertEqual(reverse("orgs.org_sub_orgs"), response["Temba-Success"])
 
-        workspace.refresh_from_db()
-        self.assertFalse(workspace.is_active)
-
-        # can't delete primary workspace
-        primary_delete = reverse("orgs.org_delete", args=[self.org.id])
-        response = self.client.get(primary_delete)
-        self.assertRedirect(response, "/users/login/")
-
-        response = self.client.post(primary_delete)
-        self.assertRedirect(response, "/users/login/")
-
-        self.login(self.customer_support)
-        primary_delete = reverse("orgs.org_delete", args=[self.org.id])
-        response = self.client.get(primary_delete)
-        self.assertContains(response, "You are about to delete the workspace <b>Nyaruka</b>")
-
-        response = self.client.post(primary_delete)
-        self.org.refresh_from_db()
-        self.assertFalse(self.org.is_active)
+        child.refresh_from_db()
+        self.assertFalse(child.is_active)
 
     def test_administration(self):
         self.setUpLocations()
@@ -3805,6 +3484,7 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
 
         def assertOrgFilter(query: str, expected_orgs: list):
             response = self.client.get(manage_url + query)
+            self.assertIsNotNone(response.headers.get(TEMBA_MENU_SELECTION, None))
             self.assertEqual(expected_orgs, list(response.context["object_list"]))
 
         assertOrgFilter("", [self.org2, self.org])
@@ -3831,8 +3511,6 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
                 "name",
                 "features",
                 "is_anon",
-                "is_suspended",
-                "is_flagged",
                 "channels_limit",
                 "fields_limit",
                 "globals_limit",
@@ -3852,8 +3530,6 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
                 "name": "Temba II",
                 "features": ["new_orgs"],
                 "is_anon": False,
-                "is_suspended": False,
-                "is_flagged": False,
                 "channels_limit": 20,
                 "fields_limit": 300,
                 "globals_limit": "",
@@ -3873,20 +3549,30 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual(self.org.get_limit(Org.LIMIT_GROUPS), 400)
         self.assertEqual(self.org.get_limit(Org.LIMIT_CHANNELS), 20)
 
+        # flag org
+        self.client.post(update_url, {"action": "flag"})
+        self.org.refresh_from_db()
+        self.assertTrue(self.org.is_flagged)
+
         # unflag org
         self.client.post(update_url, {"action": "unflag"})
         self.org.refresh_from_db()
         self.assertFalse(self.org.is_flagged)
 
+        # suspend org
+        self.client.post(update_url, {"action": "suspend"})
+        self.org.refresh_from_db()
+        self.assertTrue(self.org.is_suspended)
+
+        # unsuspend org
+        self.client.post(update_url, {"action": "unsuspend"})
+        self.org.refresh_from_db()
+        self.assertFalse(self.org.is_suspended)
+
         # verify
         self.client.post(update_url, {"action": "verify"})
         self.org.refresh_from_db()
-        self.assertTrue(self.org.is_verified())
-
-        # flag org
-        self.client.post(update_url, {"action": "flag"})
-        self.org.refresh_from_db()
-        self.assertTrue(self.org.is_flagged)
+        self.assertTrue(self.org.is_verified)
 
     def test_urn_schemes(self):
         # remove existing channels
@@ -3937,31 +3623,49 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
     @mock_mailroom
     def test_service(self, mr_mocks):
         service_url = reverse("orgs.org_service")
+        inbox_url = reverse("msgs.msg_inbox")
 
         # without logging in, try to service our main org
-        response = self.client.post(service_url, dict(organization=self.org.id))
+        response = self.client.get(service_url, dict(other_org=self.org.id, next=inbox_url))
+        self.assertLoginRedirect(response)
+
+        response = self.client.post(service_url, dict(other_org=self.org.id))
         self.assertLoginRedirect(response)
 
         # try logging in with a normal user
         self.login(self.admin)
 
         # same thing, no permission
-        response = self.client.post(service_url, dict(organization=self.org.id))
+        response = self.client.get(service_url, dict(other_org=self.org.id, next=inbox_url))
+        self.assertLoginRedirect(response)
+
+        response = self.client.post(service_url, dict(other_org=self.org.id))
         self.assertLoginRedirect(response)
 
         # ok, log in as our cs rep
         self.login(self.customer_support)
 
-        # invalid org just redirects back to manage page
-        response = self.client.post(service_url, dict(organization=325253256))
+        # getting invalid org, has no service form
+        response = self.client.get(service_url, dict(other_org=325253256, next=inbox_url))
+        self.assertContains(response, "Invalid org")
+
+        # posting invalid org just redirects back to manage page
+        response = self.client.post(service_url, dict(other_org=325253256))
         self.assertRedirect(response, "/org/manage/")
 
         # then service our org
-        response = self.client.post(service_url, dict(organization=self.org.id))
-        self.assertRedirect(response, "/msg/inbox/")
+        response = self.client.get(service_url, dict(other_org=self.org.id))
+        self.assertContains(response, "You are about to service the workspace, <b>Nyaruka</b>.")
+
+        # requesting a next page has a slightly different message
+        response = self.client.get(service_url, dict(other_org=self.org.id, next=inbox_url))
+        self.assertContains(response, "The page you are requesting belongs to a different workspace, <b>Nyaruka</b>.")
+
+        response = self.client.post(service_url, dict(other_org=self.org.id))
+        self.assertRedirect(response, "/msg/")
 
         # specify redirect_url
-        response = self.client.post(service_url, dict(organization=self.org.id, redirect_url="/flow/"))
+        response = self.client.post(service_url, dict(other_org=self.org.id, next="/flow/"))
         self.assertRedirect(response, "/flow/")
 
         # create a new contact
@@ -3975,12 +3679,12 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual(self.customer_support, contact.created_by)
 
     def test_languages(self):
-        home_url = reverse("orgs.org_home")
+        settings_url = reverse("orgs.org_workspace")
         langs_url = reverse("orgs.org_languages")
 
         self.org.set_flow_languages(self.admin, ["eng"])
 
-        response = self.requestView(home_url, self.admin)
+        response = self.requestView(settings_url, self.admin)
         self.assertEqual("English", response.context["primary_lang"])
         self.assertEqual([], response.context["other_langs"])
 
@@ -4011,7 +3715,7 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual(["fra"], self.org.flow_languages)
 
         # summary now includes this
-        response = self.requestView(home_url, self.admin)
+        response = self.requestView(settings_url, self.admin)
         self.assertContains(response, "The default flow language is <b>French</b>.")
         self.assertNotContains(response, "Translations are provided in")
 
@@ -4027,7 +3731,7 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
         self.org.refresh_from_db()
         self.assertEqual(["fra", "hat", "hau"], self.org.flow_languages)
 
-        response = self.requestView(home_url, self.admin)
+        response = self.requestView(settings_url, self.admin)
         self.assertContains(response, "The default flow language is <b>French</b>.")
         self.assertContains(response, "Translations are provided in")
         self.assertContains(response, "<b>Hausa</b>")
@@ -4068,6 +3772,7 @@ class UserCRUDLTest(TembaTest, CRUDLTestMixin):
 
         response = self.requestView(list_url, self.customer_support)
         self.assertEqual(9, len(response.context["object_list"]))
+        self.assertEqual("/staff/users/all", response.headers[TEMBA_MENU_SELECTION])
 
         response = self.requestView(list_url + "?filter=beta", self.customer_support)
         self.assertEqual(set(), set(response.context["object_list"]))
@@ -4221,11 +3926,8 @@ class BulkExportTest(TembaTest):
         self.login(self.admin)
         response = self.client.get(reverse("orgs.org_export"))
 
-        soup = BeautifulSoup(response.content, "html.parser")
-        group = str(soup.findAll("div", {"class": "exportables-grp"})[0])
-
-        self.assertIn("Parent Flow", group)
-        self.assertIn("Child Flow", group)
+        self.assertEqual(1, len(response.context["buckets"]))
+        self.assertEqual([child, parent], response.context["buckets"][0])
 
     def test_import_voice_flows_expiration_time(self):
         # import file has invalid expires for an IVR flow so it should get the default (5)
@@ -4237,45 +3939,62 @@ class BulkExportTest(TembaTest):
         self.assertEqual(voice_flow.expires_after_minutes, 5)
 
     def test_import(self):
-
         self.login(self.admin)
 
-        post_data = dict(import_file=open("%s/test_flows/too_old.json" % settings.MEDIA_ROOT, "rb"))
-        response = self.client.post(reverse("orgs.org_import"), post_data)
+        OrgImport.objects.all().delete()
+
+        post_data = dict(file=open("%s/test_flows/too_old.json" % settings.MEDIA_ROOT, "rb"))
+        response = self.client.post(reverse("orgs.orgimport_create"), post_data)
         self.assertFormError(
-            response, "form", "import_file", "This file is no longer valid. Please export a new version and try again."
+            response, "form", "file", "This file is no longer valid. Please export a new version and try again."
         )
 
         # try a file which can be migrated forwards
         response = self.client.post(
-            reverse("orgs.org_import"),
-            {"import_file": open("%s/test_flows/favorites_v4.json" % settings.MEDIA_ROOT, "rb")},
+            reverse("orgs.orgimport_create"),
+            {"file": open("%s/test_flows/favorites_v4.json" % settings.MEDIA_ROOT, "rb")},
         )
         self.assertEqual(302, response.status_code)
+
+        # should have created an org import object
+        self.assertTrue(OrgImport.objects.filter(org=self.org))
+
+        org_import = OrgImport.objects.filter(org=self.org).get()
+        self.assertEqual(org_import.status, OrgImport.STATUS_COMPLETE)
+
+        response = self.client.get(reverse("orgs.orgimport_read", args=(org_import.id,)))
+        self.assertEqual(200, response.status_code)
+        self.assertContains(response, "Finished successfully")
 
         flow = self.org.flows.filter(name="Favorites").get()
         self.assertEqual(Flow.CURRENT_SPEC_VERSION, flow.version_number)
 
+        # test import using data that is not parsable
+        junk_binary_data = io.BytesIO(b"\x00!\x00b\xee\x9dh^\x01\x00\x00\x04\x00\x02[Content_Types].xml \xa2\x04\x02(")
+        post_data = dict(file=junk_binary_data)
+        response = self.client.post(reverse("orgs.orgimport_create"), post_data)
+        self.assertFormError(response, "form", "file", "This file is not a valid flow definition file.")
+
+        junk_json_data = io.BytesIO(b'{"key": "data')
+        post_data = dict(file=junk_json_data)
+        response = self.client.post(reverse("orgs.orgimport_create"), post_data)
+        self.assertFormError(response, "form", "file", "This file is not a valid flow definition file.")
+
+    def test_import_errors(self):
+        self.login(self.admin)
+        OrgImport.objects.all().delete()
+
         # simulate an unexpected exception during import
         with patch("temba.triggers.models.Trigger.import_triggers") as validate:
             validate.side_effect = Exception("Unexpected Error")
-            post_data = dict(import_file=open("%s/test_flows/new_mother.json" % settings.MEDIA_ROOT, "rb"))
-            response = self.client.post(reverse("orgs.org_import"), post_data)
-            self.assertFormError(response, "form", "import_file", "Sorry, your import file is invalid.")
+            post_data = dict(file=open("%s/test_flows/new_mother.json" % settings.MEDIA_ROOT, "rb"))
+            self.client.post(reverse("orgs.orgimport_create"), post_data)
+
+            org_import = OrgImport.objects.filter(org=self.org).last()
+            self.assertEqual(org_import.status, OrgImport.STATUS_FAILED)
 
             # trigger import failed, new flows that were added should get rolled back
             self.assertIsNone(Flow.objects.filter(org=self.org, name="New Mother").first())
-
-        # test import using data that is not parsable
-        junk_binary_data = io.BytesIO(b"\x00!\x00b\xee\x9dh^\x01\x00\x00\x04\x00\x02[Content_Types].xml \xa2\x04\x02(")
-        post_data = dict(import_file=junk_binary_data)
-        response = self.client.post(reverse("orgs.org_import"), post_data)
-        self.assertFormError(response, "form", "import_file", "This file is not a valid flow definition file.")
-
-        junk_json_data = io.BytesIO(b'{"key": "data')
-        post_data = dict(import_file=junk_json_data)
-        response = self.client.post(reverse("orgs.org_import"), post_data)
-        self.assertFormError(response, "form", "import_file", "This file is not a valid flow definition file.")
 
     def test_import_campaign_with_translations(self):
         self.import_file("campaign_import_with_translations")
@@ -4530,9 +4249,17 @@ class BulkExportTest(TembaTest):
         flow2 = self.create_flow("Test 2")
 
         trigger1 = Trigger.create(
-            self.org, self.admin, Trigger.TYPE_KEYWORD, flow1, keyword="rating", is_archived=True
+            self.org,
+            self.admin,
+            Trigger.TYPE_KEYWORD,
+            flow1,
+            keyword="rating",
+            match_type=Trigger.MATCH_FIRST_WORD,
+            is_archived=True,
         )
-        trigger2 = Trigger.create(self.org, self.admin, Trigger.TYPE_KEYWORD, flow2, keyword="rating")
+        trigger2 = Trigger.create(
+            self.org, self.admin, Trigger.TYPE_KEYWORD, flow2, keyword="rating", match_type=Trigger.MATCH_FIRST_WORD
+        )
 
         data = self.get_import_json("rating_10")
 
@@ -4720,8 +4447,8 @@ class BulkExportTest(TembaTest):
             .first()
         )
 
-        # make sure the base language is set to 'base', not 'eng'
-        self.assertEqual(message_flow.base_language, "base")
+        # make sure the base language is set to 'und', not 'eng'
+        self.assertEqual(message_flow.base_language, "und")
 
         # let's rename a flow and import our export again
         flow = Flow.objects.get(name="Confirm Appointment")
@@ -4822,34 +4549,3 @@ class BackupTokenTest(TembaTest):
         self.assertEqual(10, len(new_admin_tokens))
         self.assertNotEqual([t.token for t in admin_tokens], [t.token for t in new_admin_tokens])
         self.assertEqual(10, self.admin.backup_tokens.count())
-
-
-class DefaultFlowLanguagesTest(MigrationTest):
-    app = "orgs"
-    migrate_from = "0115_alter_org_plan"
-    migrate_to = "0116_default_flow_languages"
-
-    def setUpBeforeMigration(self, apps):
-        self.org3 = Org.objects.create(
-            name="Foo",
-            timezone="Africa/Kigali",
-            brand="rapidpro",
-            created_by=self.admin,
-            modified_by=self.admin,
-            flow_languages=[],
-        )
-        self.org4 = Org.objects.create(
-            name="Foo",
-            timezone="Africa/Kigali",
-            brand="rapidpro",
-            created_by=self.admin,
-            modified_by=self.admin,
-            flow_languages=["kin"],
-        )
-
-    def test_migration(self):
-        self.org3.refresh_from_db()
-        self.org4.refresh_from_db()
-
-        self.assertEqual(["eng"], self.org3.flow_languages)
-        self.assertEqual(["kin"], self.org4.flow_languages)  # unchanged

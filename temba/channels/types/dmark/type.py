@@ -15,14 +15,13 @@ class DMarkType(ChannelType):
     category = ChannelType.Category.PHONE
 
     name = "DMark"
-    icon = "icon-channel-external"
 
     courier_url = r"^dk/(?P<uuid>[a-z0-9\-]+)/(?P<action>receive|status)$"
 
     claim_blurb = _(
         "If you are based in Uganda or DRC you can purchase a short code from %(link)s and connect it in a few simple "
         "steps."
-    ) % {"link": '<a href="http://dmarkmobile.com/">DMark Mobile</a>'}
+    ) % {"link": '<a target="_blank" href="http://dmarkmobile.com/">DMark Mobile</a>'}
     claim_view = ClaimView
 
     schemes = [URN.TEL_SCHEME]

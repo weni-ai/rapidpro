@@ -1,4 +1,5 @@
 import logging
+from collections import defaultdict
 from datetime import datetime, timedelta
 
 import pytz
@@ -10,9 +11,11 @@ from django.db.models import F, Prefetch
 from django.utils import timezone
 from django.utils.timesince import timesince
 
+from temba import mailroom
 from temba.contacts.models import ContactField, ContactGroup
 from temba.utils import chunk_list
 from temba.utils.crons import cron_task
+from temba.utils.models import delete_in_batches
 
 from .models import (
     ExportFlowResultsTask,
@@ -24,11 +27,9 @@ from .models import (
     FlowRun,
     FlowRunStatusCount,
     FlowSession,
-    FlowStart,
     FlowStartCount,
 )
 
-FLOW_TIMEOUT_KEY = "flow_timeouts_%y_%m_%d"
 logger = logging.getLogger(__name__)
 
 
@@ -86,61 +87,45 @@ def trim_flow_revisions():
 
 
 @cron_task()
-def trim_flow_sessions():
+def interrupt_flow_sessions():
     """
-    Cleanup old flow sessions
+    Interrupt old flow sessions which have exceeded the absolute time limit
     """
 
-    trim_before = timezone.now() - settings.RETENTION_PERIODS["flowsession"]
-    num_deleted = 0
+    before = timezone.now() - timedelta(days=90)
+    num_interrupted = 0
 
-    while True:
-        session_ids = list(FlowSession.objects.filter(ended_on__lte=trim_before).values_list("id", flat=True)[:1000])
-        if not session_ids:
-            break
+    # get old sessions and organize into lists by org
+    by_org = defaultdict(list)
+    sessions = (
+        FlowSession.objects.filter(created_on__lte=before, status=FlowSession.STATUS_WAITING)
+        .only("id", "org")
+        .select_related("org")
+        .order_by("id")
+    )
+    for session in sessions:
+        by_org[session.org].append(session)
 
-        # detach any flows runs that belong to these sessions
-        FlowRun.objects.filter(session_id__in=session_ids).update(session_id=None)
+    for org, sessions in by_org.items():
+        for batch in chunk_list(sessions, 100):
+            mailroom.queue_interrupt(org, sessions=batch)
+            num_interrupted += len(sessions)
 
-        FlowSession.objects.filter(id__in=session_ids).delete()
-        num_deleted += len(session_ids)
-
-    return {"deleted": num_deleted}
+    return {"interrupted": num_interrupted}
 
 
 @cron_task()
-def trim_flow_starts() -> int:
+def trim_flow_sessions():
     """
-    Cleanup completed non-user created flow starts
+    Cleanup ended flow sessions
     """
 
-    trim_before = timezone.now() - settings.RETENTION_PERIODS["flowstart"]
-    num_deleted = 0
+    trim_before = timezone.now() - settings.RETENTION_PERIODS["flowsession"]
 
-    while True:
-        start_ids = list(
-            FlowStart.objects.filter(
-                created_by=None,
-                status__in=(FlowStart.STATUS_COMPLETE, FlowStart.STATUS_FAILED),
-                modified_on__lte=trim_before,
-            ).values_list("id", flat=True)[:1000]
-        )
-        if not start_ids:
-            break
+    def pre_delete(session_ids):
+        # detach any flows runs that belong to these sessions
+        FlowRun.objects.filter(session_id__in=session_ids).update(session_id=None)
 
-        # detach any flows runs that belong to these starts
-        run_ids = FlowRun.objects.filter(start_id__in=start_ids).values_list("id", flat=True)[:100000]
-        while len(run_ids) > 0:
-            for chunk in chunk_list(run_ids, 1000):
-                FlowRun.objects.filter(id__in=chunk).update(start_id=None)
-
-            # reselect for our next batch
-            run_ids = FlowRun.objects.filter(start_id__in=start_ids).values_list("id", flat=True)[:100000]
-
-        FlowStart.contacts.through.objects.filter(flowstart_id__in=start_ids).delete()
-        FlowStart.groups.through.objects.filter(flowstart_id__in=start_ids).delete()
-        FlowStartCount.objects.filter(start_id__in=start_ids).delete()
-        FlowStart.objects.filter(id__in=start_ids).delete()
-        num_deleted += len(start_ids)
+    num_deleted = delete_in_batches(FlowSession.objects.filter(ended_on__lte=trim_before), pre_delete=pre_delete)
 
     return {"deleted": num_deleted}

@@ -89,7 +89,6 @@ class ExpressionsTest(TembaTest):
 
 class FlowMigrationTest(TembaTest):
     def migrate_flow(self, flow, to_version=None):
-
         if not to_version:
             to_version = Flow.FINAL_LEGACY_VERSION
 
@@ -112,7 +111,6 @@ class FlowMigrationTest(TembaTest):
         return Flow.objects.get(pk=flow.pk)
 
     def test_migrate_malformed_single_message_flow(self):
-
         flow = Flow.objects.create(
             name="Single Message Flow",
             org=self.org,
@@ -237,7 +235,6 @@ class FlowMigrationTest(TembaTest):
         self.assertEqual(len(migrated["action_sets"]), 3)
 
     def test_migrate_to_11_12_with_one_node(self):
-
         flow = self.get_flow("migrate_to_11_12_one_node")
         flow_json = self.get_flow_json("migrate_to_11_12_one_node")
         migrated = migrate_to_version_11_12(flow_json, flow)
@@ -267,7 +264,6 @@ class FlowMigrationTest(TembaTest):
         self.assertEqual(flow.channel_dependencies.count(), 1)
 
     def test_migrate_to_11_11(self):
-
         flow = self.get_flow("migrate_to_11_11")
         flow_json = self.get_flow_json("migrate_to_11_11")
 
@@ -380,7 +376,6 @@ class FlowMigrationTest(TembaTest):
         self.assertEqual(len(migrated["rule_sets"]), 6)
 
     def test_migrate_to_11_6(self):
-
         flow = self.get_flow("migrate_to_11_6")
         flow_json = self.get_flow_json("migrate_to_11_6")
 
@@ -914,9 +909,7 @@ class FlowMigrationTest(TembaTest):
             flow_json["action_sets"][0]["actions"][0]["msg"]["eng"], "Hi @(UPPER(contact.name)). Today is @(date.now)"
         )
         self.assertEqual(flow_json["action_sets"][1]["actions"][0]["groups"][0], "@flow.response_1.category")
-        self.assertEqual(
-            flow_json["action_sets"][1]["actions"][1]["msg"]["eng"], "Was @(PROPER(LOWER(contact.name)))."
-        )
+        self.assertEqual(flow_json["action_sets"][1]["actions"][1]["msg"]["eng"], "Was @(PROPER(LOWER(contact.name))).")
         self.assertEqual(flow_json["action_sets"][1]["actions"][1]["variables"][0]["id"], "@flow.response_1.category")
         self.assertEqual(
             flow_json["rule_sets"][0]["webhook"], "http://example.com/query.php?contact=@(UPPER(contact.name))"
@@ -946,7 +939,6 @@ class FlowMigrationTest(TembaTest):
         self.assertEqual("V", flow_json.get("flow_type"))
 
     def test_migrate_to_6(self):
-
         # file format is old non-localized format
         voice_json = self.get_flow_json("ivr_v3")
         definition = voice_json.get("definition")
@@ -966,9 +958,7 @@ class FlowMigrationTest(TembaTest):
         # now we should have a language
         self.assertEqual("base", definition.get("base_language", None))
         self.assertEqual("Yes", definition["rule_sets"][0]["rules"][0]["category"]["base"])
-        self.assertEqual(
-            "Press one, two, or three. Thanks.", definition["action_sets"][0]["actions"][0]["msg"]["base"]
-        )
+        self.assertEqual("Press one, two, or three. Thanks.", definition["action_sets"][0]["actions"][0]["msg"]["base"])
         self.assertEqual("/recording.mp3", definition["action_sets"][0]["actions"][0]["recording"]["base"])
 
         # now try one that doesn't have a recording set
@@ -981,7 +971,6 @@ class FlowMigrationTest(TembaTest):
         self.assertNotIn("recording", definition["action_sets"][0]["actions"][0])
 
     def test_migrate_to_5_language(self):
-
         flow_json = self.get_flow_json("multi_language_flow")
         ruleset = flow_json["definition"]["rule_sets"][0]
         ruleset["operand"] = "@step.value|lower_case"

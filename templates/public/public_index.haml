@@ -1,8 +1,7 @@
 {% extends "public/public_frame.html" %}
 
 -block content
-  Congrats, you are now running a development version of RapidPro!
-
+  Congrats, you are now running RapidPro {{version}}!
 
   .text-xl.font-normal.mb-2.mt-6
     Getting Started
@@ -20,20 +19,17 @@
     which supports the ongoing development and maintenance of this project.
 
   .mb-8
-    
   
   .text-xl.font-normal.mb-2.mt-6
     Licensing and Attribution
   .mt-2
-    RapidPro is released under the <a href="https://github.com/rapidpro/rapidpro/blob/main/LICENSE">AGPL license</a>.
-
-  .mt-2
-    By distributing this software, you are agreeing to terms of the license which requires that all modifications you make, also be granted the AGPL license and be released publicy.
+    By distributing this software, you are agreeing to terms of the license. Please be sure
+    to review and understand all of the terms therein. If you have any questions, please direct
+    them to <a href="mailto:legal@textit.com">legal@textit.com</a>.
 
   .mt-6
     %temba-alert
       The below copyright and attribution must be presented prominently on your site.
       .copyright(style="margin-top:0.5em")
         %b
-          Copyright © 2012-2022 TextIt, UNICEF. All rights reserved.
-
+          Copyright © 2012-2023 TextIt, UNICEF. All rights reserved.

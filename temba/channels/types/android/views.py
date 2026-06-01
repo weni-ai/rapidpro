@@ -8,6 +8,7 @@ from django.utils.translation import gettext_lazy as _
 from temba.apks.models import Apk
 from temba.utils import countries
 
+from ...android.claim import claim_channel
 from ...models import Channel
 from ...views import ClaimViewMixin, UpdateTelChannelForm
 
@@ -61,9 +62,7 @@ class ClaimView(ClaimViewMixin, SmartFormView):
                 ).exclude(pk=channel.pk)
 
                 if conflicts.exists():
-                    raise forms.ValidationError(
-                        _("Another channel has this number. Please remove that channel first.")
-                    )
+                    raise forms.ValidationError(_("Another channel has this number. Please remove that channel first."))
 
             return number
 
@@ -97,8 +96,7 @@ class ClaimView(ClaimViewMixin, SmartFormView):
         if phone_country and phone_country != country:  # pragma: needs cover
             self.object.country = phone_country
 
-        self.object.claim(org, self.request.user, self.form.cleaned_data["phone_number"])
-        self.object.save()
+        claim_channel(org, self.request.user, self.object, self.form.cleaned_data["phone_number"])
 
         # trigger a sync
         self.object.trigger_sync()

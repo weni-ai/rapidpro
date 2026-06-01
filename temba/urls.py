@@ -5,7 +5,7 @@ from django.urls import re_path
 from django.views.generic import RedirectView
 from django.views.i18n import JavaScriptCatalog
 
-from temba.channels.views import register, sync
+from temba.channels.android.views import register, sync
 
 from .views import WeniRedirect
 

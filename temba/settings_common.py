@@ -7,13 +7,22 @@ from celery.schedules import crontab
 
 from django.utils.translation import gettext_lazy as _
 
-# -----------------------------------------------------------------------------------
-# Default to debugging
-# -----------------------------------------------------------------------------------
-DEBUG = True
+INTERNAL_IPS = iptools.IpRangeList("127.0.0.1", "192.168.0.10", "192.168.0.0/24", "0.0.0.0")  # network block
+HOSTNAME = "localhost"
+
+ADMINS = (("RapidPro", "code@yourdomain.io"),)
+MANAGERS = ADMINS
+
+# HTTP Headers using for outgoing requests to other services
+OUTGOING_REQUEST_HEADERS = {"User-agent": "RapidPro"}
+
+# Make this unique, and don't share it with anybody.
+SECRET_KEY = "your own secret key"
+
+HELP_URL = None
 
 # -----------------------------------------------------------------------------------
-# Sets TESTING to True if this configuration is read during a unit test
+# Tests
 # -----------------------------------------------------------------------------------
 TESTING = sys.argv[1:2] == ["test"]
 
@@ -21,19 +30,19 @@ if TESTING:
     PASSWORD_HASHERS = ("django.contrib.auth.hashers.MD5PasswordHasher",)
     DEBUG = False
 
-ADMINS = (("RapidPro", "code@yourdomain.io"),)
-MANAGERS = ADMINS
-
-USE_DEPRECATED_PYTZ = True
+TEST_RUNNER = "temba.tests.runner.TembaTestRunner"
+TEST_EXCLUDE = ("smartmin",)
 
 # User reset password limit
 USER_RECOVER_TIME_INTERVAL = 12
 USER_RECOVER_MAX_ATTEMPTS = 5
 
 # -----------------------------------------------------------------------------------
-# set the mail settings, override these in your settings.py
-# if your site was at http://temba.io, it might look like this:
+# Email
 # -----------------------------------------------------------------------------------
+
+SEND_EMAILS = False
+
 EMAIL_HOST = "smtp.gmail.com"
 EMAIL_HOST_USER = "server@temba.io"
 DEFAULT_FROM_EMAIL = "server@temba.io"
@@ -45,43 +54,44 @@ EMAIL_TIMEOUT = 10
 # their own SMTP server.
 FLOW_FROM_EMAIL = "Temba <no-reply@temba.io>"
 
-# HTTP Headers using for outgoing requests to other services
-OUTGOING_REQUEST_HEADERS = {"User-agent": "RapidPro"}
+# -----------------------------------------------------------------------------------
+# Storage
+# -----------------------------------------------------------------------------------
+
+STORAGES = {
+    # default storage for things like exports, imports
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    # wherever rp-archiver writes archive files (must be S3 compatible)
+    "archives": {
+        "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+        "OPTIONS": {"bucket_name": "temba-archives"},
+    },
+    # wherever courier and mailroom are writing logs
+    "logs": {"BACKEND": "django.core.files.storage.InMemoryStorage"},
+    # media file uploads that need to be publicly accessible
+    "public": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    # standard Django static files storage
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+}
 
 STORAGE_URL = None  # may be an absolute URL to /media (like http://localhost:8000/media) or AWS S3
 STORAGE_ROOT_DIR = "test_orgs" if TESTING else "orgs"
 
-# -----------------------------------------------------------------------------------
-# AWS S3 storage used in production
-# -----------------------------------------------------------------------------------
+# settings used by django-storages
 AWS_ACCESS_KEY_ID = "aws_access_key_id"
 AWS_SECRET_ACCESS_KEY = "aws_secret_access_key"
-AWS_DEFAULT_ACL = "private"
-
-AWS_STORAGE_BUCKET_NAME = "dl-temba-io"
-AWS_BUCKET_DOMAIN = AWS_STORAGE_BUCKET_NAME + ".s3.amazonaws.com"
-
-# bucket where archives files are stored
-ARCHIVE_BUCKET = "dl-temba-archives"
 
 # -----------------------------------------------------------------------------------
-# On Unix systems, a value of None will cause Django to use the same
-# timezone as the operating system.
-# If running in a Windows environment this must be set to the same as your
-# system time zone
+# Localization
 # -----------------------------------------------------------------------------------
+
 USE_TZ = True
 TIME_ZONE = "GMT"
 USER_TIME_ZONE = "Africa/Kigali"
+USE_DEPRECATED_PYTZ = True
 
-# -----------------------------------------------------------------------------------
-# Default language used for this installation
-# -----------------------------------------------------------------------------------
 LANGUAGE_CODE = "en-us"
 
-# -----------------------------------------------------------------------------------
-# Available languages for translation
-# -----------------------------------------------------------------------------------
 LANGUAGES = (
     ("en-us", _("English")),
     ("cs", _("Czech")),
@@ -95,13 +105,12 @@ DEFAULT_LANGUAGE = "en-us"
 
 SITE_ID = 1
 
-# If you set this to False, Django will make some optimizations so as not
-# to load the internationalization machinery.
 USE_I18N = True
-
-# If you set this to False, Django will not format dates, numbers and
-# calendars according to the current locale
 USE_L10N = True
+
+# -----------------------------------------------------------------------------------
+# Static Files
+# -----------------------------------------------------------------------------------
 
 # List of finder classes that know how to find static files in
 # various locations.
@@ -111,12 +120,7 @@ STATICFILES_FINDERS = (
     "compressor.finders.CompressorFinder",
 )
 
-# Make this unique, and don't share it with anybody.
-SECRET_KEY = "your own secret key"
 
-# -----------------------------------------------------------------------------------
-# Directory Configuration
-# -----------------------------------------------------------------------------------
 PROJECT_DIR = os.path.join(os.path.abspath(os.path.dirname(__file__)))
 LOCALE_PATHS = (os.path.join(PROJECT_DIR, "../locale"),)
 RESOURCES_DIR = os.path.join(PROJECT_DIR, "../resources")
@@ -137,12 +141,10 @@ COMPRESS_ROOT = os.path.join(PROJECT_DIR, "../sitestatic")
 MEDIA_ROOT = os.path.join(PROJECT_DIR, "../media")
 MEDIA_URL = "/media/"
 
-HELP_URL = None
-
-
 # -----------------------------------------------------------------------------------
-# Templates Configuration
+# Templates
 # -----------------------------------------------------------------------------------
+
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
@@ -162,9 +164,7 @@ TEMPLATES = [
                 "temba.context_processors.branding",
                 "temba.context_processors.config",
                 "temba.orgs.context_processors.user_group_perms_processor",
-                "temba.orgs.context_processors.user_orgs_for_brand",
-                "temba.context_processors_weni.use_weni_layout",
-                "temba.context_processors_weni.old_design_excluded_channels_codes",
+                "temba.orgs.context_processors.user_orgs",
             ],
             "loaders": [
                 "temba.utils.haml.HamlFilesystemLoader",
@@ -172,7 +172,6 @@ TEMPLATES = [
                 "django.template.loaders.filesystem.Loader",
                 "django.template.loaders.app_directories.Loader",
             ],
-            "debug": False if TESTING else DEBUG,
         },
     }
 ]
@@ -182,6 +181,10 @@ if TESTING:
 
 FORM_RENDERER = "django.forms.renderers.TemplatesSetting"
 
+# -----------------------------------------------------------------------------------
+# Middleware
+# -----------------------------------------------------------------------------------
+
 MIDDLEWARE = (
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -190,11 +193,15 @@ MIDDLEWARE = (
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "temba.middleware.BrandingMiddleware",
     "temba.middleware.OrgMiddleware",
+    "temba.middleware.BrandingMiddleware",
     "temba.middleware.LanguageMiddleware",
     "temba.middleware.TimezoneMiddleware",
 )
+
+# -----------------------------------------------------------------------------------
+# Apps
+# -----------------------------------------------------------------------------------
 
 ROOT_URLCONF = "temba.urls"
 
@@ -215,6 +222,7 @@ INSTALLED_APPS = (
     "django.contrib.sitemaps",
     "django.contrib.postgres",
     "django.forms",
+    "formtools",
     # Haml-like templates
     "hamlpy",
     # Redis cache
@@ -262,6 +270,10 @@ INSTALLED_APPS = (
 # the last installed app that uses smartmin permissions
 PERMISSIONS_APP = "temba.airtime"
 
+# -----------------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------------
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": True,
@@ -273,39 +285,35 @@ LOGGING = {
 }
 
 # -----------------------------------------------------------------------------------
-# Branding Configuration
+# Branding
 # -----------------------------------------------------------------------------------
-BRANDS = [
-    {
-        "slug": "rapidpro",
-        "name": "RapidPro",
-        "hosts": ["rapidpro.io"],
-        "org": "UNICEF",
-        "domain": "app.rapidpro.io",
-        "colors": dict(primary="#0c6596"),
-        "styles": ["brands/rapidpro/font/style.css"],
-        "email": "join@rapidpro.io",
-        "support_email": "support@rapidpro.io",
-        "link": "https://app.rapidpro.io",
-        "docs_link": "http://docs.rapidpro.io",
-        "ticket_domain": "tickets.rapidpro.io",
-        "favico": "brands/rapidpro/rapidpro.ico",
-        "splash": "brands/rapidpro/splash.jpg",
-        "logo": "images/logo-dark.svg",
-        "allow_signups": True,
-        "title": _("Visually build nationally scalable mobile applications"),
-    }
-]
-DEFAULT_BRAND = os.environ.get("DEFAULT_BRAND", "rapidpro")
 
-FEATURES = {"locations", "ticketers"}
+BRAND = {
+    "slug": "rapidpro",
+    "name": "RapidPro",
+    "hosts": ["rapidpro.io"],
+    "org": "UNICEF",
+    "domain": "app.rapidpro.io",
+    "styles": [],
+    "email": "join@rapidpro.io",
+    "support_email": "support@rapidpro.io",
+    "link": "https://app.rapidpro.io",
+    "docs_link": "http://docs.rapidpro.io",
+    "ticket_domain": "tickets.rapidpro.io",
+    "favico": "brands/rapidpro/rapidpro.ico",
+    "splash": "brands/rapidpro/splash.jpg",
+    "logo": "images/logo-dark.svg",
+    "allow_signups": True,
+    "title": _("Visually build nationally scalable mobile applications"),
+}
+
+FEATURES = {"locations", "surveyor", "ticketers"}
 
 
 # -----------------------------------------------------------------------------------
-# Permission Management
+# Permissions
 # -----------------------------------------------------------------------------------
 
-# this lets us easily create new permissions across our objects
 PERMISSIONS = {
     "*": (
         "create",  # can create an object
@@ -321,24 +329,13 @@ PERMISSIONS = {
     "archives.archive": ("api", "run", "message"),
     "campaigns.campaign": ("api", "archived", "archive", "activate", "menu"),
     "campaigns.campaignevent": ("api",),
-    "channels.channel": (
-        "api",
-        "bulk_sender_options",
-        "claim",
-        "configuration",
-        "create_bulk_sender",
-        "create_caller",
-        "errors",
-        "facebook_whitelist",
-        "menu",
-    ),
+    "channels.channel": ("api", "chart", "claim", "configuration", "errors", "facebook_whitelist"),
     "channels.channellog": ("connection",),
     "channels.channelevent": ("api",),
-    "classifiers.classifier": ("connect", "api", "sync", "menu"),
+    "classifiers.classifier": ("connect", "api", "sync"),
     "classifiers.intent": ("api",),
     "contacts.contact": (
         "api",
-        "break_anon",
         "export",
         "history",
         "interrupt",
@@ -346,22 +343,19 @@ PERMISSIONS = {
         "omnibox",
         "open_ticket",
         "start",
-        "update_fields_input",
-        "update_fields",
     ),
-    "contacts.contactfield": ("api", "json", "menu", "update_priority", "featured", "filter_by_type"),
+    "contacts.contactfield": ("api", "update_priority"),
     "contacts.contactgroup": ("api", "menu"),
     "contacts.contactimport": ("preview",),
     "flows.flowstart": ("api",),
     "flows.flow": (
         "activity_chart",
+        "activity_data",
         "activity_list",
         "activity",
         "api",
         "archived",
         "assets",
-        "broadcast",
-        "campaign",
         "category_counts",
         "change_language",
         "copy",
@@ -376,8 +370,8 @@ PERMISSIONS = {
         "recent_contacts",
         "results",
         "revisions",
-        "run_table",
         "simulate",
+        "start",
     ),
     "flows.flowsession": ("json",),
     "globals.global": ("api", "unused"),
@@ -386,14 +380,12 @@ PERMISSIONS = {
     "msgs.broadcast": (
         "api",
         "scheduled",
-        "scheduled_create",
         "scheduled_read",
-        "scheduled_update",
         "scheduled_delete",
         "send",
     ),
     "msgs.label": ("api",),
-    "msgs.media": ("upload", "list"),
+    "msgs.media": ("upload", "list", "api"),
     "msgs.msg": (
         "api",
         "archive",
@@ -404,19 +396,17 @@ PERMISSIONS = {
     ),
     "orgs.org": (
         "account",
-        "accounts",
         "api",
         "country",
         "create_login",
         "create",
         "dashboard",
+        "delete_child",
         "download",
         "edit_sub_org",
         "edit",
         "export",
         "grant",
-        "home",
-        "import",
         "join_accept",
         "join",
         "languages",
@@ -425,8 +415,6 @@ PERMISSIONS = {
         "manage_integrations",
         "manage",
         "menu",
-        "plan",
-        "plivo_connect",
         "profile",
         "prometheus",
         "resthooks",
@@ -441,9 +429,6 @@ PERMISSIONS = {
         "twilio_account",
         "twilio_connect",
         "two_factor",
-        "vonage_account",
-        "vonage_connect",
-        "whatsapp_cloud_connect",
         "workspace",
     ),
     "request_logs.httplog": ("webhooks", "classifier", "ticketer"),
@@ -459,7 +444,7 @@ PERMISSIONS = {
 GROUP_PERMISSIONS = {
     "Service Users": ("flows.flow_assets", "msgs.msg_create"),  # internal Temba services have limited permissions
     "Alpha": (),
-    "Beta": ("orgs.org_whatsapp_cloud_connect",),
+    "Beta": (),
     "Dashboard": ("orgs.org_dashboard",),
     "Surveyors": (
         "contacts.contact_api",
@@ -469,16 +454,9 @@ GROUP_PERMISSIONS = {
         "locations.adminboundary_api",
         "msgs.msg_api",
         "orgs.org_api",
-        "orgs.org_spa",
         "orgs.org_surveyor",
     ),
-    "Customer Support": (
-        "campaigns.campaign_read",  # anywhere we allow servicing still needs these
-        "channels.channel_read",
-        "channels.channellog_read",
-        "contacts.contact_read",
-        "flows.flow_editor",
-    ),
+    "Customer Support": (),
     "Granters": ("orgs.org_grant",),
     "Administrators": (
         "airtime.airtimetransfer_list",
@@ -491,11 +469,8 @@ GROUP_PERMISSIONS = {
         "campaigns.campaign.*",
         "campaigns.campaignevent.*",
         "channels.channel_api",
-        "channels.channel_bulk_sender_options",
         "channels.channel_claim",
         "channels.channel_configuration",
-        "channels.channel_create_bulk_sender",
-        "channels.channel_create_caller",
         "channels.channel_create",
         "channels.channel_delete",
         "channels.channel_facebook_whitelist",
@@ -525,8 +500,6 @@ GROUP_PERMISSIONS = {
         "contacts.contact_omnibox",
         "contacts.contact_open_ticket",
         "contacts.contact_read",
-        "contacts.contact_update_fields_input",
-        "contacts.contact_update_fields",
         "contacts.contact_update",
         "contacts.contactfield.*",
         "contacts.contactgroup.*",
@@ -544,6 +517,7 @@ GROUP_PERMISSIONS = {
         "locations.adminboundary_geometry",
         "msgs.broadcast.*",
         "msgs.label.*",
+        "msgs.media_api",
         "msgs.media_upload",
         "msgs.msg_api",
         "msgs.msg_archive",
@@ -556,38 +530,29 @@ GROUP_PERMISSIONS = {
         "notifications.incident.*",
         "notifications.notification.*",
         "orgs.org_account",
-        "orgs.org_accounts",
         "orgs.org_api",
         "orgs.org_country",
         "orgs.org_create",
         "orgs.org_dashboard",
-        "orgs.org_delete",
+        "orgs.org_delete_child",
         "orgs.org_download",
         "orgs.org_edit_sub_org",
         "orgs.org_edit",
         "orgs.org_export",
-        "orgs.org_home",
-        "orgs.org_import",
         "orgs.org_languages",
         "orgs.org_manage_accounts_sub_org",
         "orgs.org_manage_accounts",
         "orgs.org_manage_integrations",
         "orgs.org_menu",
-        "orgs.org_plan",
-        "orgs.org_plivo_connect",
         "orgs.org_profile",
         "orgs.org_prometheus",
         "orgs.org_resthooks",
         "orgs.org_smtp_server",
-        "orgs.org_spa",
         "orgs.org_sub_orgs",
         "orgs.org_token",
-        "orgs.org_twilio_account",
-        "orgs.org_twilio_connect",
         "orgs.org_two_factor",
-        "orgs.org_vonage_account",
-        "orgs.org_vonage_connect",
         "orgs.org_workspace",
+        "orgs.orgimport.*",
         "request_logs.httplog_list",
         "request_logs.httplog_read",
         "request_logs.httplog_webhooks",
@@ -611,11 +576,8 @@ GROUP_PERMISSIONS = {
         "campaigns.campaign.*",
         "campaigns.campaignevent.*",
         "channels.channel_api",
-        "channels.channel_bulk_sender_options",
         "channels.channel_claim",
         "channels.channel_configuration",
-        "channels.channel_create_bulk_sender",
-        "channels.channel_create_caller",
         "channels.channel_create",
         "channels.channel_delete",
         "channels.channel_list",
@@ -639,8 +601,6 @@ GROUP_PERMISSIONS = {
         "contacts.contact_omnibox",
         "contacts.contact_open_ticket",
         "contacts.contact_read",
-        "contacts.contact_update_fields_input",
-        "contacts.contact_update_fields",
         "contacts.contact_update",
         "contacts.contactfield.*",
         "contacts.contactgroup.*",
@@ -659,6 +619,7 @@ GROUP_PERMISSIONS = {
         "locations.adminboundary_geometry",
         "msgs.broadcast.*",
         "msgs.label.*",
+        "msgs.media_api",
         "msgs.media_upload",
         "msgs.msg_api",
         "msgs.msg_archive",
@@ -673,21 +634,20 @@ GROUP_PERMISSIONS = {
         "orgs.org_api",
         "orgs.org_download",
         "orgs.org_export",
-        "orgs.org_home",
-        "orgs.org_import",
+        "orgs.org_languages",
         "orgs.org_menu",
         "orgs.org_profile",
         "orgs.org_resthooks",
-        "orgs.org_spa",
         "orgs.org_token",
         "orgs.org_two_factor",
         "orgs.org_workspace",
+        "orgs.orgimport.*",
         "request_logs.httplog_webhooks",
         "schedules.schedule.*",
         "templates.template_api",
         "tickets.ticket.*",
         "tickets.ticketer_api",
-        "tickets.topic_api",
+        "tickets.topic.*",
         "triggers.trigger.*",
     ),
     "Viewers": (
@@ -716,10 +676,11 @@ GROUP_PERMISSIONS = {
         "contacts.contactgroup_read",
         "contacts.contactimport_read",
         "flows.flow_activity_chart",
+        "flows.flow_activity_data",
         "flows.flow_activity",
+        "flows.flow_api",
         "flows.flow_archived",
         "flows.flow_assets",
-        "flows.flow_campaign",
         "flows.flow_category_counts",
         "flows.flow_editor",
         "flows.flow_export_results",
@@ -730,10 +691,10 @@ GROUP_PERMISSIONS = {
         "flows.flow_recent_contacts",
         "flows.flow_results",
         "flows.flow_revisions",
-        "flows.flow_run_table",
         "flows.flow_simulate",
         "flows.flowstart_list",
         "globals.global_api",
+        "ivr.call_list",
         "locations.adminboundary_alias",
         "locations.adminboundary_boundaries",
         "locations.adminboundary_geometry",
@@ -745,13 +706,12 @@ GROUP_PERMISSIONS = {
         "msgs.msg_menu",
         "notifications.notification_list",
         "orgs.org_account",
+        "orgs.org_api",
         "orgs.org_download",
         "orgs.org_export",
-        "orgs.org_home",
         "orgs.org_menu",
         "orgs.org_menu",
         "orgs.org_profile",
-        "orgs.org_spa",
         "orgs.org_two_factor",
         "orgs.org_workspace",
         "tickets.ticketer_api",
@@ -768,13 +728,16 @@ GROUP_PERMISSIONS = {
         "contacts.contactfield_api",
         "contacts.contactgroup_api",
         "globals.global_api",
+        "msgs.media_api",
+        "msgs.msg_api",
         "msgs.broadcast_api",
         "notifications.notification_list",
         "orgs.org_account",
-        "orgs.org_home",
+        "orgs.org_api",
+        "orgs.org_languages",
         "orgs.org_menu",
         "orgs.org_profile",
-        "orgs.org_spa",
+        "orgs.org_two_factor",
         "tickets.ticket_api",
         "tickets.ticket_assign",
         "tickets.ticket_assignee",
@@ -789,6 +752,7 @@ GROUP_PERMISSIONS = {
 # -----------------------------------------------------------------------------------
 # Login / Logout
 # -----------------------------------------------------------------------------------
+
 LOGIN_URL = "/users/login/"
 LOGOUT_URL = "/users/logout/"
 LOGIN_REDIRECT_URL = "/org/choose/"
@@ -803,14 +767,9 @@ AUTH_PASSWORD_VALIDATORS = [
 ANONYMOUS_USER_NAME = "AnonymousUser"
 
 # -----------------------------------------------------------------------------------
-# Our test runner includes the ability to exclude apps
+# Database
 # -----------------------------------------------------------------------------------
-TEST_RUNNER = "temba.tests.runner.TembaTestRunner"
-TEST_EXCLUDE = ("smartmin",)
 
-# -----------------------------------------------------------------------------------
-# Need a PostgreSQL database on localhost with postgis extension installed.
-# -----------------------------------------------------------------------------------
 _default_database_config = {
     "ENGINE": "django.contrib.gis.db.backends.postgis",
     "NAME": "temba",
@@ -830,34 +789,30 @@ DATABASES = {"default": _default_database_config, "readonly": _default_database_
 
 DEFAULT_AUTO_FIELD = "django.db.models.AutoField"
 
-INTERNAL_IPS = iptools.IpRangeList("127.0.0.1", "192.168.0.10", "192.168.0.0/24", "0.0.0.0")  # network block
-
-HOSTNAME = "localhost"
-
-# The URL and port of the proxy server to use when needed (if any, in requests format)
-OUTGOING_PROXIES = {}
-
 # -----------------------------------------------------------------------------------
-# Caching using Redis
+# Cache
 # -----------------------------------------------------------------------------------
-REDIS_HOST = "localhost"
-REDIS_PORT = 6379
-REDIS_DB = 10 if TESTING else 15  # we use a redis db of 10 for testing so that we maintain caches for dev
+
+_redis_url = f"redis://localhost:6379/{10 if TESTING else 15}"
 
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": "redis://%s:%s/%s" % (REDIS_HOST, REDIS_PORT, REDIS_DB),
+        "LOCATION": _redis_url,
         "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient"},
     }
 }
 
+SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"
+SESSION_CACHE_ALIAS = "default"
+
 # -----------------------------------------------------------------------------------
-# Async tasks using Celery
+# Celery
 # -----------------------------------------------------------------------------------
+
+CELERY_BROKER_URL = _redis_url
 CELERY_RESULT_BACKEND = None
 CELERY_TASK_TRACK_STARTED = True
-CELERY_BROKER_URL = "redis://%s:%d/%d" % (REDIS_HOST, REDIS_PORT, REDIS_DB)
 
 # by default, celery doesn't have any timeout on our redis connections, this fixes that
 CELERY_BROKER_TRANSPORT_OPTIONS = {"socket_timeout": 5}
@@ -867,7 +822,8 @@ CELERY_BEAT_SCHEDULE = {
     "check-elasticsearch-lag": {"task": "check_elasticsearch_lag", "schedule": timedelta(seconds=300)},
     "delete-released-orgs": {"task": "delete_released_orgs", "schedule": crontab(hour=4, minute=0)},
     "fail-old-messages": {"task": "fail_old_messages", "schedule": crontab(hour=0, minute=0)},
-    "resolve-twitter-ids-task": {"task": "resolve_twitter_ids", "schedule": timedelta(seconds=900)},
+    "interrupt-flow-sessions": {"task": "interrupt_flow_sessions", "schedule": crontab(hour=23, minute=30)},
+    "resolve-twitter-ids": {"task": "resolve_twitter_ids", "schedule": timedelta(seconds=900)},
     "refresh-whatsapp-tokens": {"task": "refresh_whatsapp_tokens", "schedule": crontab(hour=6, minute=0)},
     "refresh-whatsapp-templates": {"task": "refresh_whatsapp_templates", "schedule": timedelta(seconds=900)},
     "send-notification-emails": {"task": "send_notification_emails", "schedule": timedelta(seconds=60)},
@@ -880,27 +836,22 @@ CELERY_BEAT_SCHEDULE = {
     "sync-classifier-intents": {"task": "sync_classifier_intents", "schedule": timedelta(seconds=300)},
     "sync-old-seen-channels": {"task": "sync_old_seen_channels", "schedule": timedelta(seconds=600)},
     "track-org-channel-counts": {"task": "track_org_channel_counts", "schedule": crontab(hour=4, minute=0)},
-    "trim-channel-log": {"task": "trim_channel_log", "schedule": crontab(hour=3, minute=0)},
+    "trim-channel-logs": {"task": "trim_channel_logs", "schedule": crontab(hour=3, minute=0)},
     "trim-event-fires": {"task": "trim_event_fires", "schedule": timedelta(seconds=900)},
     "trim-flow-revisions": {"task": "trim_flow_revisions", "schedule": crontab(hour=0, minute=0)},
     "trim-flow-sessions": {"task": "trim_flow_sessions", "schedule": crontab(hour=0, minute=0)},
-    "trim-flow-starts": {"task": "trim_flow_starts", "schedule": crontab(hour=1, minute=0)},
     "trim-http-logs": {"task": "trim_http_logs", "schedule": crontab(hour=2, minute=0)},
     "trim-sync-events": {"task": "trim_sync_events", "schedule": crontab(hour=3, minute=0)},
     "trim-webhook-events": {"task": "trim_webhook_events", "schedule": crontab(hour=3, minute=0)},
 }
 
 # -----------------------------------------------------------------------------------
-# Django-rest-framework configuration
+# API
 # -----------------------------------------------------------------------------------
+
 REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
-    "DEFAULT_AUTHENTICATION_CLASSES": (
-        "temba.api.support.APISessionAuthentication",
-        "temba.api.support.APITokenAuthentication",
-        "temba.api.support.APIBasicAuthentication",
-    ),
-    "DEFAULT_THROTTLE_CLASSES": ("temba.api.support.OrgUserRateThrottle",),
+    "DEFAULT_AUTHENTICATION_CLASSES": ("temba.api.support.APISessionAuthentication",),
     "DEFAULT_THROTTLE_RATES": {
         "v2": "2500/hour",
         "v2.contacts": "2500/hour",
@@ -908,17 +859,15 @@ REST_FRAMEWORK = {
         "v2.broadcasts": "36000/hour",
         "v2.runs": "2500/hour",
     },
-    "PAGE_SIZE": 250,
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.LimitOffsetPagination",
     "DEFAULT_RENDERER_CLASSES": ("temba.api.support.DocumentationRenderer", "rest_framework.renderers.JSONRenderer"),
+    "PAGE_SIZE": 250,
     "EXCEPTION_HANDLER": "temba.api.support.temba_exception_handler",
-    "UNICODE_JSON": False,
-    "STRICT_JSON": False,
 }
 REST_HANDLE_EXCEPTIONS = not TESTING
 
 # -----------------------------------------------------------------------------------
-# Django Compressor configuration
+# Compression
 # -----------------------------------------------------------------------------------
 
 if TESTING:
@@ -932,21 +881,9 @@ else:
 COMPRESS_ENABLED = False
 COMPRESS_OFFLINE = False
 
-# build up our offline compression context based on available brands
-COMPRESS_OFFLINE_CONTEXT = []
-for brand in BRANDS:
-    context = dict(STATIC_URL=STATIC_URL, base_template="frame.html", debug=False, testing=False)
-    context["brand"] = dict(slug=brand["slug"], styles=brand["styles"])
-    COMPRESS_OFFLINE_CONTEXT.append(context)
-
 # -----------------------------------------------------------------------------------
-# RapidPro configuration settings
+# Pluggable Types
 # -----------------------------------------------------------------------------------
-
-######
-# DANGER: only turn this on if you know what you are doing!
-#         could cause emails to be sent in test environment
-SEND_EMAILS = False
 
 INTEGRATION_TYPES = [
     "temba.orgs.integrations.dtone.DTOneType",
@@ -970,6 +907,7 @@ TICKETER_TYPES = [
 CHANNEL_TYPES = [
     "temba.channels.types.africastalking.AfricasTalkingType",
     "temba.channels.types.arabiacell.ArabiaCellType",
+    "temba.channels.types.bandwidth.BandwidthType",
     "temba.channels.types.blackmyna.BlackmynaType",
     "temba.channels.types.bongolive.BongoLiveType",
     "temba.channels.types.burstsms.BurstSMSType",
@@ -979,6 +917,7 @@ CHANNEL_TYPES = [
     "temba.channels.types.clicksend.ClickSendType",
     "temba.channels.types.dartmedia.DartMediaType",
     "temba.channels.types.dialog360.Dialog360Type",
+    "temba.channels.types.dialog360_cloud.Dialog360CloudType",
     "temba.channels.types.discord.DiscordType",
     "temba.channels.types.dmark.DMarkType",
     "temba.channels.types.external.ExternalType",
@@ -1004,6 +943,7 @@ CHANNEL_TYPES = [
     "temba.channels.types.macrokiosk.MacrokioskType",
     "temba.channels.types.mblox.MbloxType",
     "temba.channels.types.messangi.MessangiType",
+    "temba.channels.types.mtn.MtnType",
     "temba.channels.types.mtarget.MtargetType",
     "temba.channels.types.novo.NovoType",
     "temba.channels.types.playmobile.PlayMobileType",
@@ -1014,6 +954,7 @@ CHANNEL_TYPES = [
     "temba.channels.types.signalwire.SignalWireType",
     "temba.channels.types.slack.SlackType",
     "temba.channels.types.smscentral.SMSCentralType",
+    "temba.channels.types.somleng.SomlengType",
     "temba.channels.types.start.StartType",
     "temba.channels.types.teams.TeamsType",
     "temba.channels.types.telegram.TelegramType",
@@ -1022,7 +963,6 @@ CHANNEL_TYPES = [
     "temba.channels.types.twilio_messaging_service.TwilioMessagingServiceType",
     "temba.channels.types.twilio_whatsapp.TwilioWhatsappType",
     "temba.channels.types.twilio.TwilioType",
-    "temba.channels.types.twiml_api.TwimlAPIType",
     "temba.channels.types.twitter_legacy.TwitterLegacyType",
     "temba.channels.types.twitter.TwitterType",
     "temba.channels.types.verboice.VerboiceType",
@@ -1049,37 +989,21 @@ ANALYTICS_TYPES = [
 NON_ISO6391_LANGUAGES = {"mul", "und"}
 
 # -----------------------------------------------------------------------------------
-# Store sessions in our cache
+# Mailroom
 # -----------------------------------------------------------------------------------
-SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"
-SESSION_CACHE_ALIAS = "default"
+
+MAILROOM_URL = None
+MAILROOM_AUTH_TOKEN = None
 
 # -----------------------------------------------------------------------------------
-# 3rd Party Integration Keys
+# ElasticSearch
 # -----------------------------------------------------------------------------------
-TWITTER_API_KEY = os.environ.get("TWITTER_API_KEY", "MISSING_TWITTER_API_KEY")
-TWITTER_API_SECRET = os.environ.get("TWITTER_API_SECRET", "MISSING_TWITTER_API_SECRET")
 
-MAILGUN_API_KEY = os.environ.get("MAILGUN_API_KEY", "")
-
-ZENDESK_CLIENT_ID = os.environ.get("ZENDESK_CLIENT_ID", "")
-ZENDESK_CLIENT_SECRET = os.environ.get("ZENDESK_CLIENT_SECRET", "")
+ELASTICSEARCH_URL = os.environ.get("ELASTICSEARCH_URL", "http://localhost:9200")
 
 # -----------------------------------------------------------------------------------
-#
-#    1. Create an Facebook app on https://developers.facebook.com/apps/
-#
-#    2. Copy the Facebook Application ID
-#
-#    3. From Settings > Basic, show and copy the Facebook Application Secret
-#
-#    4. Generate a Random Secret to use as Facebook Webhook Secret as described
-#       on https://developers.facebook.com/docs/messenger-platform/webhook#setup
-#
+# Data Model
 # -----------------------------------------------------------------------------------
-FACEBOOK_APPLICATION_ID = os.environ.get("FACEBOOK_APPLICATION_ID", "MISSING_FACEBOOK_APPLICATION_ID")
-FACEBOOK_APPLICATION_SECRET = os.environ.get("FACEBOOK_APPLICATION_SECRET", "MISSING_FACEBOOK_APPLICATION_SECRET")
-FACEBOOK_WEBHOOK_SECRET = os.environ.get("FACEBOOK_WEBHOOK_SECRET", "MISSING_FACEBOOK_WEBHOOK_SECRET")
 
 WHATSAPP_ADMIN_SYSTEM_USER_ID = os.environ.get(
     "WHATSAPP_ADMIN_SYSTEM_USER_ID", "MISSING_WHATSAPP_ADMIN_SYSTEM_USER_ID"
@@ -1128,26 +1052,50 @@ ORG_LIMIT_DEFAULTS = {
     "topics": 250,
 }
 
-# -----------------------------------------------------------------------------------
-# Data retention periods - tasks trim away data older than these settings
-# -----------------------------------------------------------------------------------
 RETENTION_PERIODS = {
-    "channellog": timedelta(days=3),
+    "channellog": timedelta(days=14),
     "eventfire": timedelta(days=90),  # matches default rp-archiver behavior
     "flowsession": timedelta(days=7),
-    "flowstart": timedelta(days=7),
     "httplog": timedelta(days=3),
     "syncevent": timedelta(days=7),
     "webhookevent": timedelta(hours=48),
 }
 
 # -----------------------------------------------------------------------------------
-# Mailroom
+# 3rd Party Integrations
 # -----------------------------------------------------------------------------------
-MAILROOM_URL = None
-MAILROOM_AUTH_TOKEN = None
 
-# -----------------------------------------------------------------------------------
-# ElasticSearch
-# -----------------------------------------------------------------------------------
-ELASTICSEARCH_URL = os.environ.get("ELASTICSEARCH_URL", "http://localhost:9200")
+TWITTER_API_KEY = os.environ.get("TWITTER_API_KEY", "MISSING_TWITTER_API_KEY")
+TWITTER_API_SECRET = os.environ.get("TWITTER_API_SECRET", "MISSING_TWITTER_API_SECRET")
+
+MAILGUN_API_KEY = os.environ.get("MAILGUN_API_KEY", "")
+
+ZENDESK_CLIENT_ID = os.environ.get("ZENDESK_CLIENT_ID", "")
+ZENDESK_CLIENT_SECRET = os.environ.get("ZENDESK_CLIENT_SECRET", "")
+
+
+#    1. Create an Facebook app on https://developers.facebook.com/apps/
+#
+#    2. Copy the Facebook Application ID
+#
+#    3. From Settings > Basic, show and copy the Facebook Application Secret
+#
+#    4. Generate a Random Secret to use as Facebook Webhook Secret as described
+#       on https://developers.facebook.com/docs/messenger-platform/webhook#setup
+#
+FACEBOOK_APPLICATION_ID = os.environ.get("FACEBOOK_APPLICATION_ID", "MISSING_FACEBOOK_APPLICATION_ID")
+FACEBOOK_APPLICATION_SECRET = os.environ.get("FACEBOOK_APPLICATION_SECRET", "MISSING_FACEBOOK_APPLICATION_SECRET")
+FACEBOOK_WEBHOOK_SECRET = os.environ.get("FACEBOOK_WEBHOOK_SECRET", "MISSING_FACEBOOK_WEBHOOK_SECRET")
+
+WHATSAPP_ADMIN_SYSTEM_USER_ID = os.environ.get("WHATSAPP_ADMIN_SYSTEM_USER_ID", "MISSING_WHATSAPP_ADMIN_SYSTEM_USER_ID")
+WHATSAPP_ADMIN_SYSTEM_USER_TOKEN = os.environ.get(
+    "WHATSAPP_ADMIN_SYSTEM_USER_TOKEN", "MISSING_WHATSAPP_ADMIN_SYSTEM_USER_TOKEN"
+)
+WHATSAPP_FACEBOOK_BUSINESS_ID = os.environ.get("WHATSAPP_FACEBOOK_BUSINESS_ID", "MISSING_WHATSAPP_FACEBOOK_BUSINESS_ID")
+
+# IP Addresses
+# These are the externally accessible IP addresses of the servers running RapidPro.
+# Needed for channel types that authenticate by whitelisting public IPs.
+#
+# You need to change these to real addresses to work with these.
+IP_ADDRESSES = ("172.16.10.10", "162.16.10.20")

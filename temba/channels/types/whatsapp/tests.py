@@ -9,6 +9,7 @@ from django.urls import reverse
 from temba.request_logs.models import HTTPLog
 from temba.templates.models import TemplateTranslation
 from temba.tests import CRUDLTestMixin, MockResponse, TembaTest
+from temba.utils.views import TEMBA_MENU_SELECTION
 from temba.utils.whatsapp.tasks import refresh_whatsapp_contacts, refresh_whatsapp_templates
 
 from ...models import Channel
@@ -24,8 +25,9 @@ from .type import (
 
 
 class WhatsAppTypeTest(CRUDLTestMixin, TembaTest):
+    @patch("socket.gethostbyname", return_value="123.123.123.123")
     @patch("temba.channels.types.whatsapp.WhatsAppType.check_health")
-    def test_claim(self, mock_health):
+    def test_claim(self, mock_health, mock_socket_hostname):
         mock_health.return_value = MockResponse(200, '{"meta": {"api_status": "stable", "version": "v2.35.2"}}')
         TemplateTranslation.objects.all().delete()
         Channel.objects.all().delete()
@@ -170,6 +172,79 @@ class WhatsAppTypeTest(CRUDLTestMixin, TembaTest):
         # deactivate our channel
         channel.release(self.admin)
 
+    @patch("socket.gethostbyname", return_value="123.123.123.123")
+    @patch("temba.channels.types.whatsapp.WhatsAppType.check_health")
+    def test_duplicate_number_channels(self, mock_health, mock_socket_hostname):
+        mock_health.return_value = MockResponse(200, '{"meta": {"api_status": "stable", "version": "v2.35.2"}}')
+        TemplateTranslation.objects.all().delete()
+        Channel.objects.all().delete()
+
+        url = reverse("channels.types.whatsapp.claim")
+        self.login(self.admin)
+
+        response = self.client.get(reverse("channels.channel_claim"))
+        self.assertNotContains(response, url)
+
+        response = self.client.get(url)
+        self.assertEqual(200, response.status_code)
+        post_data = response.context["form"].initial
+
+        post_data["number"] = "0788123123"
+        post_data["username"] = "temba"
+        post_data["password"] = "tembapasswd"
+        post_data["country"] = "RW"
+        post_data["base_url"] = "https://nyaruka.com/whatsapp"
+        post_data["facebook_namespace"] = "my-custom-app"
+        post_data["facebook_business_id"] = "1234"
+        post_data["facebook_access_token"] = "token123"
+        post_data["facebook_template_list_domain"] = "graph.facebook.com"
+        post_data["facebook_template_list_api_version"] = ""
+
+        # will fail with invalid phone number
+        response = self.client.post(url, post_data)
+
+        with patch("requests.post") as mock_post, patch("requests.get") as mock_get, patch(
+            "requests.patch"
+        ) as mock_patch:
+            mock_post.return_value = MockResponse(200, '{"users": [{"token": "abc123"}]}')
+            mock_get.return_value = MockResponse(200, '{"data": []}')
+            mock_patch.return_value = MockResponse(200, '{"data": []}')
+
+            response = self.client.post(url, post_data)
+            self.assertEqual(302, response.status_code)
+
+        channel = Channel.objects.get()
+
+        with patch("requests.post") as mock_post, patch("requests.get") as mock_get, patch(
+            "requests.patch"
+        ) as mock_patch:
+            mock_post.return_value = MockResponse(200, '{"users": [{"token": "abc123"}]}')
+            mock_get.return_value = MockResponse(200, '{"data": []}')
+            mock_patch.return_value = MockResponse(200, '{"data": []}')
+
+            response = self.client.post(url, post_data)
+            self.assertEqual(200, response.status_code)
+            self.assertFormError(response, "form", None, "Number is already connected to this workspace")
+
+        channel.org = self.org2
+        channel.save()
+
+        with patch("requests.post") as mock_post, patch("requests.get") as mock_get, patch(
+            "requests.patch"
+        ) as mock_patch:
+            mock_post.return_value = MockResponse(200, '{"users": [{"token": "abc123"}]}')
+            mock_get.return_value = MockResponse(200, '{"data": []}')
+            mock_patch.return_value = MockResponse(200, '{"data": []}')
+
+            response = self.client.post(url, post_data)
+            self.assertEqual(200, response.status_code)
+            self.assertFormError(
+                response,
+                "form",
+                None,
+                "Number is already connected to another workspace",
+            )
+
     def test_refresh_tokens(self):
         TemplateTranslation.objects.all().delete()
         Channel.objects.all().delete()
@@ -232,8 +307,9 @@ class WhatsAppTypeTest(CRUDLTestMixin, TembaTest):
             self.assertEqual("abc345", channel.config[Channel.CONFIG_AUTH_TOKEN])
             self.assertEqual("abc098", channel2.config[Channel.CONFIG_AUTH_TOKEN])
 
+    @patch("socket.gethostbyname", return_value="123.123.123.123")
     @patch("temba.channels.types.whatsapp.WhatsAppType.check_health")
-    def test_claim_self_hosted_templates(self, mock_health):
+    def test_claim_self_hosted_templates(self, mock_health, mock_socket_hostname):
         mock_health.return_value = MockResponse(200, '{"meta": {"api_status": "stable", "version": "v2.35.2"}}')
         Channel.objects.all().delete()
 
@@ -481,18 +557,26 @@ class WhatsAppTypeTest(CRUDLTestMixin, TembaTest):
         # should have our template translations
         self.assertContains(response, "Hello")
         self.assertContains(response, "Goodbye")
+        # check if templates view contains the sync logs link menu item
         self.assertContentMenu(templates_url, self.admin, ["Sync Logs"])
+
+        response = self.client.get(templates_url)
+        self.assertEqual(f"/settings/channels/{channel.uuid}", response.context[TEMBA_MENU_SELECTION])
 
         foo.is_active = False
         foo.save()
-
         response = self.client.get(templates_url)
+
         # should have our template translations
         self.assertContains(response, "Hello")
         self.assertNotContains(response, "Goodbye")
-
-        # check if message templates link are in sync_logs view
+        # check if sync_logs view contains the message templates link menu item
+        response = self.client.get(sync_url)
+        self.assertContains(response, channel.name)
         self.assertContentMenu(sync_url, self.admin, ["Message Templates"])
+
+        response = self.client.get(sync_url)
+        self.assertEqual(f"/settings/channels/{channel.uuid}", response.context[TEMBA_MENU_SELECTION])
 
         # sync logs and message templates not accessible by user from other org
         self.login(self.admin2)

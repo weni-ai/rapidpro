@@ -10,7 +10,7 @@ html.dragging * {
 html {
 
   --font-family: 'Roboto', Helvetica, Arial, sans-serif;
-  --primary-rgb: 35, 135, 202;
+  --primary-rgb: 58, 102, 150;
   --secondary-rgb: 140, 51, 140;
   --tertiary-rgb: 135, 202, 35;
 
@@ -23,6 +23,7 @@ html {
 
   --select-input-height: inherit;
 
+  --disabled-opacity: 0.6;
   --curvature: 6px;
   --curvature-widget: 6px;
   --color-focus: #a4cafe;
@@ -112,6 +113,7 @@ html {
   --button-font-size: 1.125rem;
 
   --icon-color: var(--text-color);
+  --icon-color-circle: rgb(240, 240, 240);
   --icon-color-circle-hover: rgba(245, 245, 245, .8);
   
   --transition-speed: 250ms;
@@ -134,7 +136,7 @@ html {
 
   --options-block-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.03);
   --options-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-  --dropdown-shadow: rgb(0 0 0 / 30%) 0px 0px 60px, rgb(0 0 0 / 12%) 0px 6px 12px;
+  --dropdown-shadow: rgb(0 0 0 / 15%) 0px 0px 30px, rgb(0 0 0 / 12%) 0px 2px 6px;
 
   font-size: var(--font-size);
   font-weight: 300;
@@ -147,6 +149,14 @@ html {
 
   --menu-padding: 1em;
   --bounce: cubic-bezier(0.68, -0.55, 0.265, 1.55);
+
+  --temba-charcount-counts-margin-top: 4px;
+  --temba-charcount-summary-margin-top: 5px;
+  --temba-charcount-summary-position: absolute;
+  --temba-charcount-summary-right: 0px;
+  --temba-charcount-summary-bottom: 0px;
+
+  --color-automated: rgb(78,205,106);
 
 }
 

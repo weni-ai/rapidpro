@@ -14,17 +14,23 @@ class ViberPublicTypeTest(TembaTest, CRUDLTestMixin):
     def setUp(self):
         super().setUp()
 
-        self.channel = Channel.create(
-            self.org,
-            self.user,
-            None,
-            "VP",
-            name="Viber",
-            address="12345",
-            role="SR",
-            schemes=["viber"],
-            config={"auth_token": "abcd1234"},
-        )
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = (
+                MockResponse(
+                    200, json.dumps({"status": 0, "status_message": "ok", "id": "viberId", "uri": "viberName"})
+                ),
+            )
+            self.channel = Channel.create(
+                self.org,
+                self.user,
+                None,
+                "VP",
+                name="Viber",
+                address="12345",
+                role="SR",
+                schemes=["viber"],
+                config={"auth_token": "abcd1234"},
+            )
 
     @patch("requests.post")
     def test_claim(self, mock_post):
@@ -69,6 +75,7 @@ class ViberPublicTypeTest(TembaTest, CRUDLTestMixin):
 
     def test_update(self):
         update_url = reverse("channels.channel_update", args=[self.channel.id])
+        read_url = reverse("channels.channel_read", args=[self.channel.uuid])
 
         self.assertUpdateFetch(
             update_url,
@@ -97,8 +104,7 @@ class ViberPublicTypeTest(TembaTest, CRUDLTestMixin):
         )
 
         # read page has link to update page
-        response = self.client.get(reverse("channels.channel_read", args=[self.channel.uuid]))
-        self.assertContains(response, update_url)
+        self.assertContentMenu(read_url, self.admin, ["Settings", "Logs", "Edit", "Delete"])
 
     def test_get_error_ref_url(self):
         self.assertEqual(

@@ -1,318 +1,252 @@
 function getCheckedIds() {
-    var checkedIds = Array();
-
-    var checks = $('.object-row.checked');
-    for (var i = 0; i < checks.length; i++) {
-        checkedIds.push(parseInt($(checks[i]).data('object-id')));
-    }
-    return checkedIds.sort(numericComparator);
+  var checkedIds = Array();
+  var checks = document.querySelectorAll('.object-row.checked');
+  for (var i = 0; i < checks.length; i++) {
+    checkedIds.push(parseInt(checks[i].getAttribute('data-object-id')));
+  }
+  return checkedIds.sort(numericComparator);
 }
 
 function getCheckedUuids() {
-    var checkedUuids = Array();
-
-    var checks = $('.object-row.checked');
-    for (var i = 0; i < checks.length; i++) {
-        checkedUuids.push($(checks[i]).data('uuid'));
-    }
-    return checkedUuids.sort();
+  var checkedUuids = Array();
+  var checks = document.querySelectorAll('.object-row.checked');
+  for (var i = 0; i < checks.length; i++) {
+    checkedUuids.push(checks[i].getAttribute('data-uuid'));
+  }
+  return checkedUuids.sort();
 }
 
 function getLabeledIds(labelId) {
-    var objectRowsIds = Array();
-    var labeled = $(".lbl[data-id='" + labelId + "']");
-    for (var i = 0; i < labeled.length; i++) {
-        var id = parseInt(
-            $(labeled[i]).parents('.object-row').data('object-id')
-        );
-        objectRowsIds.push(id);
-    }
-
-    return objectRowsIds.sort(numericComparator);
+  var objectRowsIds = Array();
+  var labeled = document.querySelectorAll(
+    ".lbl[data-id='" + labelId + "'], temba-label[data-id='" + labelId + "']"
+  );
+  for (var i = 0; i < labeled.length; i++) {
+    var row = labeled[i].closest('.object-row');
+    var id = parseInt(row.getAttribute('data-object-id'));
+    objectRowsIds.push(id);
+  }
+  return objectRowsIds.sort(numericComparator);
 }
 
 function getObjectRowLabels(objectId) {
-    var labelIds = Array();
-    var labels = $(".object-row[data-object-id='" + objectId + "']").find(
-        '.lbl'
-    );
-    for (var i = 0; i < labels.length; i++) {
-        labelIds.push(parseInt($(labels[i]).data('id')));
-    }
-
-    return labelIds.sort(numericComparator);
+  var labelIds = Array();
+  var row = document.querySelector(
+    ".object-row[data-object-id='" + objectId + "']"
+  );
+  var labels = row.querySelectorAll('.lbl, temba-label');
+  for (var i = 0; i < labels.length; i++) {
+    labelIds.push(parseInt($(labels[i]).data('id')));
+  }
+  return labelIds.sort(numericComparator);
 }
 
 function runActionOnObjectRows(action, onSuccess) {
-    var objectIds = getCheckedIds();
-    jQuery.ajaxSettings.traditional = true;
-    fetchPJAXContent(window.lastFetch || '', '#pjax', {
-        postData: { objects: objectIds, action: action, pjax: 'true' },
-        onSuccess: onSuccess,
-    });
+  var objectIds = getCheckedIds();
+  jQuery.ajaxSettings.traditional = true;
+  fetchPJAXContent(document.location.href, '#pjax', {
+    postData: { objects: objectIds, action: action, pjax: 'true' },
+    onSuccess: onSuccess,
+  });
 }
 
 function unlabelObjectRows(labelId, onSuccess) {
-    var objectsIds = getCheckedIds();
-    var addLabel = false;
+  var objectsIds = getCheckedIds();
+  var addLabel = false;
 
-    jQuery.ajaxSettings.traditional = true;
-    fetchPJAXContent(window.lastFetch || '', '#pjax', {
-        postData: {
-            objects: objectsIds,
-            label: labelId,
-            add: addLabel,
-            action: 'unlabel',
-            pjax: 'true',
-        },
-        onSuccess: onSuccess,
-    });
+  jQuery.ajaxSettings.traditional = true;
+  fetchPJAXContent(document.location.href, '#pjax', {
+    postData: {
+      objects: objectsIds,
+      label: labelId,
+      add: addLabel,
+      action: 'unlabel',
+      pjax: 'true',
+    },
+    onSuccess: onSuccess,
+  });
 }
 
-function postLabelChanges(smsIds, labelId, addLabel, number, onError, onSuccess) {
-    fetchPJAXContent(window.lastFetch || '', '#pjax', {
-        postData: {
-            objects: smsIds,
-            label: labelId,
-            add: addLabel,
-            action: 'label',
-            pjax: 'true',
-            number: number,
-        },
-        onSuccess: function (data, textStatus) {
-            recheckIds();
-            if (onSuccess) {
-                onSuccess();
-            }
-        },
-        onError: onError,
-    });
+function postLabelChanges(
+  smsIds,
+  labelId,
+  addLabel,
+  number,
+  onError,
+  onSuccess
+) {
+  fetchPJAXContent(document.location.href, '#pjax', {
+    postData: {
+      objects: smsIds,
+      label: labelId,
+      add: addLabel,
+      action: 'label',
+      pjax: 'true',
+      number: number,
+    },
+    onSuccess: function (data, textStatus) {
+      recheckIds();
+      if (onSuccess) {
+        onSuccess();
+      }
+    },
+    onError: onError,
+  });
 }
 
 function labelObjectRows(labelId, forceRemove, onSuccess) {
+  var objectRowsIds = getCheckedIds();
+  var labeledIds = getLabeledIds(labelId);
 
-    var objectRowsIds = getCheckedIds();
-    var labeledIds = getLabeledIds(labelId);
-
-    // they all have the label, so we are actually removing this label
-    var addLabel = false;
-    for (var i = 0; i < objectRowsIds.length; i++) {
-        var found = false;
-        for (var j = 0; j < labeledIds.length; j++) {
-            if (objectRowsIds[i] == labeledIds[j]) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            addLabel = true;
-            break;
-        }
+  // they all have the label, so we are actually removing this label
+  var addLabel = false;
+  for (var i = 0; i < objectRowsIds.length; i++) {
+    var found = false;
+    for (var j = 0; j < labeledIds.length; j++) {
+      if (objectRowsIds[i] == labeledIds[j]) {
+        found = true;
+        break;
+      }
     }
-
-    var checkbox = $('.lbl-menu[data-id="' + labelId + '"] .glyph');
-    if (checkbox.hasClass('checked-child')) {
-        addLabel = true;
+    if (!found) {
+      addLabel = true;
+      break;
     }
+  }
 
-    if (checkbox.hasClass('checked')) {
-        addLabel = false;
-    }
+  var checkbox = document.querySelector(
+    '.lbl-menu[data-id="' + labelId + '"] temba-checkbox'
+  );
+  if (checkbox.checked) {
+    addLabel = true;
+  }
 
-    if (forceRemove) {
-        addLabel = false;
-    }
+  if (forceRemove) {
+    addLabel = false;
+  }
 
-    jQuery.ajaxSettings.traditional = true;
-    window.lastChecked = getCheckedIds();
+  jQuery.ajaxSettings.traditional = true;
+  window.lastChecked = getCheckedIds();
 
-    if (objectRowsIds.length == 0) {
-        showWarning(
-            '{% trans "No rows selected" %}',
-            '{% trans "Please select one or more rows before continuing." %}'
-        );
-        return;
-    }
+  if (objectRowsIds.length == 0) {
+    showWarning(
+      '{% trans "No rows selected" %}',
+      '{% trans "Please select one or more rows before continuing." %}'
+    );
+    return;
+  }
 
-    postLabelChanges(objectRowsIds, labelId, addLabel, null, null, onSuccess);
+  postLabelChanges(objectRowsIds, labelId, addLabel, null, null, onSuccess);
 }
 
 /**
- * When we refresh the object list via pjax, we need to re-select the object rows that were previously selected
+ * After post, we need to recheck ids that were previously checked
  */
 function recheckIds() {
-    if (window.lastChecked && window.lastChecked.length > 0) {
-        for (var i = 0; i < window.lastChecked.length; i++) {
-            var row = $(".object-row[data-object-id='" + window.lastChecked[i] + "']");
-            row.addClass('checked');
-            row.find('temba-checkbox').attr('checked', true);
-        }
-        $('.search-details').hide();
-        $('.list-buttons-container').addClass('visible');
-        $('.page-title').hide();
-        updateLabelMenu();
-    } else {
-        $('.search-details').show();
-        $('.list-buttons-container').removeClass('visible');
-        $('.page-title').show();
+  if (window.lastChecked && window.lastChecked.length > 0) {
+    for (var i = 0; i < window.lastChecked.length; i++) {
+      var row = document.querySelector(
+        ".object-row[data-object-id='" + window.lastChecked[i] + "']"
+      );
+      var checkbox = row.querySelector('temba-checkbox');
+      checkbox.checked = true;
+      row.classList.add('checked');
     }
+    var listButtons = document.querySelector('.list-buttons-container');
+    listButtons.classList.add('visible');
+    updateLabelMenu();
+  }
 }
 
 function clearLabelMenu() {
-    // remove all checked and partials
-    $('.lbl-menu .glyph')
-        .removeClass('checked')
-        .removeClass('partial')
-        .removeClass('checked-child');
+  // remove all checked and partials
+  var checkboxes = document.querySelectorAll('.lbl-menu temba-checkbox');
+  checkboxes.forEach(function (checkbox) {
+    checkbox.checked = false;
+    checkbox.partial = false;
+  });
 }
 
 // updates our label menu according to the currently selected set
 function updateLabelMenu() {
-    clearLabelMenu();
+  clearLabelMenu();
 
-    var objectRowsIds = getCheckedIds();
-    var updatedLabels = Object();
+  var objectRowsIds = getCheckedIds();
+  var updatedLabels = Object();
 
-    for (var i = 0; i < objectRowsIds.length; i++) {
-        var labelIds = getObjectRowLabels(objectRowsIds[i]);
+  for (var i = 0; i < objectRowsIds.length; i++) {
+    var labelIds = getObjectRowLabels(objectRowsIds[i]);
 
-        for (var j = 0; j < labelIds.length; j++) {
-            var labelId = labelIds[j];
+    for (var j = 0; j < labelIds.length; j++) {
+      var labelId = labelIds[j];
 
-            if (!updatedLabels[labelId]) {
-                var labeledIds = getLabeledIds(labelId);
-                var objectRowIdsWithLabel = intersect(
-                    objectRowsIds,
-                    labeledIds
-                );
+      if (!updatedLabels[labelId]) {
+        var labeledIds = getLabeledIds(labelId);
+        var objectRowIdsWithLabel = intersect(objectRowsIds, labeledIds);
 
-                var label = $('.lbl-menu[data-id="' + labelId + '"] .glyph');
+        var checkbox = document.querySelector(
+          '.lbl-menu[data-id="' + labelId + '"] temba-checkbox'
+        );
 
-                if (objectRowIdsWithLabel.length == objectRowsIds.length) {
-                    label.addClass('checked');
-                    label.removeClass('partial');
-
-                    var parentLabel = $(
-                        $('.lbl-menu[data-id="' + labelId + '"]')
-                            .parents('.dropdown-submenu')
-                            .find('.lbl-menu')[0]
-                    );
-                    if (parentLabel) {
-                        var parentBox = $(parentLabel.children('.glyph')[0]);
-                        if (!parentBox.hasClass('checked')) {
-                            parentBox.addClass('checked-child');
-                        }
-                    }
-                } else {
-                    label.addClass('partial');
-
-                    var parentLabel = $(
-                        $('.lbl-menu[data-id="' + labelId + '"]')
-                            .parents('.dropdown-submenu')
-                            .find('.lbl-menu')[0]
-                    );
-                    if (parentLabel) {
-                        var parentBox = $(parentLabel.children('.glyph')[0]);
-                        if (!parentBox.hasClass('checked')) {
-                            parentBox.addClass('checked-child');
-                        }
-                    }
-                }
-                updatedLabels[labelId] = true;
-            }
+        if (checkbox) {
+          if (objectRowIdsWithLabel.length == objectRowsIds.length) {
+            checkbox.partial = false;
+            checkbox.checked = true;
+          } else {
+            checkbox.checked = false;
+            checkbox.partial = true;
+          }
+          updatedLabels[labelId] = true;
         }
+      }
     }
+  }
 }
 
 function handleRowSelection(checkbox) {
-    var row = checkbox.parentElement.parentElement.classList;
-    var listButtons = document.querySelector(
-        '.list-buttons-container'
-    ).classList;
-    var pageTitle = document.querySelector('.page-title').classList;
+  var row = checkbox.parentElement.parentElement.classList;
+  var listButtons = document.querySelector('.list-buttons-container').classList;
 
-    if (checkbox.checked) {
-        row.add('checked');
-    } else {
-        row.remove('checked');
-    }
+  if (checkbox.checked) {
+    row.add('checked');
+    row.remove('unchecked');
+  } else {
+    row.remove('checked');
+    row.add('unchecked');
+  }
 
-    if (document.querySelector('tr.checked')) {
-        listButtons.add('visible');
-        pageTitle.add('hidden');
-    } else {
-        listButtons.remove('visible');
-        pageTitle.remove('hidden');
-    }
+  if (document.querySelector('tr.checked')) {
+    listButtons.add('visible');
+  } else {
+    listButtons.remove('visible');
+  }
+  updateLabelMenu();
 
-    updateLabelMenu();
+  const selectAll = document.querySelector('temba-checkbox.select-all');
+  const hasUnchecked = !!document.querySelector('tr.unchecked');
+
+  if (selectAll.checked && hasUnchecked) {
+    selectAll.partial = true;
+    selectAll.checked = false;
+  }
+
+  if (selectAll.partial && !hasUnchecked) {
+    selectAll.partial = false;
+    selectAll.checked = true;
+  }
 }
 
-function handleRowSelections(row) {
-    var row = $(row).parent('tr');
-
-    // noop if the row doesn't have a checkbox
-    var checkbox = row.find('temba-checkbox');
-    if (checkbox.length == 0) {
-        return;
-    }
-
-    if (checkbox.attr('checked')) {
-        row.removeClass('checked');
-
-        var checks = $('.object-row.checked');
-        if (checks.length == 0) {
-            $('.list-buttons-container').removeClass('visible');
-            $('.page-title').show();
-        } else {
-            $('.list-buttons-container').addClass('visible');
-        }
+function handleSelectAll(ele) {
+  const checkboxes = document.querySelectorAll('.selectable.list td.checkbox');
+  checkboxes.forEach(function (checkbox) {
+    if (ele.checked || ele.partial) {
+      if (!checkbox.parentElement.classList.contains('checked')) {
+        checkbox.click();
+      }
     } else {
-        $('.list-buttons-container').addClass('visible');
-        row.addClass('checked');
-        $('.page-title').hide();
+      if (checkbox.parentElement.classList.contains('checked')) {
+        checkbox.click();
+      }
     }
-    updateLabelMenu();
+  });
 }
-
-function wireActionHandlers() {
-    $('.page-content').on('click', '.object-btn-label', function () {
-        labelObjectRows($(this).data('id'), false, wireTableListeners);
-    });
-
-    if ($('.object-btn-unlabel').length > 0) {
-        if (current_label_id) {
-            $('.page-content').on('click', '.object-btn-unlabel', function () {
-                labelObjectRows(current_label_id, true, wireTableListeners);
-            });
-        }
-    }
-
-    $('.page-content').on('click', '.object-btn-restore', function () {
-        runActionOnObjectRows('restore', wireTableListeners);
-    });
-
-    $('.page-content').on('click', '.object-btn-archive', function () {
-        runActionOnObjectRows('archive', wireTableListeners);
-    });
-
-    $('.page-content').on('click', '.object-btn-delete', function () {
-        runActionOnObjectRows('delete', wireTableListeners);
-    });
-
-    $('.page-content').on('click', '.object-btn-resend', function () {
-        runActionOnObjectRows('resend', wireTableListeners);
-    });
-
-    $('.page-content').on('click', '.object-btn-close', function () {
-        runActionOnObjectRows('close', wireTableListeners);
-    });
-
-    $('.page-content').on('click', '.object-btn-reopen', function () {
-        runActionOnObjectRows('reopen', wireTableListeners);
-    });
-}
-
-$(document).ready(function () {
-    wireActionHandlers();
-});

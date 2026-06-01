@@ -10,7 +10,7 @@ from temba.flows.models import Flow
 from temba.msgs.models import Msg
 from temba.orgs.models import Org
 from temba.utils import json, on_transaction_commit
-from temba.utils.models import TembaModel, TembaUUIDMixin, TranslatableField
+from temba.utils.models import TembaModel, TembaUUIDMixin, TranslatableField, delete_in_batches
 
 
 class Campaign(TembaModel):
@@ -109,10 +109,10 @@ class Campaign(TembaModel):
 
                 # create our message flow for message events
                 if event_spec["event_type"] == CampaignEvent.TYPE_MESSAGE:
-
                     message = event_spec["message"]
                     base_language = event_spec.get("base_language")
 
+                    # force the message value into a dict
                     if not isinstance(message, dict):
                         try:
                             message = json.loads(message)
@@ -120,6 +120,16 @@ class Campaign(TembaModel):
                             # if it's not a language dict, turn it into one
                             message = dict(base=message)
                             base_language = "base"
+
+                    # change base to und
+                    if "base" in message:
+                        message["und"] = message["base"]
+                        del message["base"]
+                        base_language = "und"
+
+                    # ensure base language is valid
+                    if base_language not in message:  # pragma: needs cover
+                        base_language = next(iter(message))
 
                     event = CampaignEvent.create_message_event(
                         org,
@@ -194,9 +204,7 @@ class Campaign(TembaModel):
                 "event_type": event.event_type,
                 "delivery_hour": event.delivery_hour,
                 "message": event.message,
-                "relative_to": dict(
-                    label=event.relative_to.name, key=event.relative_to.key
-                ),  # TODO should be key/name
+                "relative_to": dict(label=event.relative_to.name, key=event.relative_to.key),  # TODO should be key/name
                 "start_mode": event.start_mode,
             }
 
@@ -494,26 +502,25 @@ class CampaignEvent(TembaUUIDMixin, SmartModel):
         self.modified_by = user
         self.save(update_fields=("is_active", "modified_by", "modified_on"))
 
-        # detach any associated flow starts
-        self.flow_starts.all().update(campaign_event=None)
-
         # if flow isn't a user created flow we can delete it too
         if self.event_type == CampaignEvent.TYPE_MESSAGE:
             self.flow.release(user)
 
     def delete(self):
         """
-        Deletes this event completely along with associated fires
+        Deletes this event completely along with associated fires and starts.
         """
 
-        # delete any associated fires
-        self.fires.all().delete()
+        delete_in_batches(self.fires.all())
+
+        for start in self.flow_starts.all():
+            start.delete()
 
         # and ourselves
         super().delete()
 
-    def __str__(self):
-        return f'Event[relative_to={self.relative_to.key}, offset={self.offset}, flow="{self.flow.name}"]'
+    def __repr__(self):
+        return f'<Event: relative_to={self.relative_to.key} offset={self.offset} flow="{self.flow.name}">'
 
     class Meta:
         verbose_name = _("Campaign Event")
@@ -541,9 +548,6 @@ class EventFire(models.Model):
 
     # result of this event fire or null if we haven't been fired
     fired_result = models.CharField(max_length=1, null=True, choices=RESULTS)
-
-    def is_firing_soon(self):
-        return self.scheduled < timezone.now()
 
     def get_relative_to_value(self):
         value = self.contact.get_field_value(self.event.relative_to)

@@ -4,9 +4,6 @@ from datetime import timedelta
 import iso8601
 import pytz
 
-from django import template
-from django.conf import settings
-from django.template import TemplateSyntaxError
 from django.template.defaultfilters import register
 from django.urls import reverse
 from django.utils import timezone
@@ -67,7 +64,6 @@ def oxford(forloop, punctuation=""):
 
 @register.filter
 def icon(o):
-
     if isinstance(o, Campaign):
         return "icon-campaign"
 
@@ -97,20 +93,6 @@ def verbose_name_plural(object):
     return object._meta.verbose_name_plural
 
 
-@register.filter
-def format_seconds(seconds):
-    if not seconds:
-        return None
-
-    if seconds < 60:
-        return "%s sec" % seconds
-    minutes = seconds // 60
-    seconds %= 60
-    if seconds >= 30:
-        minutes += 1
-    return "%s min" % minutes
-
-
 @register.simple_tag()
 def annotated_field(field, label, help_text):
     attrs = field.field.widget.attrs
@@ -118,31 +100,6 @@ def annotated_field(field, label, help_text):
     attrs["help_text"] = help_text
     attrs["errors"] = json.dumps([str(error) for error in field.errors])
     return field.as_widget(attrs=attrs)
-
-
-@register.simple_tag(takes_context=True)
-def ssl_brand_url(context, url_name, args=None):
-    hostname = settings.HOSTNAME
-    if "brand" in context:
-        hostname = context["brand"].get("domain", settings.HOSTNAME)
-
-    path = reverse(url_name, args)
-    if getattr(settings, "SESSION_COOKIE_SECURE", False):  # pragma: needs cover
-        return "https://%s%s" % (hostname, path)
-    else:
-        return path
-
-
-@register.simple_tag(takes_context=True)
-def non_ssl_brand_url(context, url_name, args=None):
-    hostname = settings.HOSTNAME
-    if "brand" in context:
-        hostname = context["brand"].get("domain", settings.HOSTNAME)
-
-    path = reverse(url_name, args)
-    if settings.HOSTNAME != "localhost":  # pragma: needs cover
-        return "http://%s%s" % (hostname, path)
-    return path
 
 
 @register.filter("delta", is_safe=False)
@@ -173,31 +130,9 @@ def delta_filter(delta):
         return ""
 
 
-def lessblock(parser, token):
-    args = token.split_contents()
-    if len(args) != 1:  # pragma: no cover
-        raise TemplateSyntaxError("lessblock tag takes no arguments, got: [%s]" % ",".join(args))
-
-    nodelist = parser.parse(("endlessblock",))
-    parser.delete_first_token()
-    return LessBlockNode(nodelist)
-
-
-class LessBlockNode(template.Node):
-    def __init__(self, nodelist):
-        self.nodelist = nodelist
-
-    def render(self, context):
-        output = self.nodelist.render(context)
-        includes = '@import (reference) "variables.less";\n'
-        includes += '@import (reference, optional) "../brands/%s/less/variables.less";\n' % context["brand"]["slug"]
-        includes += '@import (reference) "mixins.less";\n'
-        style_output = '<style type="text/less" media="all">\n%s\n%s</style>' % (includes, output)
-        return style_output
-
-
-# register our tag
-lessblock = register.tag(lessblock)
+@register.filter
+def js_bool(value):
+    return "true" if value else "false"
 
 
 @register.filter
@@ -224,6 +159,11 @@ def duration(date):
 @register.filter
 def datetime(date):
     return mark_safe(f"<temba-date value='{date.isoformat()}' display='datetime'></temba-date>")
+
+
+@register.filter
+def day(date):
+    return mark_safe(f"<temba-date value='{date.isoformat()}' display='date'></temba-date>")
 
 
 @register.simple_tag(takes_context=True)

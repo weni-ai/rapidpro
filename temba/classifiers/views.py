@@ -5,7 +5,7 @@ from django.http import HttpResponseRedirect
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
-from temba.orgs.views import DependencyDeleteModal, MenuMixin, OrgObjPermsMixin, OrgPermsMixin
+from temba.orgs.views import DependencyDeleteModal, OrgObjPermsMixin, OrgPermsMixin
 from temba.utils.views import ComponentFormMixin, ContentMenuMixin, SpaMixin
 
 from .models import Classifier
@@ -14,6 +14,7 @@ from .models import Classifier
 class BaseConnectView(SpaMixin, ComponentFormMixin, OrgPermsMixin, SmartFormView):
     permission = "classifiers.classifier_connect"
     classifier_type = None
+    menu_path = "/settings/workspace"
 
     def __init__(self, classifier_type):
         self.classifier_type = classifier_type
@@ -39,43 +40,19 @@ class BaseConnectView(SpaMixin, ComponentFormMixin, OrgPermsMixin, SmartFormView
 
 class ClassifierCRUDL(SmartCRUDL):
     model = Classifier
-    actions = ("read", "connect", "delete", "sync", "menu")
-
-    class Menu(MenuMixin, OrgPermsMixin, SmartTemplateView):
-        def derive_menu(self):
-            org = self.request.org
-
-            menu = []
-            if self.has_org_perm("classifiers.classifier_read"):
-                classifiers = Classifier.objects.filter(org=org, is_active=True).order_by("-created_on")
-                for classifier in classifiers:
-                    menu.append(
-                        self.create_menu_item(
-                            menu_id=classifier.uuid,
-                            name=classifier.name,
-                            href=reverse("classifiers.classifier_read", args=[classifier.uuid]),
-                            icon=classifier.get_type().icon.replace("icon-", ""),
-                        )
-                    )
-
-            menu.append(
-                {
-                    "id": "connect",
-                    "href": reverse("classifiers.classifier_connect"),
-                    "name": _("Add Classifier"),
-                }
-            )
-
-            return menu
+    actions = ("read", "connect", "delete", "sync")
 
     class Delete(DependencyDeleteModal):
         cancel_url = "uuid@classifiers.classifier_read"
-        success_url = "@orgs.org_home"
+        success_url = "@orgs.org_workspace"
         success_message = _("Your classifier has been deleted.")
 
     class Read(SpaMixin, OrgObjPermsMixin, ContentMenuMixin, SmartReadView):
         slug_url_kwarg = "uuid"
         exclude = ("id", "is_active", "created_by", "modified_by", "modified_on")
+
+        def derive_menu_path(self):
+            return f"/settings/classifiers/{self.get_object().uuid}"
 
         def build_content_menu(self, menu):
             obj = self.get_object()
@@ -95,7 +72,7 @@ class ClassifierCRUDL(SmartCRUDL):
 
         def get_queryset(self, **kwargs):
             queryset = super().get_queryset(**kwargs)
-            return queryset.filter(org=self.request.org, is_active=True)
+            return queryset.filter(is_active=True)
 
     class Sync(SpaMixin, OrgObjPermsMixin, SmartUpdateView):
         fields = ()
@@ -115,6 +92,8 @@ class ClassifierCRUDL(SmartCRUDL):
             return HttpResponseRedirect(self.get_success_url())
 
     class Connect(SpaMixin, OrgPermsMixin, SmartTemplateView):
+        menu_path = "/settings/workspace"
+
         def get_context_data(self, **kwargs):
             context = super().get_context_data(**kwargs)
             context["classifier_types"] = [t for t in Classifier.get_types()]

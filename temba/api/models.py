@@ -18,13 +18,24 @@ from temba.utils.uuid import uuid4
 logger = logging.getLogger(__name__)
 
 
+class BulkActionFailure:
+    """
+    Bulk action serializers can return a partial failure if some objects couldn't be acted on
+    """
+
+    def __init__(self, failures):
+        self.failures = failures
+
+    def as_json(self):
+        return {"failures": self.failures}
+
+
 class APIPermission(BasePermission):
     """
     Verifies that the user has the permission set on the endpoint view
     """
 
     def has_permission(self, request, view):
-
         if getattr(view, "permission", None):
             # no anon access to API endpoints
             if request.user.is_anonymous:
@@ -110,6 +121,11 @@ class Resthook(SmartModel):
         self.is_active = False
         self.modified_by = user
         self.save(update_fields=["is_active", "modified_on", "modified_by"])
+
+    def delete(self):
+        self.subscribers.all().delete()
+
+        super().delete()
 
     def __str__(self):  # pragma: needs cover
         return str(self.slug)
@@ -212,12 +228,12 @@ class APIToken(models.Model):
             return tokens.first()
 
     @classmethod
-    def get_orgs_for_role(cls, user, role: OrgRole):
+    def get_orgs_for_role(cls, request, role: OrgRole):
         """
         Gets all the orgs the user can access the API with the given role
         """
         granting_roles = cls.GROUP_GRANTED_TO.get(role.group.name, [])
-        return user.get_orgs(roles=granting_roles) if granting_roles else Org.objects.none()
+        return User.get_orgs_for_request(request, roles=granting_roles) if granting_roles else Org.objects.none()
 
     @classmethod
     def get_default_role(cls, org, user):

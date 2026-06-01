@@ -82,9 +82,7 @@ def migrate_to_version_11_12(json_flow, flow=None):
 
     for actionset_index, action_set in enumerate(action_sets):
         if action_set.get("destination") in reroute_uuid_remap:
-            new_flow_json["action_sets"][actionset_index]["destination"] = reroute_uuid_remap[
-                action_set["destination"]
-            ]
+            new_flow_json["action_sets"][actionset_index]["destination"] = reroute_uuid_remap[action_set["destination"]]
 
         if needs_move_entry and action_set["uuid"] == entry:
             action_set["y"] = 0
@@ -202,7 +200,6 @@ def migrate_to_version_11_10(json_flow, flow=None, flow_types=None):
         if rule_set["ruleset_type"] == "subflow":
             subflow_type = get_flow_type(rule_set["config"]["flow"]["uuid"])
             if subflow_type and not flow_types_eq(subflow_type, json_flow["flow_type"]):
-
                 # create new action set in same place with same connections
                 json_flow["action_sets"].append(
                     {
@@ -286,14 +283,12 @@ def migrate_to_version_11_9(json_flow, flow=None):
                 if action["type"] == "flow":
                     flow_uuid = action["flow"]["uuid"]
                     if flow_uuid in invalid_flow_uuids:
-
                         del new_flow_json["action_sets"][actionset_index]["actions"][action_index]
                         total_removed_actions += 1
 
                 if action["type"] == "trigger-flow":
                     flow_uuid = action["flow"]["uuid"]
                     if flow_uuid in invalid_flow_uuids:
-
                         del new_flow_json["action_sets"][actionset_index]["actions"][action_index]
                         total_removed_actions += 1
 
@@ -302,7 +297,6 @@ def migrate_to_version_11_9(json_flow, flow=None):
                 flow_uuid = rule_set["config"]["flow"]["uuid"]
 
                 if flow_uuid in invalid_flow_uuids:
-
                     del new_flow_json["rule_sets"][ruleset_index]
                     total_removed_rulesets += 1
 
@@ -361,7 +355,7 @@ def migrate_to_version_11_7(json_flow, flow=None):
 
         destination = nodes_by_uuid.get(actionset["destination"]) if actionset.get("destination") else None
 
-        for (i, new_set) in reversed(list(enumerate(new_sets))):
+        for i, new_set in reversed(list(enumerate(new_sets))):
             # if this is first new node, it gets the UUID of the actionset being
             # replaced so that nodes pointing to this actionset will now point to it
             new_node_uuid = actionset["uuid"] if i == 0 else str(uuid4())
@@ -470,7 +464,6 @@ def migrate_to_version_11_6(json_flow, flow=None):
 
     def remap_group(group):
         if type(group) is dict:
-
             # we haven't been mapped yet (also, non-uuid groups can't be mapped)
             if "uuid" not in group or group["uuid"] not in uuid_map and group.get("name"):
                 group_instance = ContactGroup.get_group_by_name(flow.org, group["name"])
@@ -627,7 +620,6 @@ def _base_migrate_to_version_11_1(json_flow, country_code):
 
     def _traverse(obj, country_code):
         if isinstance(obj, dict):
-
             if _is_this_a_lang_object(obj):
                 new_obj = {}
 
@@ -710,7 +702,6 @@ def migrate_export_to_version_11_0(json_export, org, same_site=True):
         )
 
     for flow in json_export.get("flows", []):
-
         # figure out which rulesets are date or location
         for rs in flow.get("rule_sets", []):
             rs_type = None
@@ -1161,7 +1152,6 @@ def migrate_to_version_6(json_flow, flow=None):
 
         for ruleset in definition.get("rule_sets", []):
             for rule in ruleset.get("rules"):
-
                 # betweens haven't always required a category name, create one
                 rule_test = rule["test"]
                 if rule_test["type"] == "between" and "category" not in rule:
@@ -1192,7 +1182,6 @@ def migrate_to_version_5(json_flow, flow=None):
     """
 
     def requires_step(operand):
-
         # if we start with =( then we are an expression
         is_expression = operand and len(operand) > 2 and operand[0:2] == "=("
         if "@step" in operand or (is_expression and "step" in operand):
@@ -1202,7 +1191,6 @@ def migrate_to_version_5(json_flow, flow=None):
     definition = map_actions(json_flow.get("definition"), cleanse_group_names)
 
     for ruleset in definition.get("rule_sets", []):
-
         response_type = ruleset.pop("response_type", None)
         ruleset_type = ruleset.get("ruleset_type", None)
         label = ruleset.get("label")
@@ -1213,7 +1201,6 @@ def migrate_to_version_5(json_flow, flow=None):
                 del rule["config"]
 
         if response_type and not ruleset_type:
-
             # webhooks now live in their own ruleset, insert one
             webhook_url = ruleset.pop("webhook", None)
             webhook_action = ruleset.pop("webhook_action", None)
@@ -1240,11 +1227,9 @@ def migrate_to_version_5(json_flow, flow=None):
                 elif response_type == "R":  # pragma: no cover
                     ruleset["ruleset_type"] = "wait_recording"
                 else:
-
                     if operand == "@step.value":
                         ruleset["ruleset_type"] = "wait_message"
                     else:
-
                         ruleset["ruleset_type"] = "expression"
 
                         # if it's not a plain split, make us wait and create

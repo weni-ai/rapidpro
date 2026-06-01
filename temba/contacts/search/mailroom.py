@@ -57,25 +57,24 @@ def search_contacts(
     org, query: str, *, group=None, sort: str = None, offset: int = None, exclude_ids=()
 ) -> mailroom.SearchResults:
     try:
-        group_uuid = group.uuid if group else None
+        group_id = group.id if group else None
 
         return mailroom.get_client().contact_search(
-            org.id, group_uuid=str(group_uuid), query=query, sort=sort, offset=offset, exclude_ids=exclude_ids
+            org.id, group_id=group_id, query=query, sort=sort, offset=offset, exclude_ids=exclude_ids
         )
     except mailroom.MailroomException as e:
         raise SearchException.from_mailroom_exception(e)
 
 
-def preview_start(
-    org, flow, include: mailroom.QueryInclusions, exclude: mailroom.QueryExclusions, sample_size: int
-) -> mailroom.StartPreview:
+def preview_broadcast(org, include: mailroom.Inclusions, exclude: mailroom.Exclusions) -> mailroom.BroadcastPreview:
     try:
-        return mailroom.get_client().flow_preview_start(
-            org.id,
-            flow.id,
-            include=include,
-            exclude=exclude,
-            sample_size=sample_size,
-        )
+        return mailroom.get_client().msg_preview_broadcast(org.id, include=include, exclude=exclude)
+    except mailroom.MailroomException as e:
+        raise SearchException.from_mailroom_exception(e)
+
+
+def preview_start(org, flow, include: mailroom.Inclusions, exclude: mailroom.Exclusions) -> mailroom.StartPreview:
+    try:
+        return mailroom.get_client().flow_preview_start(org.id, flow.id, include=include, exclude=exclude)
     except mailroom.MailroomException as e:
         raise SearchException.from_mailroom_exception(e)

@@ -12,14 +12,13 @@ from temba.orgs.views import ModalMixin, OrgObjPermsMixin
 from temba.utils.text import truncate
 
 from ...models import Channel
-from ...views import ClaimViewMixin
+from ...views import ChannelTypeMixin, ClaimViewMixin
 
 logger = logging.getLogger(__name__)
 
 
 class ClaimView(ClaimViewMixin, SmartFormView):
     class Form(ClaimViewMixin.Form):
-
         user_access_token = forms.CharField(min_length=32, required=True, help_text=_("The User Access Token"))
         page_name = forms.CharField(required=True, help_text=_("The name of the Facebook page"))
         page_id = forms.IntegerField(required=True, help_text="The Facebook Page ID")
@@ -166,7 +165,7 @@ class ClaimView(ClaimViewMixin, SmartFormView):
         return super().form_valid(form)
 
 
-class RefreshToken(ModalMixin, OrgObjPermsMixin, SmartModelActionView):
+class RefreshToken(ChannelTypeMixin, ModalMixin, OrgObjPermsMixin, SmartModelActionView):
     class Form(forms.Form):
         user_access_token = forms.CharField(min_length=32, required=True, help_text=_("The User Access Token"))
         fb_user_id = forms.CharField(
@@ -211,10 +210,9 @@ class RefreshToken(ModalMixin, OrgObjPermsMixin, SmartModelActionView):
         return context
 
     def get_queryset(self):
-        return self.request.org.channels.filter(is_active=True, channel_type="IG")
+        return self.request.org.channels.filter(is_active=True, channel_type=self.channel_type.code)
 
     def execute_action(self):
-
         form = self.form
         channel = self.object
 

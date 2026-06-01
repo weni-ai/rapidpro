@@ -10,14 +10,13 @@ class DashboardTest(TembaTest):
         self.user = self.create_user("tito")
 
     def create_activity(self):
-
         # and some message and call activity
         joe = self.create_contact("Joe", phone="+593979099111")
         self.create_outgoing_msg(joe, "Tea of coffee?")
         self.create_incoming_msg(joe, "Coffee")
         self.create_outgoing_msg(joe, "OK")
-        self.create_outgoing_msg(joe, "Wanna hang?", msg_type="V")
-        self.create_incoming_msg(joe, "Sure", msg_type="V")
+        self.create_outgoing_msg(joe, "Wanna hang?", voice=True)
+        self.create_incoming_msg(joe, "Sure", voice=True)
 
     def test_dashboard_home(self):
         dashboard_url = reverse("dashboard.dashboard_home")
@@ -35,7 +34,6 @@ class DashboardTest(TembaTest):
         self.assertEqual(response.request["PATH_INFO"], dashboard_url)
 
     def test_message_history(self):
-
         url = reverse("dashboard.dashboard_message_history")
 
         # visit this page without authenticating
@@ -48,8 +46,8 @@ class DashboardTest(TembaTest):
         self.create_activity()
         response = self.client.get(url).json()
 
-        # in, out, and total
-        self.assertEqual(3, len(response))
+        # in, out
+        self.assertEqual(2, len(response))
 
         # incoming messages
         self.assertEqual(2, response[0]["data"][0][1])
@@ -57,11 +55,7 @@ class DashboardTest(TembaTest):
         # outgoing messages
         self.assertEqual(3, response[1]["data"][0][1])
 
-        # total messages
-        self.assertEqual(5, response[2]["data"][0][1])
-
     def test_range_details(self):
-
         url = reverse("dashboard.dashboard_range_details")
 
         # visit this page without authenticating

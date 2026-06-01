@@ -33,9 +33,7 @@ class ClaimView(ClaimViewMixin, SmartFormView):
             label=_("URL"),
             widget=forms.URLInput(
                 attrs={
-                    "placeholder": _(
-                        "Ex.: https://my.rocket.chat/api/apps/public/51c5cebe-b8e4-48ae-89d3-2b7746019cc4"
-                    )
+                    "placeholder": _("Ex.: https://my.rocket.chat/api/apps/public/51c5cebe-b8e4-48ae-89d3-2b7746019cc4")
                 }
             ),
             help_text=_("URL of the Rocket.Chat Channel app"),
@@ -72,7 +70,9 @@ class ClaimView(ClaimViewMixin, SmartFormView):
                 raise forms.ValidationError(_("Invalid URL %(base_url)s") % self.cleaned_data)
 
             base_url_exists = org.channels.filter(
-                is_active=True, channel_type=RocketChatType.code, **{"config__contains": base_url}
+                is_active=True,
+                channel_type=RocketChatType.code,
+                **{"config__" + RocketChatType.CONFIG_BASE_URL: base_url},
             ).exists()
             if base_url_exists:
                 raise forms.ValidationError(_("There is already a channel configured for this URL."))
@@ -141,4 +141,4 @@ class ClaimView(ClaimViewMixin, SmartFormView):
         return super().get_context_data(**kwargs)
 
     form_class = Form
-    template_name = "channels/types/rocketchat/claim.haml"
+    template_name = "channels/types/rocketchat/claim.html"

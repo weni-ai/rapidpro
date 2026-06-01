@@ -6,7 +6,36 @@
   -blocktrans with name=brand.name
     {{name}} - Welcome
 
--block page-top
+-block extra-style
+  :css
+    .workflow-btn {
+      padding: 4px 10px;
+    }
+    .workflow-section {
+      margin-top: 30px;
+      margin-bottom: 30px;
+    }
+    .medium-title {
+      color: #e6e6e6;
+      font-weight: 100;
+      font-size: 21px;
+    }
+    .workflow-glyph {
+      line-height: 1;
+      font-size: 120px;
+      height: 160px;
+      width: 160px;
+      padding: 20px;
+      text-decoration: none;
+      border-radius: 50%;
+      text-align: center;
+    }
+    .workflow-glyph.icon-1 {
+      line-height: 1.9em;
+    }
+    a.workflow-glyph {
+      text-decoration: none;
+    }
 
 -block messages
 
@@ -22,11 +51,10 @@
     -blocktrans
       Here's a short introduction to help you get started.
 
-
   .mt-6
     .flex
-      .summary.card.p-12.overflow-hidden
-        .icon-flow.relative.text-gray-100(style="font-size:200px; transform: rotate(-5deg) translate(-120px, -40px);")
+      .summary.card.p-12.overflow-hidden.relative
+        %temba-icon.text-gray-100.absolute(name="flow" style="font-size:200px; transform: rotate(-5deg) translate(-120px, -40px);")
         .-mt-8.mx-20
           .title
             %a(href="{% url 'flows.flow_list' %}")
@@ -36,25 +64,17 @@
             that is tailored to their needs. Design a flow in minutes and start getting responses
             instantly. Once people start interacting with your flow, use real-time analytics to
             see how things are going.
-
-          -trans "To learn more about flows, visit the"
-            <a href="{% non_ssl_brand_url 'public.video_list'%}">{% trans "learning center" %}</a>.
     
           .mt-6
-            %temba-modax.inline-block.mb-1(endpoint="{% url 'flows.flow_create'%}" header='{{_("Create Flow")|escapejs}}')
-              .button-primary.lift.inline-block
-                -trans "Create Flow"
-            .button-light.lift.inline-block.mx-1.mb-1(href="{% url 'flows.flow_list' %}" onclick="goto(event)")
-              -trans "Sample Flows"
-            .button-light.lift.inline-block.mb-1(href="{% non_ssl_brand_url 'public.video_list'%}" onclick="goto(event)")
-              -trans "Tutorials"
+            %a.button-light.lift.inline-block(href="{% url 'flows.flow_list' %}" onclick="goto(event)")              
+                -trans "Create a Flow"
 
 
 
   -if 'success' in request.GET.keys
     .flex.mt-6
-      .summary.card.p-12.overflow-hidden
-        .icon-phone.relative.text-gray-100(style="font-size:160px; transform: rotate(25deg) translate(-40px, -10px);")
+      .summary.card.p-12.overflow-hidden.relative
+        %temba-icon.text-gray-100.absolute(name="contact" style="font-size:200px; transform: rotate(-5deg) translate(-120px, -40px);")
         .-mt-8.mx-20
           .title
             %a(href="{% url 'channels.channel_claim' %}")
@@ -74,8 +94,8 @@
                 -trans "Add Number"
 
   .flex.mt-6
-    .summary.card.p-12
-      .icon-contact.relative.text-gray-100(style="font-size:240px; transform: rotate(-5deg) translate(-180px, 0px);")
+    .summary.card.p-12.overflow-hidden.relative
+      %temba-icon.text-gray-100.absolute(name="contact" style="font-size:200px; transform: rotate(-5deg) translate(-120px, -40px);")
       .-mt-8.mx-20
         .title
           %a(href="{% url 'contacts.contact_list' %}")
@@ -108,9 +128,9 @@
               -trans "Create Group"
       
   .flex.mt-6
-    .summary.card.p-12.overflow-hidden
-      .icon-contact.relative.text-gray-100(style="font-size:240px; transform: rotate(-5deg) translate(-180px, 0px);")
-      .-mt-8.mx-20
+    .summary.card.p-12.overflow-hidden.relative
+      %temba-icon.text-gray-100.absolute.z-0(name="message" style="font-size:200px; transform: rotate(-5deg) translate(-100px, -40px);")
+      .-mt-8.mx-20.z-10.relative
         .title
           %a(href="{% url 'msgs.msg_inbox' %}")
             -trans "Messages"
@@ -130,11 +150,11 @@
               -trans "Send Message"
 
   .flex.mt-6
-    .summary.card.p-12.overflow-hidden
-      .icon-user.relative.text-gray-100(style="font-size:190px; transform: rotate(-5deg) translate(-100px, 20px);")
+    .summary.card.p-12.overflow-hidden.relative
+      %temba-icon.text-gray-100.absolute(name="workspace" style="font-size:200px; transform: rotate(-5deg) translate(-120px, -40px);")
       .-mt-8.mx-20
         .title
-          %a(href="{% url 'orgs.org_home' %}")
+          %a(href="{% url 'orgs.org_workspace' %}")
             -trans "Workspace"
   
         -block account-blurb
@@ -153,39 +173,3 @@
             -trans "API Documentation"
 
 
--block extra-less
-  -compress css inline
-    {% lessblock %}
-      :plain
-        .workflow-btn {
-          padding: 4px 10px;
-        }
-        .workflow-section {
-          margin-top: 30px;
-          margin-bottom: 30px;
-        }
-        .medium-title {
-          color: @color-font-grey;
-          font-weight: 100;
-          font-size: 21px;
-        }
-
-        .workflow-glyph {
-          line-height: 1;
-          font-size: 120px;
-          height: 160px;
-          width: 160px;
-          padding: 20px;
-          text-decoration: none;
-          border-radius: 50%;
-          text-align: center;
-          line-height:1;
-
-          &.icon-1 {
-            line-height:1.9em;
-          }
-        }
-        a.workflow-glyph {
-          text-decoration: none;
-        }
-    {% endlessblock %}

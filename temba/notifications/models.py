@@ -73,7 +73,7 @@ class Incident(models.Model):
 
     @property
     def template(self):
-        return f"notifications/incidents/{self.incident_type.replace(':', '_')}.haml"
+        return f"notifications/incidents/{self.incident_type.replace(':', '_')}.html"
 
     @property
     def type(self):
@@ -180,9 +180,7 @@ class Notification(models.Model):
         ExportTicketsTask, null=True, on_delete=models.PROTECT, related_name="notifications"
     )
 
-    contact_import = models.ForeignKey(
-        ContactImport, null=True, on_delete=models.PROTECT, related_name="notifications"
-    )
+    contact_import = models.ForeignKey(ContactImport, null=True, on_delete=models.PROTECT, related_name="notifications")
 
     incident = models.ForeignKey(Incident, null=True, on_delete=models.PROTECT, related_name="notifications")
 
@@ -219,9 +217,7 @@ class Notification(models.Model):
 
     @classmethod
     def mark_seen(cls, org, notification_type: str, *, scope: str, user):
-        notifications = cls.objects.filter(
-            org_id=org.id, notification_type=notification_type, user=user, is_seen=False
-        )
+        notifications = cls.objects.filter(org_id=org.id, notification_type=notification_type, user=user, is_seen=False)
 
         if scope is not None:
             notifications = notifications.filter(scope=scope)
@@ -248,7 +244,7 @@ class Notification(models.Model):
     class Meta:
         indexes = [
             # used to list org specific notifications for a user
-            models.Index(fields=["org", "user", "-created_on"]),
+            models.Index(fields=["org", "user", "-created_on", "-id"]),
             # used to find notifications with pending email sends
             models.Index(name="notifications_email_pending", fields=["created_on"], condition=Q(email_status="P")),
             # used for notification types where the target URL clears all of that type (e.g. incident_started)

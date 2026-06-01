@@ -9,28 +9,36 @@ from xml.sax.saxutils import escape
 import phonenumbers
 from django_countries.fields import CountryField
 from phonenumbers import NumberParseException
-from pyfcm import FCMNotification
 from smartmin.models import SmartModel
 from twilio.base.exceptions import TwilioRestException
 
 from django.conf import settings
 from django.contrib.auth.models import Group, User
 from django.contrib.postgres.fields import ArrayField
+from django.core.files.storage import storages
 from django.db import models
-from django.db.models import Max, Q, Sum
+from django.db.models import Sum
 from django.db.models.signals import pre_save
 from django.dispatch import receiver
 from django.template import Context, Engine, TemplateDoesNotExist
 from django.urls import re_path
 from django.utils import timezone
+from django.utils.functional import cached_property
 from django.utils.translation import gettext_lazy as _
 
-from temba import mailroom
 from temba.orgs.models import DependencyMixin, Org
-from temba.utils import analytics, countries, get_anonymous_user, json, on_transaction_commit, redact
+from temba.utils import analytics, get_anonymous_user, json, on_transaction_commit, redact
 from temba.utils.email import send_template_email
-from temba.utils.models import JSONAsTextField, LegacyUUIDMixin, SquashableModel, TembaModel, generate_uuid
+from temba.utils.models import (
+    JSONAsTextField,
+    LegacyUUIDMixin,
+    SquashableModel,
+    TembaModel,
+    delete_in_batches,
+    generate_uuid,
+)
 from temba.utils.text import random_string
+from temba.utils.uuid import is_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +66,6 @@ class ChannelType(metaclass=ABCMeta):
     courier_url = None
 
     name = None
-    icon = "icon-channel-external"
     schemes = None
     show_config_page = True
 
@@ -132,7 +139,7 @@ class ChannelType(metaclass=ABCMeta):
         """
         claim_view_kwargs = self.claim_view_kwargs if self.claim_view_kwargs else {}
         claim_view_kwargs["channel_type"] = self
-        return re_path(r"^claim$", self.claim_view.as_view(**claim_view_kwargs), name="claim")
+        return re_path(r"^claim/$", self.claim_view.as_view(**claim_view_kwargs), name="claim")
 
     def get_update_form(self):
         if self.update_form is None:
@@ -140,6 +147,12 @@ class ChannelType(metaclass=ABCMeta):
 
             return UpdateChannelForm
         return self.update_form
+
+    def check_credentials(self, config: dict) -> bool:
+        """
+        Called to check the credentials passed are valid
+        """
+        return True
 
     def activate(self, channel):
         """
@@ -218,17 +231,15 @@ class ChannelType(metaclass=ABCMeta):
         Resolves an error code from a channel log into a docs URL for that error.
         """
 
+    def get_icon(self):
+        return f"channel_{self.code.lower()}"
+
     def __str__(self):
         return self.name
 
 
 def _get_default_channel_scheme():
     return ["tel"]
-
-
-class UnsupportedAndroidChannelError(Exception):
-    def __init__(self, message):
-        self.message = message
 
 
 class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
@@ -251,37 +262,25 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
     CONFIG_USE_NATIONAL = "use_national"
     CONFIG_ENCODING = "encoding"
     CONFIG_PAGE_NAME = "page_name"
-    CONFIG_PLIVO_AUTH_ID = "PLIVO_AUTH_ID"
-    CONFIG_PLIVO_AUTH_TOKEN = "PLIVO_AUTH_TOKEN"
-    CONFIG_PLIVO_APP_ID = "PLIVO_APP_ID"
+
     CONFIG_AUTH_TOKEN = "auth_token"
     CONFIG_SECRET = "secret"
     CONFIG_CHANNEL_ID = "channel_id"
     CONFIG_CHANNEL_MID = "channel_mid"
     CONFIG_FCM_ID = "FCM_ID"
-    CONFIG_MACROKIOSK_SENDER_ID = "macrokiosk_sender_id"
-    CONFIG_MACROKIOSK_SERVICE_ID = "macrokiosk_service_id"
     CONFIG_RP_HOSTNAME_OVERRIDE = "rp_hostname_override"
     CONFIG_CALLBACK_DOMAIN = "callback_domain"
     CONFIG_ACCOUNT_SID = "account_sid"
     CONFIG_APPLICATION_SID = "application_sid"
     CONFIG_NUMBER_SID = "number_sid"
-    CONFIG_MESSAGING_SERVICE_SID = "messaging_service_sid"
+
     CONFIG_MAX_CONCURRENT_EVENTS = "max_concurrent_events"
     CONFIG_ALLOW_INTERNATIONAL = "allow_international"
     CONFIG_MACHINE_DETECTION = "machine_detection"
 
-    CONFIG_WHATSAPP_CLOUD_USER_TOKEN = "whatsapp_cloud_user_token"
-
-    CONFIG_VONAGE_API_KEY = "nexmo_api_key"
-    CONFIG_VONAGE_API_SECRET = "nexmo_api_secret"
-    CONFIG_VONAGE_APP_ID = "nexmo_app_id"
-    CONFIG_VONAGE_APP_PRIVATE_KEY = "nexmo_app_private_key"
-
     ENCODING_DEFAULT = "D"  # we just pass the text down to the endpoint
     ENCODING_SMART = "S"  # we try simple substitutions to GSM7 then go to unicode if it still isn't GSM7
     ENCODING_UNICODE = "U"  # we send everything as unicode
-
     ENCODING_CHOICES = (
         (ENCODING_DEFAULT, _("Default Encoding")),
         (ENCODING_SMART, _("Smart Encoding")),
@@ -294,31 +293,29 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
     ROLE_CALL = "C"
     ROLE_ANSWER = "A"
     ROLE_USSD = "U"
-
     DEFAULT_ROLE = ROLE_SEND + ROLE_RECEIVE
-
-    ROLE_CONFIG = {
-        ROLE_SEND: "send",
-        ROLE_RECEIVE: "receive",
-        ROLE_CALL: "call",
-        ROLE_ANSWER: "answer",
-        ROLE_USSD: "ussd",
-    }
 
     CONTENT_TYPE_URLENCODED = "urlencoded"
     CONTENT_TYPE_JSON = "json"
     CONTENT_TYPE_XML = "xml"
-
     CONTENT_TYPES = {
         CONTENT_TYPE_URLENCODED: "application/x-www-form-urlencoded",
         CONTENT_TYPE_JSON: "application/json",
         CONTENT_TYPE_XML: "text/xml; charset=utf-8",
     }
-
     CONTENT_TYPE_CHOICES = (
         (CONTENT_TYPE_URLENCODED, _("URL Encoded - application/x-www-form-urlencoded")),
         (CONTENT_TYPE_JSON, _("JSON - application/json")),
         (CONTENT_TYPE_XML, _("XML - text/xml; charset=utf-8")),
+    )
+
+    LOG_POLICY_NONE = "N"
+    LOG_POLICY_ERRORS = "E"
+    LOG_POLICY_ALL = "A"
+    LOG_POLICY_CHOICES = (
+        (LOG_POLICY_NONE, "Discard All"),
+        (LOG_POLICY_ERRORS, "Write Errors Only"),
+        (LOG_POLICY_ALL, "Write All"),
     )
 
     SIMULATOR_CHANNEL = {
@@ -347,44 +344,6 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
         verbose_name=_("Country"), null=True, blank=True, help_text=_("Country which this channel is for")
     )
 
-    claim_code = models.CharField(
-        verbose_name=_("Claim Code"),
-        max_length=16,
-        blank=True,
-        null=True,
-        unique=True,
-        help_text=_("The token the user will us to claim this channel"),
-    )
-
-    secret = models.CharField(
-        verbose_name=_("Secret"),
-        max_length=64,
-        blank=True,
-        null=True,
-        unique=True,
-        help_text=_("The secret token this channel should use when signing requests"),
-    )
-
-    last_seen = models.DateTimeField(
-        verbose_name=_("Last Seen"), auto_now_add=True, help_text=_("The last time this channel contacted the server")
-    )
-
-    device = models.CharField(
-        verbose_name=_("Device"),
-        max_length=255,
-        null=True,
-        blank=True,
-        help_text=_("The type of Android device this channel is running on"),
-    )
-
-    os = models.CharField(
-        verbose_name=_("OS"),
-        max_length=255,
-        null=True,
-        blank=True,
-        help_text=_("What Android OS version this channel is running on"),
-    )
-
     alert_email = models.EmailField(
         verbose_name=_("Alert Email"),
         null=True,
@@ -392,21 +351,19 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
         help_text=_("We will send email alerts to this address if experiencing issues sending"),
     )
 
-    config = JSONAsTextField(null=True, default=dict)
-
+    config = models.JSONField(default=dict)
     schemes = ArrayField(models.CharField(max_length=16), default=_get_default_channel_scheme)
-
     role = models.CharField(max_length=4, default=DEFAULT_ROLE)
-
+    log_policy = models.CharField(max_length=1, default=LOG_POLICY_ALL, choices=LOG_POLICY_CHOICES)
     parent = models.ForeignKey("self", on_delete=models.PROTECT, null=True)
+    tps = models.IntegerField(null=True)
 
-    bod = models.TextField(null=True)
-
-    tps = models.IntegerField(
-        verbose_name=_("Maximum Transactions per Second"),
-        null=True,
-        help_text=_("The max number of messages that will be sent per second"),
-    )
+    # Android relayer specific fields
+    claim_code = models.CharField(max_length=16, blank=True, null=True, unique=True)
+    secret = models.CharField(max_length=64, blank=True, null=True, unique=True)
+    device = models.CharField(max_length=255, null=True, blank=True)
+    os = models.CharField(max_length=255, null=True, blank=True)
+    last_seen = models.DateTimeField(null=True)
 
     @classmethod
     def create(
@@ -513,7 +470,6 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
         role=DEFAULT_ROLE,
         extra_config=None,
     ):
-
         try:
             parsed = phonenumbers.parse(phone_number, None)
             phone = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
@@ -559,117 +515,6 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
         )
 
     @classmethod
-    def add_vonage_bulk_sender(cls, org, user, channel):
-        # vonage ships numbers around as E164 without the leading +
-        parsed = phonenumbers.parse(channel.address, None)
-        vonage_phone_number = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164).strip("+")
-
-        config = {
-            Channel.CONFIG_VONAGE_API_KEY: org.config[Org.CONFIG_VONAGE_KEY],
-            Channel.CONFIG_VONAGE_API_SECRET: org.config[Org.CONFIG_VONAGE_SECRET],
-            Channel.CONFIG_CALLBACK_DOMAIN: org.get_brand_domain(),
-        }
-
-        return cls.create(
-            org,
-            user,
-            channel.country,
-            "NX",
-            name="Vonage Sender",
-            config=config,
-            tps=1,
-            address=channel.address,
-            role=Channel.ROLE_SEND,
-            parent=channel,
-            bod=vonage_phone_number,
-        )
-
-    @classmethod
-    def add_call_channel(cls, org, user, channel):
-        return Channel.create(
-            org,
-            user,
-            channel.country,
-            "T",
-            name="Twilio Caller",
-            address=channel.address,
-            role=Channel.ROLE_CALL,
-            parent=channel,
-            config={
-                "account_sid": org.config[Org.CONFIG_TWILIO_SID],
-                "auth_token": org.config[Org.CONFIG_TWILIO_TOKEN],
-            },
-        )
-
-    @classmethod
-    def get_or_create_android(cls, registration_data, status):
-        """
-        Creates a new Android channel from the fcm and status commands sent during device registration
-        """
-        fcm_id = registration_data.get("fcm_id")
-        uuid = registration_data.get("uuid")
-        country = status.get("cc")
-        device = status.get("dev")
-
-        if not fcm_id or not uuid:
-            gcm_id = registration_data.get("gcm_id")
-            if gcm_id:
-                raise UnsupportedAndroidChannelError("Unsupported Android client app.")
-            else:
-                raise ValueError("Can't create Android channel without UUID or FCM ID")
-
-        # look for existing active channel with this UUID
-        existing = Channel.objects.filter(uuid=uuid, is_active=True).first()
-
-        # if device exists reset some of the settings (ok because device clearly isn't in use if it's registering)
-        if existing:
-            config = existing.config
-            config.update({Channel.CONFIG_FCM_ID: fcm_id})
-            existing.config = config
-            existing.claim_code = cls.generate_claim_code()
-            existing.secret = cls.generate_secret()
-            existing.country = country
-            existing.device = device
-            existing.save(update_fields=("config", "secret", "claim_code", "country", "device"))
-
-            return existing
-
-        # if any inactive channel has this UUID, we can steal it
-        for ch in Channel.objects.filter(uuid=uuid, is_active=False):
-            ch.uuid = generate_uuid()
-            ch.save(update_fields=("uuid",))
-
-        # generate random secret and claim code
-        claim_code = cls.generate_claim_code()
-        secret = cls.generate_secret()
-        anon = get_anonymous_user()
-        config = {Channel.CONFIG_FCM_ID: fcm_id}
-
-        return Channel.create(
-            None,
-            anon,
-            country,
-            cls.get_type_from_code("A"),
-            None,
-            None,
-            config=config,
-            uuid=uuid,
-            device=device,
-            claim_code=claim_code,
-            secret=secret,
-        )
-
-    @classmethod
-    def generate_claim_code(cls):
-        """
-        Generates a random and guaranteed unique claim code
-        """
-        code = random_string(9)
-        while cls.objects.filter(claim_code=code):  # pragma: no cover
-            code = random_string(9)
-        return code
-
-    @classmethod
     def generate_secret(cls, length=64):
         """
         Generates a secret value used for command signing
@@ -679,7 +524,7 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
             code = random_string(length)
         return code
 
-    def is_android(self):
+    def is_android(self) -> bool:
         """
         Is this an Android channel
         """
@@ -699,7 +544,7 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
         Get the channel that should perform a given action. Could just be us
         (the same channel), but may be a delegate channel working on our behalf.
         """
-        if self.role == role:
+        if self.role == role:  # pragma: no cover
             delegate = self
         else:
             # if we have a delegate channel for this role, use that
@@ -817,32 +662,12 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
 
         return messages
 
-    def get_recent_syncs(self):
-        return self.sync_events.filter(created_on__gt=timezone.now() - timedelta(hours=1)).order_by("-created_on")
-
-    def get_last_sync(self):
-        if not hasattr(self, "_last_sync"):
-            last_sync = self.sync_events.order_by("-created_on").first()
-
-            self._last_sync = last_sync
-
-        return self._last_sync
-
-    def get_last_power(self):
-        last = self.get_last_sync()
-        return last.power_level if last else -1
-
-    def get_last_power_status(self):
-        last = self.get_last_sync()
-        return last.power_status if last else None
-
-    def get_last_power_source(self):
-        last = self.get_last_sync()
-        return last.power_source if last else None
-
-    def get_last_network_type(self):
-        last = self.get_last_sync()
-        return last.network_type if last else None
+    @cached_property
+    def last_sync(self):
+        """
+        Gets the last sync event for this channel (only applies to Android channels)
+        """
+        return self.sync_events.order_by("id").last()
 
     def get_unsent_messages(self):
         # use our optimized index for our org outbox
@@ -852,24 +677,10 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
 
     def is_new(self):
         # is this channel newer than an hour
-        return self.created_on > timezone.now() - timedelta(hours=1) or not self.get_last_sync()
+        return self.created_on > timezone.now() - timedelta(hours=1) or not self.last_sync
 
-    def claim(self, org, user, phone):
-        """
-        Claims this channel for the given org/user
-        """
-
-        if not self.country:  # pragma: needs cover
-            self.country = countries.from_tel(phone)
-
-        self.alert_email = user.email
-        self.org = org
-        self.is_active = True
-        self.claim_code = None
-        self.address = phone
-        self.save()
-
-        org.normalize_contact_tels()
+    def check_credentials(self) -> bool:
+        return self.type.check_credentials(self.config)
 
     def release(self, user, *, trigger_sync: bool = True):
         """
@@ -895,13 +706,6 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
         # disassociate them
         Channel.objects.filter(parent=self).update(parent=None)
 
-        # delete any alerts
-        self.alerts.all().delete()
-
-        # any related sync events
-        for sync_event in self.sync_events.all():
-            sync_event.release()
-
         # delay mailroom task for 5 seconds, so mailroom assets cache expires
         interrupt_channel_task.apply_async((self.id,), countdown=5)
 
@@ -923,6 +727,19 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
             trigger.archive(user)
             trigger.release(user)
 
+    def delete(self):
+        for trigger in self.triggers.all():
+            trigger.delete()
+
+        delete_in_batches(self.alerts.all())
+        delete_in_batches(self.sync_events.all())
+        delete_in_batches(self.logs.all())
+        delete_in_batches(self.http_logs.all())
+        delete_in_batches(self.template_translations.all())
+        delete_in_batches(self.counts.all())  # needs to be after log deletion
+
+        super().delete()
+
     def trigger_sync(self, registration_id=None):  # pragma: no cover
         """
         Sends a FCM command to trigger a sync on the client
@@ -941,24 +758,6 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
                     registration_id = fcm_id
                 if registration_id:
                     on_transaction_commit(lambda: sync_channel_fcm_task.delay(registration_id, channel_id=self.pk))
-
-    @classmethod
-    def sync_channel_fcm(cls, registration_id, channel=None):  # pragma: no cover
-        push_service = FCMNotification(api_key=settings.FCM_API_KEY)
-        fcm_failed = False
-        try:
-            result = push_service.notify_single_device(registration_id=registration_id, data_message=dict(msg="sync"))
-            if not result.get("success", 0):
-                fcm_failed = True
-        except Exception:
-            fcm_failed = True
-
-        if fcm_failed:
-            valid_registration_ids = push_service.clean_registration_ids([registration_id])
-            if registration_id not in valid_registration_ids:
-                # this fcm id is invalid now, clear it out
-                channel.config.pop(Channel.CONFIG_FCM_ID, None)
-                channel.save(update_fields=["config"])
 
     @classmethod
     def replace_variables(cls, text, variables, content_type=CONTENT_TYPE_URLENCODED):
@@ -999,18 +798,6 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
     def get_log_count(self):
         return self.get_count([ChannelCount.SUCCESS_LOG_TYPE, ChannelCount.ERROR_LOG_TYPE])
 
-    def get_error_log_count(self):
-        return self.get_count([ChannelCount.ERROR_LOG_TYPE]) + self.get_ivr_log_count()
-
-    def get_success_log_count(self):
-        return self.get_count([ChannelCount.SUCCESS_LOG_TYPE])
-
-    def get_ivr_log_count(self):
-        return ChannelLog.objects.filter(channel=self).exclude(call=None).order_by("call").distinct("call").count()
-
-    def get_non_ivr_log_count(self):
-        return self.get_log_count() - self.get_ivr_log_count()
-
     def __str__(self):  # pragma: no cover
         if self.name:
             return self.name
@@ -1034,10 +821,12 @@ class ChannelCount(SquashableModel):
 
     squash_over = ("channel_id", "count_type", "day")
 
-    INCOMING_MSG_TYPE = "IM"  # Incoming message
-    OUTGOING_MSG_TYPE = "OM"  # Outgoing message
-    INCOMING_IVR_TYPE = "IV"  # Incoming IVR step
-    OUTGOING_IVR_TYPE = "OV"  # Outgoing IVR step
+    # tracked from insertions into the message table
+    INCOMING_MSG_TYPE = "IM"
+    OUTGOING_MSG_TYPE = "OM"
+    INCOMING_IVR_TYPE = "IV"
+    OUTGOING_IVR_TYPE = "OV"
+
     SUCCESS_LOG_TYPE = "LS"  # ChannelLog record
     ERROR_LOG_TYPE = "LE"  # ChannelLog record that is an error
 
@@ -1138,28 +927,6 @@ class ChannelEvent(models.Model):
 
     log_uuids = ArrayField(models.UUIDField(), null=True)
 
-    @classmethod
-    def create_relayer_event(cls, channel, urn, event_type, occurred_on, extra=None):
-        from temba.contacts.models import Contact
-
-        contact, contact_urn = Contact.resolve(channel, urn)
-
-        event = cls.objects.create(
-            org=channel.org,
-            channel=channel,
-            contact=contact,
-            contact_urn=contact_urn,
-            occurred_on=occurred_on,
-            event_type=event_type,
-            extra=extra,
-        )
-
-        if event_type == cls.TYPE_CALL_IN_MISSED:
-            # pass off handling of the message to mailroom after we commit
-            on_transaction_commit(lambda: mailroom.queue_mo_miss_event(event))
-
-        return event
-
     def release(self):
         self.delete()
 
@@ -1169,11 +936,14 @@ class ChannelLog(models.Model):
     A log of an interaction with a channel
     """
 
+    REDACT_MASK = "*" * 8  # used to mask redacted values
+
     LOG_TYPE_UNKNOWN = "unknown"
     LOG_TYPE_MSG_SEND = "msg_send"
     LOG_TYPE_MSG_STATUS = "msg_status"
     LOG_TYPE_MSG_RECEIVE = "msg_receive"
     LOG_TYPE_EVENT_RECEIVE = "event_receive"
+    LOG_TYPE_MULTI_RECEIVE = "multi_receive"
     LOG_TYPE_IVR_START = "ivr_start"
     LOG_TYPE_IVR_INCOMING = "ivr_incoming"
     LOG_TYPE_IVR_CALLBACK = "ivr_callback"
@@ -1182,12 +952,14 @@ class ChannelLog(models.Model):
     LOG_TYPE_ATTACHMENT_FETCH = "attachment_fetch"
     LOG_TYPE_TOKEN_REFRESH = "token_refresh"
     LOG_TYPE_PAGE_SUBSCRIBE = "page_subscribe"
+    LOG_TYPE_WEBHOOK_VERIFY = "webhook_verify"
     LOG_TYPE_CHOICES = (
         (LOG_TYPE_UNKNOWN, _("Other Event")),
         (LOG_TYPE_MSG_SEND, _("Message Send")),
         (LOG_TYPE_MSG_STATUS, _("Message Status")),
         (LOG_TYPE_MSG_RECEIVE, _("Message Receive")),
         (LOG_TYPE_EVENT_RECEIVE, _("Event Receive")),
+        (LOG_TYPE_MULTI_RECEIVE, _("Events Receive")),
         (LOG_TYPE_IVR_START, _("IVR Start")),
         (LOG_TYPE_IVR_INCOMING, _("IVR Incoming")),
         (LOG_TYPE_IVR_CALLBACK, _("IVR Callback")),
@@ -1196,13 +968,12 @@ class ChannelLog(models.Model):
         (LOG_TYPE_ATTACHMENT_FETCH, _("Attachment Fetch")),
         (LOG_TYPE_TOKEN_REFRESH, _("Token Refresh")),
         (LOG_TYPE_PAGE_SUBSCRIBE, _("Page Subscribe")),
+        (LOG_TYPE_WEBHOOK_VERIFY, _("Webhook Verify")),
     )
 
     id = models.BigAutoField(primary_key=True)
-    uuid = models.UUIDField(default=uuid4)
-    channel = models.ForeignKey(Channel, on_delete=models.PROTECT, related_name="logs")
-    msg = models.ForeignKey("msgs.Msg", on_delete=models.PROTECT, related_name="channel_logs", null=True)
-    call = models.ForeignKey("ivr.Call", on_delete=models.PROTECT, related_name="channel_logs", null=True)
+    uuid = models.UUIDField(default=uuid4, db_index=True)
+    channel = models.ForeignKey(Channel, on_delete=models.PROTECT, related_name="logs", db_index=False)  # index below
 
     log_type = models.CharField(max_length=16, choices=LOG_TYPE_CHOICES)
     http_logs = models.JSONField(null=True)
@@ -1211,86 +982,91 @@ class ChannelLog(models.Model):
     elapsed_ms = models.IntegerField(default=0)
     created_on = models.DateTimeField(default=timezone.now)
 
-    def _get_display_value(self, user, original, redact_keys=(), redact_values=()):
-        """
-        Get a part of the log which may or may not have to be redacted to hide sensitive information in anon orgs
-        """
-        from temba.request_logs.models import HTTPLog
+    def get_display(self, *, anonymize: bool, urn) -> dict:
+        return self.display(self._get_json(), anonymize=anonymize, channel=self.channel, urn=urn)
 
-        secrets = [settings.WHATSAPP_ADMIN_SYSTEM_USER_TOKEN]
-        for secret in secrets:
-            if secret and original:
-                original = redact.text(original, secret, HTTPLog.REDACT_MASK)
+    @classmethod
+    def display(cls, data: dict, *, anonymize: bool, channel, urn) -> dict:
+        # add reference URLs to errors
+        for err in data["errors"]:
+            ext_code = err.get("ext_code")
+            err["ref_url"] = channel.type.get_error_ref_url(channel, ext_code) if ext_code else None
 
-        for secret_val in redact_values:
-            original = redact.text(original, secret_val, HTTPLog.REDACT_MASK)
+        if anonymize:
+            cls._anonymize(data, channel, urn)
 
-        if not self.channel.org.is_anon or user.is_staff:
-            return original
+        # out of an abundance of caution, check that we're not returning one of our own credential values
+        for log in data["http_logs"]:
+            for secret in channel.type.redact_values:
+                assert secret not in log["url"] and secret not in log["request"] and secret not in log["response"]
 
-        # if this log doesn't have a msg then we don't know what to redact, so redact completely
-        if not self.msg_id:
-            return original[:10] + HTTPLog.REDACT_MASK
+        return data
 
-        needle = self.msg.contact_urn.path
+    @classmethod
+    def _anonymize_value(cls, original: str, urn, redact_keys=()) -> str:
+        # if log doesn't have an associated URN then we don't know what to anonymize, so redact completely
+        if not urn and original:
+            return original[:10] + cls.REDACT_MASK
 
         if redact_keys:
-            redacted = redact.http_trace(original, needle, HTTPLog.REDACT_MASK, redact_keys)
+            redacted = redact.http_trace(original, urn.path, cls.REDACT_MASK, redact_keys)
         else:
-            redacted = redact.text(original, needle, HTTPLog.REDACT_MASK)
+            redacted = redact.text(original, urn.path, cls.REDACT_MASK)
 
         # if nothing was redacted, don't risk returning sensitive information we didn't find
-        if original == redacted:
-            return original[:10] + HTTPLog.REDACT_MASK
+        if original == redacted and original:
+            return original[:10] + cls.REDACT_MASK
 
         return redacted
 
-    def get_display(self, user) -> dict:
-        redact_values = self.channel.type.redact_values
-        redact_request_keys = self.channel.type.redact_request_keys
-        redact_response_keys = self.channel.type.redact_response_keys
+    @classmethod
+    def _anonymize(cls, data: dict, channel, urn):
+        request_keys = channel.type.redact_request_keys
+        response_keys = channel.type.redact_response_keys
 
-        def redact_http(log: dict) -> dict:
-            return {
-                "url": self._get_display_value(user, log["url"], redact_values=redact_values),
-                "status_code": log.get("status_code", 0),
-                "request": self._get_display_value(
-                    user, log["request"], redact_keys=redact_request_keys, redact_values=redact_values
-                ),
-                "response": self._get_display_value(
-                    user, log.get("response", ""), redact_keys=redact_response_keys, redact_values=redact_values
-                ),
-                "elapsed_ms": log["elapsed_ms"],
-                "retries": log["retries"],
-                "created_on": log["created_on"],
-            }
+        for http_log in data["http_logs"]:
+            http_log["url"] = cls._anonymize_value(http_log["url"], urn)
+            http_log["request"] = cls._anonymize_value(http_log["request"], urn, redact_keys=request_keys)
+            http_log["response"] = cls._anonymize_value(http_log.get("response", ""), urn, redact_keys=response_keys)
 
-        def redact_error(err: dict) -> dict:
-            ext_code = err.get("ext_code")
-            ref_url = self.channel.type.get_error_ref_url(self.channel, ext_code) if ext_code else None
+        for err in data["errors"]:
+            err["message"] = cls._anonymize_value(err["message"], urn)
 
-            return {
-                "code": err["code"],
-                "ext_code": ext_code,
-                "message": self._get_display_value(user, err["message"], redact_values=redact_values),
-                "ref_url": ref_url,
-            }
+    @classmethod
+    def get_logs(cls, channel, uuids: list) -> list:
+        # look for logs in the database
+        logs = {l.uuid: l._get_json() for l in cls.objects.filter(channel=channel, uuid__in=uuids)}
 
+        # and in storage
+        for log_uuid in uuids:
+            assert is_uuid(log_uuid), f"{log_uuid} is not a valid log UUID"
+
+            if log_uuid not in logs:
+                key = f"channels/{channel.uuid}/{str(log_uuid)[0:4]}/{log_uuid}.json"
+                try:
+                    log_file = storages["logs"].open(key)
+                    logs[log_uuid] = json.loads(log_file.read())
+                    log_file.close()
+                except Exception:
+                    logger.exception("unable to read log from storage", extra={"key": key})
+
+        return sorted(logs.values(), key=lambda l: l["created_on"])
+
+    def _get_json(self):
+        """
+        Get a database instance in the same JSON format we write to S3
+        """
         return {
-            "description": self.get_log_type_display(),
-            "http_logs": [redact_http(h) for h in (self.http_logs or [])],
-            "errors": [redact_error(e) for e in (self.errors or [])],
-            "created_on": self.created_on,
+            "uuid": str(self.uuid),
+            "type": self.log_type,
+            "http_logs": [h.copy() for h in self.http_logs or []],
+            "errors": [e.copy() for e in self.errors or []],
+            "elapsed_ms": self.elapsed_ms,
+            "created_on": self.created_on.isoformat(),
         }
 
     class Meta:
-        indexes = [
-            models.Index(
-                name="channels_log_error_created",
-                fields=("channel", "is_error", "-created_on"),
-                condition=Q(is_error=True),
-            )
-        ]
+        indexes = [models.Index(name="channellogs_by_channel", fields=("channel", "-created_on"))]
 
 
 class SyncEvent(SmartModel):
@@ -1373,10 +1149,6 @@ class SyncEvent(SmartModel):
 
         return sync_event
 
-    def release(self):
-        self.alerts.all().delete()
-        self.delete()
-
     def get_pending_messages(self):
         return getattr(self, "pending_messages", [])
 
@@ -1400,13 +1172,11 @@ def pre_save(sender, instance, **kwargs):
 class Alert(SmartModel):
     TYPE_DISCONNECTED = "D"
     TYPE_POWER = "P"
-    TYPE_SMS = "S"
 
     TYPE_CHOICES = (
         (TYPE_POWER, _("Power")),  # channel has low power
         (TYPE_DISCONNECTED, _("Disconnected")),  # channel hasn't synced in a while
-        (TYPE_SMS, _("SMS")),
-    )  # channel has many unsent messages
+    )
 
     channel = models.ForeignKey(
         Channel,
@@ -1448,11 +1218,9 @@ class Alert(SmartModel):
     @classmethod
     def check_power_alert(cls, sync):
         if (
-            sync.power_status
-            in (SyncEvent.STATUS_DISCHARGING, SyncEvent.STATUS_UNKNOWN, SyncEvent.STATUS_NOT_CHARGING)
+            sync.power_status in (SyncEvent.STATUS_DISCHARGING, SyncEvent.STATUS_UNKNOWN, SyncEvent.STATUS_NOT_CHARGING)
             and int(sync.power_level) < 25
         ):
-
             alerts = Alert.objects.filter(sync_event__channel=sync.channel, alert_type=cls.TYPE_POWER, ended_on=None)
 
             if not alerts:
@@ -1473,7 +1241,6 @@ class Alert(SmartModel):
     @classmethod
     def check_alerts(cls):
         from temba.channels.types.android import AndroidType
-        from temba.msgs.models import Msg
 
         thirty_minutes_ago = timezone.now() - timedelta(minutes=30)
 
@@ -1493,65 +1260,6 @@ class Alert(SmartModel):
             # have we already sent an alert for this channel
             if not Alert.objects.filter(channel=channel, alert_type=cls.TYPE_DISCONNECTED, ended_on=None):
                 cls.create_and_send(channel, cls.TYPE_DISCONNECTED)
-
-        day_ago = timezone.now() - timedelta(days=1)
-        six_hours_ago = timezone.now() - timedelta(hours=6)
-
-        # end any sms alerts that are open and no longer seem valid
-        for alert in Alert.objects.filter(alert_type=cls.TYPE_SMS, ended_on=None).distinct("channel_id"):
-            # are there still queued messages?
-
-            if (
-                not Msg.objects.filter(
-                    status__in=["Q", "P"], channel_id=alert.channel_id, created_on__lte=thirty_minutes_ago
-                )
-                .exclude(created_on__lte=day_ago)
-                .exists()
-            ):
-                Alert.objects.filter(alert_type=cls.TYPE_SMS, ended_on=None, channel_id=alert.channel_id).update(
-                    ended_on=timezone.now()
-                )
-
-        # now look for channels that have many unsent messages
-        queued_messages = (
-            Msg.objects.filter(status__in=["Q", "P"])
-            .order_by("channel", "created_on")
-            .exclude(created_on__gte=thirty_minutes_ago)
-            .exclude(created_on__lte=day_ago)
-            .exclude(channel=None)
-            .values("channel")
-            .annotate(latest_queued=Max("created_on"))
-        )
-        sent_messages = (
-            Msg.objects.filter(status__in=["S", "D"])
-            .exclude(created_on__lte=day_ago)
-            .exclude(channel=None)
-            .order_by("channel", "sent_on")
-            .values("channel")
-            .annotate(latest_sent=Max("sent_on"))
-        )
-
-        channels = dict()
-        for queued in queued_messages:
-            if queued["channel"]:
-                channels[queued["channel"]] = dict(queued=queued["latest_queued"], sent=None)
-
-        for sent in sent_messages:
-            existing = channels.get(sent["channel"], dict(queued=None))
-            existing["sent"] = sent["latest_sent"]
-
-        for (channel_id, value) in channels.items():
-            # we haven't sent any messages in the past six hours
-            if not value["sent"] or value["sent"] < six_hours_ago:
-                channel = Channel.objects.get(pk=channel_id)
-
-                # never alert on channels that have no org
-                if channel.org is None:  # pragma: no cover
-                    continue
-
-                # if we haven't sent an alert in the past six ours
-                if not Alert.objects.filter(channel=channel).filter(Q(created_on__gt=six_hours_ago)).exists():
-                    cls.create_and_send(channel, cls.TYPE_SMS)
 
     def send_alert(self):
         from .tasks import send_alert_task
@@ -1590,9 +1298,6 @@ class Alert(SmartModel):
                 subject = "Your Android phone is disconnected"
                 template = "channels/email/disconnected_alert"
 
-        elif self.alert_type == self.TYPE_SMS:
-            subject = "Your %s is having trouble sending messages" % self.channel.get_channel_type_name()
-            template = "channels/email/sms_alert"
         else:  # pragma: no cover
             raise Exception(_("Unknown alert type: %(alert)s") % {"alert": self.alert_type})
 

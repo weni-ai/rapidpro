@@ -22,12 +22,11 @@ class VKType(ChannelType):
     courier_url = r"^vk/(?P<uuid>[a-z0-9\-]+)/receive"
 
     name = "VK"
-    icon = "icon-vk"
 
     claim_blurb = _(
         "Add a %(link)s bot to send and receive messages on behalf of a VK community for free. You will need to create "
         "an access token for your community first."
-    ) % {"link": '<a href="https://vk.com/">VK</a>'}
+    ) % {"link": '<a target="_blank" href="https://vk.com/">VK</a>'}
     claim_view = ClaimView
 
     schemes = [URN.VK_SCHEME]

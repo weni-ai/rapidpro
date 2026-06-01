@@ -1,4 +1,3 @@
-import copy
 import datetime
 import io
 from collections import OrderedDict
@@ -10,6 +9,7 @@ import pytz
 from celery.app.task import Task
 from django_redis import get_redis_connection
 
+from django import forms
 from django.conf import settings
 from django.forms import ValidationError
 from django.test import TestCase, override_settings
@@ -18,16 +18,17 @@ from django.utils import timezone, translation
 
 from temba.campaigns.models import Campaign
 from temba.flows.models import Flow
-from temba.tests import TembaTest, matchers
+from temba.tests import TembaTest, matchers, override_brand
 from temba.triggers.models import Trigger
 from temba.utils import json, uuid
+from temba.utils.compose import compose_serialize
 from temba.utils.templatetags.temba import format_datetime, icon
 
 from . import chunk_list, countries, format_number, languages, percentage, redact, sizeof_fmt, str_to_bool
 from .crons import clear_cron_stats, cron_task
 from .dates import date_range, datetime_to_str, datetime_to_timestamp, timestamp_to_datetime
 from .email import is_valid_address, send_simple_email
-from .fields import NameValidator, validate_external_url
+from .fields import ExternalURLField, NameValidator
 from .templatetags.temba import oxford, short_datetime
 from .text import clean_string, decode_stream, generate_token, random_string, slugify_with, truncate, unsnakify
 from .timezones import TimeZoneFormField, timezone_to_country_code
@@ -323,20 +324,6 @@ class TemplateTagTest(TembaTest):
 
 
 class TemplateTagTestSimple(TestCase):
-    def test_format_seconds(self):
-        from temba.utils.templatetags.temba import format_seconds
-
-        self.assertIsNone(format_seconds(None))
-
-        # less than a minute
-        self.assertEqual("30 sec", format_seconds(30))
-
-        # round down
-        self.assertEqual("1 min", format_seconds(89))
-
-        # round up
-        self.assertEqual("2 min", format_seconds(100))
-
     def test_delta(self):
         from temba.utils.templatetags.temba import delta_filter
 
@@ -416,7 +403,6 @@ class EmailTest(TembaTest):
         self.assertOutbox(1, "no-reply@foo.com", "Test Subject", "Test Body", ["recipient@bar.com"])
 
     def test_is_valid_address(self):
-
         valid_emails = [
             # Cases from https://en.wikipedia.org/wiki/Email_address
             "prettyandsimple@example.com",
@@ -619,29 +605,11 @@ class MiddlewareTest(TembaTest):
         response = self.client.get(reverse("public.public_index"))
         self.assertEqual(response["X-Temba-Org"], str(self.org.id))
 
-    def test_branding(self):
-        def assert_branding(request_host, brand: str):
-            response = self.client.get(reverse("public.public_index"), HTTP_HOST=request_host)
-            self.assertEqual(
-                brand, response.context["request"].branding["slug"], f"brand mismatch for host {request_host}"
-            )
-
-        assert_branding("localhost", "rapidpro")  # uses default
-        assert_branding("localhost:8888", "rapidpro")  # port stripped
-        assert_branding("rapidpro.io", "rapidpro")
-        assert_branding("app.rapidpro.io", "rapidpro")  # subdomains ignored
-        assert_branding("custom-brand.io", "custom")
-        assert_branding("subdomain.custom-brand.io", "custom")
-        assert_branding("custom-brand.org", "custom")  # by alias
-        assert_branding("api.custom-brand.org", "custom")  # by alias
-
     def test_redirect(self):
         self.assertNotRedirect(self.client.get(reverse("public.public_index")), None)
 
         # now set our brand to redirect
-        brands = copy.deepcopy(settings.BRANDS)
-        brands[0]["redirect"] = "/redirect"
-        with self.settings(BRANDS=brands):
+        with override_brand(redirect="/redirect"):
             self.assertRedirect(self.client.get(reverse("public.public_index")), "/redirect")
 
     def test_language(self):
@@ -672,6 +640,7 @@ class LanguagesTest(TembaTest):
             self.assertEqual("Arabic (Omani, ISO-639-3)", languages.get_name("acx"))  # name is overridden
             self.assertEqual("Cajun French", languages.get_name("frc"))  # non ISO-639-1 lang explicitly included
             self.assertEqual("Kyrgyz", languages.get_name("kir"))
+            self.assertEqual("Oromifa", languages.get_name("orm"))
 
             self.assertEqual("", languages.get_name("cpi"))  # not in our allowed languages
             self.assertEqual("", languages.get_name("xyz"))
@@ -931,33 +900,38 @@ class TestValidators(TestCase):
         self.assertEqual(NameValidator(64), validator)
         self.assertNotEqual(NameValidator(32), validator)
 
-    def test_validate_external_url(self):
+    def test_external_url_field(self):
+        class Form(forms.Form):
+            url = ExternalURLField()
+
         cases = (
-            ("ftp://google.com", "Must use HTTP or HTTPS."),
-            ("http://localhost/foo", "Cannot be a local or private host."),
-            ("http://localhost:80/foo", "Cannot be a local or private host."),
-            ("http://127.0.00.1/foo", "Cannot be a local or private host."),  # loop back
-            ("http://192.168.0.0/foo", "Cannot be a local or private host."),  # private
-            ("http://255.255.255.255", "Cannot be a local or private host."),  # multicast
-            ("http://169.254.169.254/latest", "Cannot be a local or private host."),  # link local
-            ("http://::1:80/foo", "Unable to resolve host."),  # no ipv6 addresses for now
-            ("http://google.com/foo", None),
-            ("http://google.com:8000/foo", None),
-            ("HTTP://google.com:8000/foo", None),
-            ("HTTP://8.8.8.8/foo", None),
+            ("//[", ["Enter a valid URL."]),
+            ("ftp://google.com", ["Must use HTTP or HTTPS."]),
+            ("google.com", ["Enter a valid URL."]),
+            ("http://localhost/foo", ["Cannot be a local or private host."]),
+            ("http://localhost:80/foo", ["Cannot be a local or private host."]),
+            ("http://127.0.00.1/foo", ["Cannot be a local or private host."]),  # loop back
+            ("http://192.168.0.0/foo", ["Cannot be a local or private host."]),  # private
+            ("http://255.255.255.255", ["Cannot be a local or private host."]),  # multicast
+            ("http://169.254.169.254/latest", ["Cannot be a local or private host."]),  # link local
+            ("http://::1:80/foo", ["Unable to resolve host."]),  # no ipv6 addresses for now
+            ("http://google.com/foo", []),
+            ("http://google.com:8000/foo", []),
+            ("HTTP://google.com:8000/foo", []),
+            ("HTTP://8.8.8.8/foo", []),
         )
 
         for tc in cases:
-            if tc[1]:
-                with self.assertRaises(ValidationError) as cm:
-                    validate_external_url(tc[0])
+            form = Form({"url": tc[0]})
+            is_valid = form.is_valid()
 
-                self.assertEqual(tc[1], cm.exception.message)
+            if tc[1]:
+                self.assertFalse(is_valid, f"form.is_valid() unexpectedly true for '{tc[0]}'")
+                self.assertEqual({"url": tc[1]}, form.errors, f"validation errors mismatch for '{tc[0]}'")
+
             else:
-                try:
-                    validate_external_url(tc[0])
-                except Exception:
-                    self.fail(f"unexpected validation error for '{tc[0]}'")
+                self.assertTrue(is_valid, f"form.is_valid() unexpectedly false for '{tc[0]}'")
+                self.assertEqual({}, form.errors)
 
 
 class TestUUIDs(TembaTest):
@@ -975,3 +949,8 @@ class TestUUIDs(TembaTest):
         g = uuid.seeded_generator(456)
         self.assertEqual(uuid.UUID("8c338abf-94e2-4c73-9944-72f7a6ff5877", version=4), g())
         self.assertEqual(uuid.UUID("c8e0696f-b3f6-4e63-a03a-57cb95bdb6e3", version=4), g())
+
+
+class ComposeTest(TembaTest):
+    def test_empty_compose(self):
+        self.assertEqual(compose_serialize(), {"text": "", "attachments": []})

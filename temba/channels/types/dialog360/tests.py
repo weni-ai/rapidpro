@@ -24,9 +24,9 @@ class Dialog360TypeTest(CRUDLTestMixin, TembaTest):
         url = reverse("channels.types.dialog360.claim")
         self.login(self.admin)
 
-        # make sure 360dialog is on the claim page
+        # make sure  360dialog is NOT on the claim page
         response = self.client.get(reverse("channels.channel_claim"), follow=True)
-        self.assertContains(response, url)
+        self.assertNotContains(response, url)
 
         response = self.client.get(url)
         self.assertEqual(200, response.status_code)
@@ -34,7 +34,6 @@ class Dialog360TypeTest(CRUDLTestMixin, TembaTest):
 
         post_data["number"] = "1234"
         post_data["country"] = "RW"
-        post_data["base_url"] = "https://ilhasoft.com.br/whatsapp"
         post_data["api_key"] = "123456789"
 
         # will fail with invalid phone number
@@ -46,7 +45,7 @@ class Dialog360TypeTest(CRUDLTestMixin, TembaTest):
 
         # then success
         with patch("socket.gethostbyname", return_value="123.123.123.123"), patch("requests.post") as mock_post:
-            mock_post.side_effect = [MockResponse(200, '{ "url": "https://ilhasoft.com.br/whatsapp" }')]
+            mock_post.side_effect = [MockResponse(200, '{ "url": "https://waba.360dialog.io" }')]
 
             response = self.client.post(url, post_data)
             self.assertEqual(302, response.status_code)
@@ -54,7 +53,7 @@ class Dialog360TypeTest(CRUDLTestMixin, TembaTest):
         channel = Channel.objects.get()
 
         self.assertEqual("123456789", channel.config[Channel.CONFIG_AUTH_TOKEN])
-        self.assertEqual("https://ilhasoft.com.br/whatsapp", channel.config[Channel.CONFIG_BASE_URL])
+        self.assertEqual("https://waba.360dialog.io", channel.config[Channel.CONFIG_BASE_URL])
 
         self.assertEqual("+250788123123", channel.address)
         self.assertEqual("RW", channel.country)
@@ -63,7 +62,7 @@ class Dialog360TypeTest(CRUDLTestMixin, TembaTest):
 
         # test activating the channel
         with patch("requests.post") as mock_post:
-            mock_post.side_effect = [MockResponse(200, '{ "url": "https://ilhasoft.com.br/whatsapp" }')]
+            mock_post.side_effect = [MockResponse(200, '{ "url": "https://waba.360dialog.io" }')]
 
             Dialog360Type().activate(channel)
             self.assertEqual(
@@ -214,7 +213,6 @@ class Dialog360TypeTest(CRUDLTestMixin, TembaTest):
 
         # should have our template translations
         self.assertContains(response, "Hello")
-        self.assertContains(response, sync_url)
         self.assertContentMenu(templates_url, self.admin, ["Sync Logs"])
 
         # check if message templates link are in sync_logs view

@@ -17,7 +17,6 @@ class DiscordType(ChannelType):
     courier_url = r"^ds/(?P<uuid>[a-z0-9\-]+)/receive$"
 
     name = "Discord"
-    icon = "icon-discord"
     show_config_page = False
 
     claim_blurb = _(
@@ -26,8 +25,8 @@ class DiscordType(ChannelType):
         "This channel type is only available if your instance has been "
         "configured with the Discord proxy application, available %(proxy_link)s."
         % {
-            "link": '<a href="https://discord.com/">Discord</a>',
-            "proxy_link": '<a href="https://github.com/releaseplatform/RapidPro-Discord-Proxy">here</a>',
+            "link": '<a target="_blank" href="https://discord.com/">Discord</a>',
+            "proxy_link": '<a target="_blank" href="https://github.com/releaseplatform/RapidPro-Discord-Proxy">here</a>',
         }
     )
     claim_view = ClaimView

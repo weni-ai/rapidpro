@@ -12,13 +12,8 @@ class TwitterLegacyType(ChannelType):
     category = ChannelType.Category.SOCIAL_MEDIA
 
     name = "Twitter Legacy"
-    icon = "icon-twitter"
 
     schemes = [URN.TWITTER_SCHEME, URN.TWITTERID_SCHEME]
-    max_length = 10000
-    show_config_page = False
-    free_sending = True
-    quick_reply_text_size = 36
 
     def is_available_to(self, org, user):
         return False, False

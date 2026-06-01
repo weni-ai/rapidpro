@@ -5,9 +5,10 @@ import pytz
 from django.urls import reverse
 from django.utils import timezone
 
-from temba.contacts.search.omnibox import omnibox_serialize
-from temba.msgs.models import Broadcast
-from temba.tests import CRUDLTestMixin, TembaTest
+from temba import settings
+from temba.msgs.models import Broadcast, Media
+from temba.tests import CRUDLTestMixin, MigrationTest, TembaTest
+from temba.utils.compose import compose_deserialize_attachments
 from temba.utils.dates import datetime_to_str
 
 from .models import Schedule
@@ -35,15 +36,6 @@ class ScheduleTest(TembaTest):
         default_tz = pytz.timezone("Africa/Kigali")
 
         tcs = [
-            dict(
-                label="one time in the past (noop)",
-                trigger_date=datetime(2013, 1, 2, hour=10),
-                now=datetime(2013, 1, 3, hour=9),
-                repeat_period=Schedule.REPEAT_NEVER,
-                first=None,
-                next=[None],
-                display="",
-            ),
             dict(
                 label="one time in the future (fire once)",
                 trigger_date=datetime(2013, 1, 2, hour=10),
@@ -217,79 +209,34 @@ class ScheduleTest(TembaTest):
 
             self.assertEqual(tc["display"], sched.get_display(), f"display mismatch for {label}")
 
-    def test_schedule_ui(self):
-        # you can no longer create blank schedules from the UI but they're still out there
-        schedule = Schedule.create_schedule(self.org, self.admin, None, Schedule.REPEAT_NEVER)
-        bcast = self.create_broadcast(
-            self.admin,
-            "A scheduled message to Joe",
-            contacts=[self.joe],
-            schedule=schedule,
-        )
-
-        # update our message
-        update_bcast_url = reverse("msgs.broadcast_scheduled_update", args=[bcast.id])
-
-        self.login(self.editor)
-        self.client.post(
-            update_bcast_url,
-            {
-                "message": "An updated scheduled message",
-                "omnibox": omnibox_serialize(self.org, [], [self.joe], json_encode=True),
-            },
-        )
-
-        bcast.refresh_from_db()
-        self.assertEqual({"eng": "An updated scheduled message"}, bcast.text)
-        self.assertEqual(self.editor, bcast.modified_by)
-
-        start = datetime(2045, 9, 19, hour=10, minute=15, second=0, microsecond=0)
-        start = pytz.utc.normalize(self.org.timezone.localize(start))
-
-        # update the schedule
-        self.client.post(
-            reverse("schedules.schedule_update", args=[bcast.schedule.id]),
-            {
-                "repeat_period": Schedule.REPEAT_WEEKLY,
-                "repeat_days_of_week": "W",
-                "start": "later",
-                "start_datetime": datetime_to_str(start, "%Y-%m-%dT%H:%MZ", timezone.utc),
-            },
-        )
-
-        # assert out next fire was updated properly
-        schedule.refresh_from_db()
-        self.assertEqual(Schedule.REPEAT_WEEKLY, schedule.repeat_period)
-        self.assertEqual("W", schedule.repeat_days_of_week)
-        self.assertEqual(10, schedule.repeat_hour_of_day)
-        self.assertEqual(15, schedule.repeat_minute_of_hour)
-        self.assertEqual(start, schedule.next_fire)
-        self.assertEqual(self.editor, schedule.modified_by)
-
-        # manually set our fire in the past
-        schedule.next_fire = timezone.now() - timedelta(days=1)
-        schedule.save(update_fields=["next_fire"])
-
-        self.assertIsNotNone(str(schedule))
-
     def test_update_near_day_boundary(self):
         self.org.timezone = pytz.timezone("US/Eastern")
         self.org.save()
         tz = self.org.timezone
 
         self.login(self.admin)
-        self.client.post(
-            reverse("msgs.broadcast_scheduled_create"),
-            {
-                "omnibox": omnibox_serialize(self.org, [], [self.joe], json_encode=True),
-                "text": "A scheduled message to Joe",
-                "start_datetime": "2021-06-24 12:00",
-                "repeat_period": "D",
-            },
-        )
 
-        bcast = Broadcast.objects.get()
-        sched = bcast.schedule
+        text = "A broadcast to Joe"
+        media_attachments = []
+        media = Media.from_upload(
+            self.org,
+            self.admin,
+            self.upload(f"{settings.MEDIA_ROOT}/test_media/steve marten.jpg", "image/jpeg"),
+            process=False,
+        )
+        media_attachments.append({"content_type": media.content_type, "url": media.url})
+        compose_deserialize_attachments(media_attachments)
+
+        sched = Schedule.create_schedule(self.org, self.admin, timezone.now(), Schedule.REPEAT_DAILY)
+
+        # our view asserts that our schedule is connected to a broadcast
+        self.create_broadcast(
+            self.admin,
+            text,
+            contacts=[self.joe],
+            status=Broadcast.STATUS_QUEUED,
+            schedule=sched,
+        )
 
         update_url = reverse("schedules.schedule_update", args=[sched.id])
 
@@ -350,12 +297,13 @@ class ScheduleCRUDLTest(TembaTest, CRUDLTestMixin):
         yesterday = today - timedelta(days=1)
         tomorrow = today + timedelta(days=1)
 
-        # update to start in past with no repeat
-        self.assertUpdateSubmit(update_url, {"start_datetime": datepicker_fmt(yesterday), "repeat_period": "O"})
-
-        schedule.refresh_from_db()
-        self.assertEqual("O", schedule.repeat_period)
-        self.assertIsNone(schedule.next_fire)
+        # try to submit in past with no repeat
+        self.assertUpdateSubmit(
+            update_url,
+            {"start_datetime": datepicker_fmt(yesterday), "repeat_period": "O"},
+            form_errors={"start_datetime": "Must specify a start time that is in the future."},
+            object_unchanged=schedule,
+        )
 
         # update to start in future with no repeat
         self.assertUpdateSubmit(update_url, {"start_datetime": datepicker_fmt(tomorrow), "repeat_period": "O"})
@@ -413,3 +361,28 @@ class ScheduleCRUDLTest(TembaTest, CRUDLTestMixin):
         schedule.refresh_from_db()
         self.assertEqual("O", schedule.repeat_period)
         self.assertIsNone(schedule.next_fire)
+
+
+class FixDeletedSchedulesTest(MigrationTest):
+    app = "schedules"
+    migrate_from = "0018_squashed"
+    migrate_to = "0019_fix_deleted_schedules"
+
+    def setUpBeforeMigration(self, apps):
+        group = self.create_group("Testers")
+
+        self.schedule1 = Schedule.create_schedule(self.org, self.editor, timezone.now(), Schedule.REPEAT_MONTHLY)
+        self.create_broadcast(self.admin, {"eng": "Hi"}, groups=[group], schedule=self.schedule1)
+
+        self.schedule2 = Schedule.create_schedule(self.org, self.editor, timezone.now(), Schedule.REPEAT_MONTHLY)
+        bcast2 = self.create_broadcast(self.admin, {"eng": "Hi"}, groups=[group], schedule=self.schedule2)
+
+        bcast2.is_active = False
+        bcast2.save(update_fields=("is_active",))
+
+    def test_migration(self):
+        self.schedule1.refresh_from_db()
+        self.schedule2.refresh_from_db()
+
+        self.assertTrue(self.schedule1.is_active)
+        self.assertFalse(self.schedule2.is_active)

@@ -1,6 +1,8 @@
 from abc import abstractmethod
 
+from django.db.models import QuerySet
 from django.forms import model_to_dict
+from django.urls import reverse
 
 
 class CRUDLTestMixin:
@@ -30,6 +32,17 @@ class CRUDLTestMixin:
             check.check(self, response, msg_prefix)
 
         return response
+
+    def process_wizard(self, view_name, url, form_data):
+        for step, data in form_data.items():
+            # prepends each field name with the step name
+            data = {f"{step}-{key}": value for key, value in data.items()}
+            response = self.client.post(url, {f"{view_name}-current_step": step, **data})
+            if response.status_code == 200 and "form" in response.context and response.context["form"].errors:
+                return response
+
+            if response.status_code == 302:
+                return response
 
     def assertReadFetch(
         self, url, *, allow_viewers, allow_editors, allow_agents=False, context_object=None, status=200
@@ -236,25 +249,34 @@ class CRUDLTestMixin:
 
         return self.requestView(url, self.customer_support, checks=[StatusCode(200)])
 
-    def assertContentMenu(self, url: str, user, labels: list, spa: bool = False):
+    def assertMenu(self, url, count, contains_names=[], allow_viewers=True):
+        response = self.assertListFetch(url, allow_viewers=allow_viewers, allow_editors=True, allow_agents=True)
+        menu = response.json()["results"]
+        self.assertEqual(count, len(menu))
 
-        headers = {"HTTP_TEMBA_CONTENT_MENU": 1}
+        # check the content if we have them
+        if contains_names:
+            for name in contains_names:
+                steps = name.split("/")
+                while steps:
+                    step = steps.pop(0)
+                    menu_names = [m["name"] for m in menu if "name" in m]
+                    try:
+                        idx = menu_names.index(step)
+                        if "items" in menu[idx]:
+                            menu = menu[idx]["items"]
+                    except ValueError:
+                        self.fail(f"Couldn't find {step} in {menu_names}")
 
-        if spa:
-            headers["HTTP_TEMBA_SPA"] = 1
-
-        response = self.requestView(url, user, checks=[StatusCode(200), ContentType("application/json")], **headers)
-
-        self.assertEqual(labels, [item.get("label", "-") for item in response.json()["items"]])
-
-        # for now menu is also stuffed into context in old gear links format
-        headers = {}
-        if spa:
-            headers["HTTP_TEMBA_SPA"] = 1
-
-        response = self.requestView(url, user, checks=[StatusCode(200)], **headers)
-        links = response.context.get("content_menu_buttons", []) + response.context.get("content_menu_links", [])
-        self.assertEqual(labels, [i.get("title", "-") for i in links])
+    def assertContentMenu(self, url: str, user, items: list = None):
+        response = self.requestView(
+            url,
+            user,
+            checks=[StatusCode(200), ContentType("application/json")],
+            HTTP_TEMBA_CONTENT_MENU=1,
+            HTTP_TEMBA_SPA=1,
+        )
+        self.assertEqual(items, [item.get("label", "-") for item in response.json()["items"]])
 
 
 class BaseCheck:
@@ -363,7 +385,8 @@ class FormFields(BaseCheck):
     def check(self, test_cls, response, msg_prefix):
         form = self.get_context_item(test_cls, response, "form", msg_prefix)
         fields = list(form.fields.keys())
-        fields.remove("loc")
+        if "loc" in fields:
+            fields.remove("loc")
 
         test_cls.assertEqual(list(self.fields), list(fields), msg=f"{msg_prefix}: form fields mismatch")
 
@@ -376,6 +399,9 @@ class FormInitialValues(BaseCheck):
         form = self.get_context_item(test_cls, response, "form", msg_prefix)
         for field_key, value in self.fields.items():
             actual = form.initial[field_key] if field_key in form.initial else form.fields[field_key].initial
+            if isinstance(actual, QuerySet):
+                actual = list(actual)
+
             test_cls.assertEqual(
                 actual,
                 value,
@@ -424,6 +450,11 @@ class ContentType(BaseCheck):
         test_cls.assertEqual(
             self.content_type, response.headers["content-type"], msg=f"{msg_prefix}: content type mismatch"
         )
+
+
+class StaffRedirect(BaseCheck):
+    def check(self, test_cls, response, msg_prefix):
+        test_cls.assertRedirect(response, reverse("orgs.org_service"), msg=f"{msg_prefix}: expected staff redirect")
 
 
 class LoginRedirectOr404(BaseCheck):
