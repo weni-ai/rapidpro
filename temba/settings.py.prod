@@ -139,7 +139,7 @@ COMPRESS_CSS_HASHING_METHOD = "content"
 # the runtime will request keys that aren't in the manifest and raise
 # OfflineGenerationError. Inspired by Nyaruka's pattern (settings_common.py iterates
 # BRANDS), extended here to also cover the BRANDING dict that Weni introduced.
-_offline_brands = list(BRANDS)
+_offline_brands = [BRAND]
 for _b in BRANDING.values():
     if id(_b) not in {id(x) for x in _offline_brands}:
         _offline_brands.append(_b)
