@@ -2,7 +2,6 @@ from django.conf import settings
 
 
 def use_weni_layout(request):
-
     host = request.get_host().split(":")[0]
     weni_domain = getattr(settings, "WENI_DOMAINS", {}).get("weni", "")
 

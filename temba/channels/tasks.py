@@ -7,7 +7,6 @@ from celery import shared_task
 from django.conf import settings
 from django.db.models import Count, Sum
 from django.utils import timezone
-from django.utils.timesince import timesince
 
 from temba import mailroom
 from temba.orgs.models import Org

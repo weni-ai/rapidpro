@@ -18,7 +18,6 @@ class ClaimView(ClaimViewMixin, SmartFormView):
 
         def clean(self):
             try:
-
                 headers = {"Content-Type": "application/x-www-form-urlencoded"}
                 request_body = {
                     "client_id": self.cleaned_data["app_id"],
@@ -40,9 +39,7 @@ class ClaimView(ClaimViewMixin, SmartFormView):
 
             except Exception:
                 raise forms.ValidationError(
-                    _(
-                        "Unable to complete login for your Microsoft Teams bot, please check information about your APP."
-                    )
+                    _("Unable to complete login for your Microsoft Teams bot, please check information about your APP.")
                 )
 
             return self.cleaned_data
