@@ -80,6 +80,18 @@ BRANDING = {
         "inactive_threshold": brand_info.get("inactive_threshold"),
     }
 }
+
+# Replace the hardcoded BRANDS list from settings_common (which still points to app.rapidpro.io)
+# so that Org.branding -> brands.get_by_slug(org.brand) resolves to the environment-specific
+# branding instead of the upstream default. The hosts list is also populated so that the
+# request-host lookup matches this brand on the configured domain.
+BRANDS = [
+    {
+        **BRANDING[DEFAULT_BRAND],
+        "hosts": [brand_info.get("domain")],
+    }
+]
+
 HOSTNAME = DEFAULT_BRAND
 
 # VARIABLES TO API REQUISITIONS
