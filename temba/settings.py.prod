@@ -78,6 +78,7 @@ BRANDING = {
         "description": _(brand_info.get("description")),
         "credits": _(brand_info.get("credits")),
         "inactive_threshold": brand_info.get("inactive_threshold"),
+        "redirect": brand_info.get("redirect"),
     }
 }
 
