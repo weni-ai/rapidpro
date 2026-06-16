@@ -93,6 +93,9 @@ BRANDS = [
     }
 ]
 
+# BrandingMiddleware reads settings.BRAND, not BRANDING — sync so env vars like redirect apply.
+BRAND = BRANDS[0]
+
 HOSTNAME = DEFAULT_BRAND
 
 # VARIABLES TO API REQUISITIONS
