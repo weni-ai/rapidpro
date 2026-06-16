@@ -23,7 +23,7 @@ PLAYABLE_CONTENT_TYPES = {
 def as_icon(contact_event):
     icon = "icon-bubble-dots-2 green"
     direction = getattr(contact_event, "direction", "O")
-    msg_type = getattr(contact_event, "msg_type", "I")
+    msg_type = getattr(contact_event, "msg_type", "T")
 
     if hasattr(contact_event, "status"):
         status = contact_event.status
@@ -103,9 +103,10 @@ def render(parser, token):
     return RenderNode(nodes, as_var)
 
 
-@register.inclusion_tag("msgs/tags/attachment.haml")
-def attachment_button(attachment: str) -> dict:
+@register.inclusion_tag("msgs/tags/attachment.html")
+def attachment_button(attachment: str, show_thumb=False) -> dict:
     content_type, delim, url = attachment.partition(":")
+    thumb = None
 
     # some OGG/OGA attachments may have wrong content type
     if content_type == "application/octet-stream" and (url.endswith(".ogg") or url.endswith(".oga")):
@@ -116,6 +117,9 @@ def attachment_button(attachment: str) -> dict:
         category, sub_type = content_type.split("/", maxsplit=2)
     else:
         category, sub_type = content_type, ""
+
+    if category == "image" and show_thumb:
+        thumb = url
 
     if category == "geo":
         preview = url
@@ -134,4 +138,5 @@ def attachment_button(attachment: str) -> dict:
         "preview": preview,
         "url": url,
         "is_playable": content_type in PLAYABLE_CONTENT_TYPES,
+        "thumb": thumb,
     }

@@ -3,222 +3,90 @@
 
 {% block html-tag %}
 <html lang="{{ LANGUAGE_CODE }}">
-{% endblock %}
+{% endblock html-tag %}
   %head
     %title
-      -block page-title
-        {{ brand.name }} - {{ brand.title }}
+      -block head-title
+        {{title}}
 
     %meta{charset:"utf-8"}
     %meta{name:"viewport", content:"width=device-width, initial-scale=1.0"}
-    %meta{name:"description", content:"{% block page-description %}{{brand.name}} lets you visually build interactive SMS applications and launch them anywhere in the world.{% endblock %}"}
+    %meta{name:"description", content:"{% block page-description %}{{brand.name}} lets you visually build interactive SMS applications and launch them anywhere in the world.{% endblock page-description %}"}
     %meta{name:"author", content:"Nyaruka Ltd"}
     %meta{http-equiv:"X-UA-Compatible", content:"IE=10"}
 
-    -block ui-switch-js
-      -if user.is_beta
-        %script(src="{{ STATIC_URL }}js/urls.js")
+    -# this view make it possible to process translations from javascript land
+    %script(src="{% url 'django.views.i18n.javascript_catalog' %}")
+      
+    -compress js
+      %script(src="{{ STATIC_URL }}jquery/dist/jquery.min.js")
+      %script(src="{{ STATIC_URL }}js/libs/jquery.url.js")
+      %script(src="{{ STATIC_URL }}rest_framework/js/prettify-min.js")
+      %script(src="{{ STATIC_URL }}highcharts/highstock.js?v=3.0")
+      %script(src="{{ STATIC_URL }}highcharts/modules/drilldown.js")
+      %script(src="{{ STATIC_URL }}qrious/dist/qrious.min.js")
+      %script(src="{{ STATIC_URL }}rest_framework/js/prettify-min.js")
+    
+    -if not debug and not testing
+      %script{src:"{{ STATIC_URL }}lib/raven.min.js"}
 
-        :javascript
-          window.STATIC_URL = "{{STATIC_URL}}";
-          function loadNewInterface(force) {
-            var location = window.location;
-            var newUrl = mapUrl(location.pathname + (location.search || ""));
-            if (newUrl != window.location.pathname) {
-              window.location = newUrl;
-            } else { 
-              if (force) {
-                window.location = "/messages/";
-              }
-            }
-          }
-          
-          function getCookie(name) {
-            var value = `; ${document.cookie}`;
-            var parts = value.split(`; ${name}=`);
-            if (parts.length === 2) return parts.pop().split(';').shift();
-          }
-
-          function switchToNewInterface() {
-            document.cookie = "nav=2; expires=Fri, 31 Dec 9999 23:59:59 GMT; path=/;";
-            loadNewInterface(true);
-          }
-
-        -block auto-route
-          :javascript
-            (function(){
-              var nav = getCookie("nav");
-              if (nav == "2") {
-                loadNewInterface(false);
-              }
-            })();
+    -compress js
+      %script{src:"{{ STATIC_URL }}js/utils.js"}
 
     :javascript
+      var static_url = "{{ STATIC_URL }}";
+      var org_id = {% if active_org %}{{ active_org.id }}{% else %}null{% endif %};
+      var tembaVersion = "{{ temba_version }}";
+      var params = "{{ url_params|safe }}";
+      var anon_org = asBool("{{ user_org.is_anon }}");
+      var menuSelection = "{{ temba_menu_selection }}";
 
-      // Weni's addition to send a message to Connect about our current route
-      {% if use_weni_layout %}
-        window.parent.postMessage({
-          event: 'changePathname',
-          pathname: window.location.pathname,
-        }, "*")
-      {% endif %}
-
-      window.supportEmail = '{{brand.support_email}}';
-
-      function conditionalLoad(local, remote) {
-        if (local != null && (window.location.hostname == "localhost" || remote == null)) {
-          loadResource("{{ STATIC_URL }}" + local);
-        } else if (remote != null) {
-          loadResource(remote);
+      function handleMenuReady() {
+        var selection = window.location.pathname.split("/").filter(function(path){ return !!path});
+        var menu = document.querySelector("temba-menu");
+        if (menu && menuSelection) {
+          menu.setFocusedItem(menuSelection);          
         }
       }
 
-      function loadResource(src) {
-        (function() { document.write(unescape('%3Cscript src="' + src + '"%3E%3C/script%3E')); })();
-      }
+      // set our initial title
+      document.addEventListener("DOMContentLoaded", function(event) {
+        const titleText = document.querySelector("#title-text");
+        if (titleText){ 
+          document.title = titleText.innerText;
+        }
+      });
 
-    // ==== JQUERY ====
-    <script type="text/javascript" src="{{ STATIC_URL }}jquery/dist/jquery.min.js"></script>
-    // <script type="text/javascript" src="{{ STATIC_URL }}jquery-migrate/dist/jquery-migrate.min.js"></script>
+    -block scripts
+      -compress js
+        %script{src:"{{ STATIC_URL }}js/temba.js"}
+        %script{src:"{{ STATIC_URL }}js/frame.js"}
+        %script{src:"{{ STATIC_URL }}js/labels.js"}
 
-    -# this view make it possible to process translations from javascript land
-    <script src="{% url 'django.views.i18n.javascript_catalog' %}"></script>
-
-    -if logrocket_id and parent_iframe_domain
-      <!-- LogRocket Tracking -->
-      <script src="https://cdn.lr-in.com/LogRocket.min.js" crossorigin="anonymous"></script>
-      <script>window.LogRocket && window.LogRocket.init("{{logrocket_id}}", {mergeIframes: true, parentDomain: "{{parent_iframe_domain}}"});</script>
-
-    -if use_weni_layout
-      <script defer src="//app.helphero.co/embed/m7dO0to4OK"></script>
-
-    -compress js
-      :javascript
-        var static_url = '{{STATIC_URL}}';
-
-      %script{src:"{{ STATIC_URL }}js/libs/jquery.url.js"}
-
-      // expanded nav dropdown
-      %script{src:"{{ STATIC_URL }}bower/jquery-hoverintent/jquery.hoverIntent.js"}
-
-      // npm packages
-      %script{src:"{{ STATIC_URL }}intercooler/dist/intercooler.js"}
-
-      -if not debug and not testing
-        %script{src:"{{ STATIC_URL }}lib/raven.min.js"}
-
-    -compress js
-      %script{src:"{{ STATIC_URL }}js/temba.js"}
-      %script{src:"{{ STATIC_URL }}js/labels.js"}
-      
-    
-    -include "includes/frame_top.html"
+    -for script in flow_editor_scripts
+      %script(type="text/javascript" src="{{script}}")
+    -for style in flow_editor_styles
+      %link(rel="stylesheet" href="{{style}}" type="text/css")
 
     -if not COMPONENTS_DEV_MODE
       -include "components-head.html"
 
-    -if brand.favico
-      %link{type:"image/ico", rel:"shortcut icon", href:"{{ STATIC_URL }}{{ brand.favico }}"}
-    -else
+    -block favico
       %link{type:"image/ico", rel:"shortcut icon", href:"{{ STATIC_URL }}images/favicon.ico"}
 
     -block styles
       %link{rel:'stylesheet', href:'https://fonts.googleapis.com/css?family=Roboto+Mono:300|Roboto:200,300,400,500'}
 
       -compress css
-        %link{type:'text/css', rel:'stylesheet', href:'{{ STATIC_URL }}bower/bootstrap-css/css/bootstrap.css',  media:'all' }
-
-
-      -compress css
-        %link{type:'text/css', rel:'stylesheet', href:"{{ STATIC_URL }}fonts/icons/style.css", media:'all'}
-        %link{type:"text/css", rel:"stylesheet", href:"{{ STATIC_URL }}css/temba-components.css"}
-
-      -compress css
-
-        {% lessblock %}
-          :plain
-            @import "style.less";
-
-            // any brand styling tweaks
-            @import (optional, reference) "../brands/style.less";
-            @import (optional) "../brands/{{brand.slug}}/less/style.less";
-
-        {% endlessblock %}
-
-        // any additional brand styling such as fonts, etc
-        -for style in brand.styles
-          -if 'less' in style
-            %link{type:'text/less', rel:'stylesheet', href:'{{STATIC_URL}}{{style}}', media:'all'}
-          -else
-            %link{type:'text/css', rel:'stylesheet', href:"{{ STATIC_URL }}{{style}}", media:'all'}
-
-      -compress css
+        %link{rel:"stylesheet", href:"{{ STATIC_URL }}less/style.less", type:"text/less"}
         %link{rel:"stylesheet", href:"{{ STATIC_URL }}css/tailwind.css", type:"text/css"}
         %link{rel:"stylesheet", href:"{{ STATIC_URL }}less/refresh.less", type:"text/less"}
 
-      -block extra-less
-      -block extra-style
+      -compress css
+        %link(type="text/css" rel="stylesheet" href="{{ STATIC_URL }}css/temba-components.css")
+        %link(type="text/css" rel="stylesheet" href="{{ STATIC_URL }}css/frame.css")
 
-      :css
-        {% if show_sidemenu and use_weni_layout %}
-          /* Layout fallback: pins Weni sidebar so it does not push content out of the viewport
-             when the Unnnic Design System CSS is not loaded (e.g. standalone deployments).
-             When Unnnic CSS is present, it overrides these rules with the full theme. */
-          .weni-side-wrapper,
-          .weni-side-inner {
-            height: 0;
-            overflow: visible;
-          }
-          #unnnic-sidebar {
-            position: fixed;
-            left: 0;
-            top: 0;
-            width: 200px;
-            height: 100vh;
-            z-index: 100;
-            overflow-y: auto;
-            background: #fff;
-            border-right: 1px solid #e0e0e0;
-          }
-          #unnnic-menu {
-            display: flex;
-            flex-direction: column;
-            padding: 16px 0;
-          }
-          #unnnic-menu > a,
-          #unnnic-menu > div[href] {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            padding: 12px 8px;
-            text-align: center;
-            text-decoration: none;
-            color: #555;
-            font-size: 11px;
-            letter-spacing: 0.05em;
-          }
-          #unnnic-menu > a:hover,
-          #unnnic-menu > a.active {
-            background-color: #f0f6ff;
-            color: var(--color-primary-dark, #1976d2);
-          }
-          #unnnic-menu > a .circle,
-          #unnnic-menu > div[href] .circle {
-            width: 28px;
-            height: 28px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin-bottom: 4px;
-          }
-          .unnnic-tooltip {
-            display: none;
-          }
-          #unnnic-content {
-            padding-left: 200px;
-          }
-        {% endif %}
-
+    -include "includes/frame_top.html"
     -for incl in brand.head_includes
       -include incl
 
@@ -243,77 +111,25 @@
 
   -if COMPONENTS_DEV_MODE
     <script type="module">
-      import '../out-tsc/temba-modules.js';
+      import '/out-tsc/temba-modules.js';
     </script>
   -else 
     -include "components-body.html"
   
-  -block temba-store
-    
-    -if user.is_authenticated and user_org
-      %temba-store(
-        completion="/mr/docs/{{ LANGUAGE_CODE }}/editor.json"
-        fields="/api/v2/fields.json"
-        globals="/api/v2/globals.json")
-
-  -if use_weni_layout
-    -block weni-side
-      -if show_sidemenu
-        .flex.flex-col.weni-side-wrapper{style: "height: inherit"}
-          .flex.flex-row.h-full.weni-side-inner
-            <!-- Sidemenu -->
-            -block sidemenu
-              #unnnic-sidebar.flex-col.h-screen.bg-color-unnnic-snow.unnnic-right-menu-divider
-                -block info
-                
-                -block side
-                  -include 'weni/side.html'
+  -if user_org
+    %temba-store(
+      completion="/mr/docs/{{ LANGUAGE_CODE }}/editor.json"
+      languages="/org/languages/"
+      fields="/api/v2/fields.json"
+      globals="/api/v2/globals.json"
+      groups="/api/v2/groups.json"
+      workspace="/api/v2/workspace.json"
+      users="/api/v2/users.json"
+    )
+  -else
+    %temba-store
 
   .flex.flex-col.h-full
-    -block header
-      <!-- Header -->
-      -if user_org
-        .org-header.self-end
-          .pull-right.toggle
-            .icon-menu-2
-
-          .org
-            {{ user_org.name }}
-
-          .other-orgs.hide
-            -for org in user_orgs
-              -if org != user_org
-                .org.text-primary
-                  %a.posterize{href:'{% url "orgs.org_choose"%}?organization={{org.pk}}'}
-                    {{ org.name }}
-            -if org_perms.orgs.org_create
-              -if "new_orgs" in user_org.features or "child_orgs" in user_org.features
-                %hr
-                .org.text-primary
-                  <a onclick="handleNewWorkspaceClicked(event)">{% trans "New Workspace" %}</a>
-
-        #header
-          &nbsp;
-
-
-        %a#big-logo.logo.icon-logo{href:"{% if user.is_authenticated %}{% url 'msgs.msg_inbox' %}{% else %}/{% endif %}", title:"{{brand.name}}", class:"hover:no-underline"}
-          .name
-            {{brand.name}}
-
-        -block nav
-          -include 'includes/nav.html'
-
-    -block interface-option
-      -if user.is_beta
-        #preview.text-center.px-3.text-sm.py-1(style='background:rgba(0,0,0,.75);z-index:10000;position:fixed;bottom:0px;width:100%;color:#fff')
-          Preview the
-          %span.linked(onclick="switchToNewInterface()" style="color:#43b1ff")<
-            new interface
-
-    -# Main content blocks are declared once. For the Weni layout they get wrapped in #unnnic-content;
-    -# in the default layout they render directly. Only one branch executes per request, so no duplication.
-    {% if use_weni_layout and user_org %}<div id="unnnic-content" class="flex flex-col w-full">{% endif %}
-
     -if messages
       -block messages
         -if messages
@@ -324,63 +140,77 @@
     -block post-header
     <!-- Content -->
     -block page-container
+      <!-- {{temba_version}} -->
+      %temba-mask
       %temba-modax#shared-modax
       %temba-dialog#shared-dialog
-      .flex-grow
-        .page-content
-          -block suspension
-            {% if user_org.is_suspended %}
-              .px-12.-mt-4
-                -include "org_suspended_include.haml"
-            {% endif %}
+      .ajax-scripts
+    
+      .flex-col
+        .flex.widget-container(style="height:100vh;overflow:hidden")
+          -if request.user.is_staff
+            -if user_org and user_org not in user_orgs
+              .servicing.absolute.bg-secondary.my-2.mr-20.rounded.shadow-xl(style="z-index:999999;right:0;bottom:0;")
+                %a.relative(href="{% url 'orgs.org_service' %}" style="text-decoration:none" onclick="handlePosterizeClick(event)")
+                  .flex.items-center.text-white.text-lg.hover.rounded(style="opacity:1;padding:0em 0.5em;")
+                    .flex-grow
+                    %temba-icon(style="color:#fff" name="service")
+                    .ml-2
+                      {{user_org.name}}
+                    .flex-grow
+    
+          .folders
+            %temba-menu#nav(class="{% if servicing %}{% endif%}" style="height:100%" endpoint="{% url 'orgs.org_menu' %}" onchange="handleMenuChanged(event)" -temba-button-clicked="handleMenuClicked(event)" -temba-ready="handleMenuReady")
+              -block menu-header
+    
+          .flex-grow.spa-container.flex.flex-col.initial-load
+            .spa-loader.hide.absolute
+              .wrapper(style="display:flex;z-index:100000;margin-top:0.1em;margin-left:1em")
+                %temba-loading(size=16 units=6)
 
-          .px-12.py-4
-            -block page-top
-              .flex.items-start
-                .flex.flex-col.mr-5.leading-tight
-                  .page-title
-                    -block title
-                      
-                  .page-subtitle
+            .spa-content.p-5
+              -block extra-style
+              -block extra-script
+    
+              -block page-header
+                .mb-4
+                  .no-menu.flex.items-center
+                    .text-container.text-2xl.text-gray-700
+                      .flex.flex-row
+                        -block title
+                          #title-text
+                            -block title-text
+                              {{title}}
+                    .line.flex-grow.mr-2.ml-6
+                      .h-0.border.border-gray-200
+                    
+                    -if has_content_menu
+                      -include "spa_page_menu.html"
+              
+                  .text-lg.text-gray-600
                     -block subtitle
 
-                .flex-grow
-                  .flex.justify-end.w-full
-                    -block gear-menu
-                      -include "gear_links_include.haml"
-
-              -block post-title
-
-            .mt-6
+                      
+              -block alert-messages
+                -if user_org.is_suspended
+                  -include "org_suspended_include.html"
+                -if messages
+                  -for msg in messages
+                    %temba-alert.mb-3
+                      {{ msg }}
+    
               -block content
-            
-            -block post-content
-
-    {% if use_weni_layout and user_org %}</div>{% endif %}
-
-    -if not use_weni_layout
-      -block footer
-        .text-center.text-gray-500.pb-10.-mt-8.bg-gray-200.pt-4
-          :plain
-            <!--
-              This software is licensed under AGPL v3. Please review the full license:
-              https://github.com/rapidpro/rapidpro/blob/main/LICENSE
-              
-              WARNING!
-
-              Hey, we get it. This is neat software, and it would be great to slap
-              the name of your company on it. While you can copyright your modifications,
-              which they themselves require careful consideration of the AGPL license,
-              you cannot claim copyright for work that is not yours. Any modified source code
-              must be shared publicly. Any related copyrights of such work much make notice
-              that it is based on this AGPL software, and also include the below notice.
-              
-              DO NOT illegally claim copyright of this work. If you want to edit the 
-              presentation of the below copyright, please contact us at legal@textit.com 
-              to discuss attribution requirements for this software.
-            -->
-            Copyright © 2012-2022 TextIt, UNICEF. All rights reserved.    
-
+    
+            -block footer
+              .spa-footer.text-center.text-gray-500.mt-4
+                :plain
+                  <!--
+                    License requires that the copyright attribution remain, please do not modify.
+                  -->
+                  Copyright © 2012-2023 TextIt. All rights reserved.
+      
+      %temba-lightbox
+  
   -trans 'Delete' as title
   %temba-dialog#general-delete-confirmation.hidden{header:"{{title|escapejs}}", primaryButtonName:"{{title|escapejs}}", destructive: "true"}
     .p-6.confirmation-body
@@ -390,331 +220,12 @@
   -if form
     {{ form.media }}
 
-  -block script
-
-    {{block.super}}
-
-    :javascript
-      {% if user_org %}
-        {% if user_org.is_anon %}
-          var anon_org = true;
-        {% else %}
-          var anon_org = false;
-        {% endif %}
-      {% endif %}
-
-      function inIframe () {
-        try {
-          if (window.self !== window.top) {
-            $(".org-header").hide();
-          } else {
-            $(".org-header").show();
-          }
-        } catch (e) {
-          $(".org-header").hide();
-        }
-      }
-
-      function enableLinkTranslations() {
-        let connectBaseURL = '';
-
-        function translateAllLinks() {
-          if (!connectBaseURL) {
-            return;
-          }
-
-          const url = new URL(connectBaseURL);
-
-          document.querySelectorAll('a[href]').forEach((link) => {
-            const internalHref = link.getAttribute('internal-href') || link.getAttribute('href');
-
-            if (['http://', 'https://'].some((initial) => internalHref.startsWith(initial))) {
-              return;
-            }
-
-            const dashHref = connectBaseURL + internalHref;
-
-            if (link.translateLinkConnect) {
-              if (link.getAttribute('href') === dashHref) {
-                return;
-              }
-              link.removeEventListener('click', link.translateLinkConnect);
-            }
-
-            link.setAttribute('internal-href', internalHref);
-            link.setAttribute('href', dashHref);
-            link.addEventListener(
-              'click',
-              (link.translateLinkConnect = () => {
-                if(link.getAttribute('target') !== '_blank') {
-                  link.setAttribute('href', internalHref);
-                  setTimeout(() => {
-                    link.setAttribute('href', dashHref);
-                  }, 0);
-                }
-              }),
-            );
-          });
-        };
-
-        function initializeObserver() {
-          const targetNode = document.getElementById('pageBody');
-          const config = { attributes: true, childList: true, subtree: true };
-
-          const callback = function(mutationList, observer) {
-            mutationList.forEach((mutation) => {
-                if (mutation.type === 'childList') {
-                  translateAllLinks();
-                }
-            })
-          };
-
-          const observer = new MutationObserver(callback);
-          observer.observe(targetNode, config);
-        }
-
-        window.addEventListener('message', (event) => {
-          const eventName = event.data && event.data.event;
-          if (eventName === 'setConnectBaseURL') {
-            connectBaseURL = event.data.connectBaseURL;
-            translateAllLinks();
-            initializeObserver();
-          }
-        });
-
-        window.parent.postMessage({ 
-          event: 'getConnectBaseURL'
-        }, '*');
-      }
-
-      function posterize(href) {
-        var url = $.url(href);
-        $("#posterizer").attr("action", url.attr("path"));
-        for (var key in url.param()){
-          $("#posterizer").append("<input type='hidden' name='" + key + "' value='" + url.param(key) + "'></input>");
-        }
-        $("#posterizer").submit();
-      }
-
-      function handlePosterize(ele) {
-        posterize(ele.getAttribute('href') || ele.dataset.href);
-      }
-
-      function removalConfirmation(removal, buttonName) {
-  
-        var modal = document.querySelector("#general-delete-confirmation");
-        modal.classList.remove("hidden");
-
-        // set modal deets
-        var title = document.querySelector('.' + removal + ' > .title').innerHTML;
-        var body = document.querySelector('.' + removal + ' > .body').innerHTML;
-
-        modal.header = title;
-        modal.querySelector('.confirmation-body').innerHTML = body;
-
-        modal.open = true;
-
-        modal.addEventListener("temba-button-clicked", function(event){
-          if(!event.detail.button.secondary) {
-            var ele = document.querySelector('#' + removal + '-form');
-            handlePosterize(ele);
-          }
-          modal.open = false;
-
-          // clear our listeners
-          modal.outerHTML = modal.outerHTML;
-        });
-      }
-
-      function formatContact(item) {
-        if (item.text.indexOf(" (") > -1) {
-        var name = item.text.split("(")[0];
-        if (name.indexOf(")") == name.length - 1) {
-          name = name.substring(0, name.length - 1);
-        }
-        return name;
-      }
-      return item.text;
-      }
-
-      function createContactChoice(term, data) {
-        if ($(data).filter(function() { return this.text.localeCompare(term)===0; }).length===0) {
-          if (!isNaN(parseFloat(term)) && isFinite(term)) {
-            return {id:"number-" + term, text:term};
-          }
-        }
-      }
-
-      function handleNewWorkspaceClicked(evt) {
-        var modal = getModax();
-        modal.header = '{{_("New Workspace")|escapejs}}';
-        modal.setAttribute("endpoint", "{% url 'orgs.org_create' %}");
-        modal.open = true;
-
-        evt.preventDefault();
-        evt.stopPropagation();
-      }
-
-    -block extra-script
-
-    -block refresh-fn
-      :javascript
-        function refresh(onSuccess, forceReload){  
-          var url = params;
-          {% if page_obj %}
-            url += "page={{page_obj.number}}";
-          {% endif %}
-
-          if (url == '') {
-            url = '?';
-          }
-
-          url += '&ts=' + new Date().getTime() + "&refresh=" + refreshTimeout;
-
-          document.dispatchEvent(new Event("temba-refresh-begin"));  
-          fetchPJAXContent(url, '#pjax', {
-              onSuccess: function() {
-                if (onSuccess) {
-                  onSuccess();
-                }
-                document.dispatchEvent(new Event("temba-refresh-complete"));
-                refreshTimeout = Math.floor(refreshTimeout * 1.1)
-                scheduleRefresh();
-              },
-              shouldIgnore: function() {
-                if (forceReload) {
-                  return false;
-                }
-                var pjax = document.querySelector("#pjax");
-                if (pjax) {
-                  return eval(document.querySelector("#pjax").dataset.noPjax);
-                }
-                return true;
-              },
-              onIgnore: function() {
-                var pjax = document.querySelector("#pjax");
-                if (pjax) {
-                  scheduleRefresh();
-                }
-              }
-          });
-        }
-
-    -block full-page-script
-      :javascript
-        document.addEventListener("temba-redirected", function(event){
-          document.location.href = event.detail.url;
-        });
-
-    <script type="text/javascript" src="{{ STATIC_URL }}js/libs/jquery.url.js"></script>
-
-    <form id="posterizer" method="post">
-      {% csrf_token %}
-    </form>
-
-    :javascript
-
-      var params = '{{url_params|safe}}';
-      $(document).ready(function(){
-        if (window.scheduleRefresh) {
-          scheduleRefresh();
-        }
-      });
-
-      $(document).ready(function() {
-
-        {% if use_weni_layout %}
-          inIframe();
-
-          enableLinkTranslations();
-
-          if (typeof HelpHero !== 'undefined') {
-            HelpHero.anonymous();
-
-            HelpHero.on('tour_completed', function(event, info) {
-              // Weni Flows Guide Tour Identifier
-              if (info.tour.id === 'PBw8f8pZc2') {
-                // Start Integrations Menu selection Tour at Dash
-                window.parent.postMessage({
-                    event: 'startHelpHeroTour',
-                    tourId: 'huNqgL9PTP'
-                }, '*');
-              }
-            })
-          }
-
-        {% endif %}
-
-        function announcementCollapse() {
-          $('.weni-announcement').hide();
-          $('#menu').addClass('collapsed')
-          $('.org-header').addClass('collapsed')
-        }
-
-        const announcementState = sessionStorage.getItem('weni-announcement-state');
-        if (announcementState === "false") {
-          announcementCollapse()
-        }
-
-        $(document).on('click', ".weni-announcement__collapse", (event) => {
-          sessionStorage.setItem('weni-announcement-state', false);
-          announcementCollapse()
-        })
-
-        if (navigator.appVersion.indexOf("Win")!=-1) {
-          $("html").addClass("windows");
-        }
-
-        $('.org-header > .toggle').on('click', function(evt) {
-          evt.stopPropagation();
-          var header = $('.org-header');
-          if (header.hasClass('expanded')) {
-            header.removeClass('expanded');
-          } else {
-            header.addClass('expanded');
-          }
-        });
-
-        $('.org-header').on('click', function(evt) {
-          url = '{% url "orgs.org_home" %}';
-          evt.stopPropagation();
-          if (evt.ctrlKey || evt.metaKey){
-            window.open(url,'_blank')
-          } else {
-            window.location = url;
-          }
-
-        });
-
-        $('#menu .more').hoverIntent({
-          over:function() {
-            // $('.submenu').hide();
-            $(this).find('.submenu-container').slideDown(250);
-            $(this).parents("#menu").addClass('expanded');
-            // $(this).find('.submenu').show();
-          },
-          out:function() {
-          $(this).find('.submenu-container').slideUp(200);
-          $(this).parents("#menu").removeClass('expanded');
-            //$(this).find('.submenu').hide();
-          },
-          timeout:300
-        });
-
-        $(".posterize").click(function(event){
-
-          var ele = event.target;
-          while (ele && !ele.classList.contains("posterize")) {
-            ele = ele.parentElement;
-          }
-
-          event.preventDefault();
-          event.stopPropagation();
-          handlePosterize(ele);
-        });
+  <form id="posterizer" method="post">
+    {% csrf_token %}
+  </form>
 
 
-      });
 {% endblock body %}
+
 
 </html>

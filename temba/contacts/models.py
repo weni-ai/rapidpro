@@ -29,7 +29,7 @@ from temba.assets.models import register_asset_store
 from temba.channels.models import Channel, ChannelEvent
 from temba.locations.models import AdminBoundary
 from temba.mailroom import ContactSpec, modifiers, queue_populate_dynamic_group
-from temba.orgs.models import DependencyMixin, Org
+from temba.orgs.models import DependencyMixin, Org, OrgRole
 from temba.utils import chunk_list, format_number, on_transaction_commit
 from temba.utils.export import BaseExport, BaseExportAssetStore, MultiSheetExporter
 from temba.utils.models import JSONField, LegacyUUIDMixin, SquashableModel, TembaModel
@@ -319,29 +319,12 @@ class URN:
 
 
 class UserContactFieldsQuerySet(models.QuerySet):
-    def collect_usage(self):
-        return (
-            self.annotate(
-                flow_count=Count("dependent_flows", distinct=True, filter=Q(dependent_flows__is_active=True))
-            )
-            .annotate(
-                campaign_count=Count("campaign_events", distinct=True, filter=Q(campaign_events__is_active=True))
-            )
-            .annotate(
-                contactgroup_count=Count("dependent_groups", distinct=True, filter=Q(dependent_groups__is_active=True))
-            )
-        )
-
-    def active_for_org(self, org):
-        return self.filter(is_active=True, org=org)
+    pass
 
 
 class UserContactFieldsManager(models.Manager):
     def get_queryset(self):
         return UserContactFieldsQuerySet(self.model, using=self._db).filter(is_system=False)
-
-    def active_for_org(self, org):
-        return self.get_queryset().active_for_org(org=org)
 
 
 class ContactField(TembaModel, DependencyMixin):
@@ -370,6 +353,11 @@ class ContactField(TembaModel, DependencyMixin):
         (TYPE_WARD, _("Ward")),
     )
     TYPE_CHOICES = TYPE_CHOICES_BASIC + TYPE_CHOICES_LOCATIONS
+
+    ACCESS_NONE = "N"
+    ACCESS_VIEW = "V"
+    ACCESS_EDIT = "E"
+    ACCESS_CHOICES = ((ACCESS_NONE, _("Hidden")), (ACCESS_VIEW, _("View")), (ACCESS_EDIT, "Edit"))
 
     ENGINE_TYPES = {
         TYPE_TEXT: "text",
@@ -413,6 +401,7 @@ class ContactField(TembaModel, DependencyMixin):
         "last_seen_on",
         "name",
         "status",
+        "ticket",
         "urn",
         "uuid",
         # @contact.* properties in expressions
@@ -435,6 +424,7 @@ class ContactField(TembaModel, DependencyMixin):
     # how field is displayed in the UI
     show_in_table = models.BooleanField(default=False)
     priority = models.PositiveIntegerField(default=0)
+    agent_access = models.CharField(max_length=1, choices=ACCESS_CHOICES, default=ACCESS_VIEW)
 
     # model managers
     objects = models.Manager()
@@ -459,7 +449,9 @@ class ContactField(TembaModel, DependencyMixin):
             )
 
     @classmethod
-    def create(cls, org, user, name: str, value_type: str = TYPE_TEXT, featured: bool = False):
+    def create(
+        cls, org, user, name: str, value_type: str = TYPE_TEXT, featured: bool = False, agent_access: str = ACCESS_VIEW
+    ):
         """
         Creates a new non-system field based on the given name
         """
@@ -478,6 +470,7 @@ class ContactField(TembaModel, DependencyMixin):
             value_type=value_type,
             is_system=False,
             show_in_table=featured,
+            agent_access=agent_access,
             created_by=user,
             modified_by=user,
         )
@@ -551,6 +544,19 @@ class ContactField(TembaModel, DependencyMixin):
         )
 
     @classmethod
+    def get_fields(cls, org: Org, viewable_by=None):
+        """
+        Gets the fields for the given org
+        """
+
+        fields = org.fields.filter(is_system=False, is_active=True)
+
+        if viewable_by and org.get_user_role(viewable_by) == OrgRole.AGENT:
+            fields = fields.exclude(agent_access=cls.ACCESS_NONE)
+
+        return fields
+
+    @classmethod
     def import_fields(cls, org, user, field_defs: list):
         """
         Import fields from a list of exported fields
@@ -572,6 +578,9 @@ class ContactField(TembaModel, DependencyMixin):
         dependents["group"] = self.dependent_groups.filter(is_active=True)
         dependents["campaign_event"] = self.campaign_events.filter(is_active=True)
         return dependents
+
+    def get_access(self, user) -> str:
+        return self.agent_access if self.org.get_user_role(user) == OrgRole.AGENT else self.ACCESS_EDIT
 
     def release(self, user):
         assert not (self.is_system and self.org.is_active), "can't release system fields"
@@ -620,21 +629,14 @@ class Contact(LegacyUUIDMixin, SmartModel):
     status = models.CharField(max_length=1, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
     current_flow = models.ForeignKey("flows.Flow", on_delete=models.PROTECT, null=True, db_index=False)
     ticket_count = models.IntegerField(default=0)
-
-    # user that last modified this contact
-    modified_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        null=True,
-        on_delete=models.PROTECT,
-        related_name="%(app_label)s_%(class)s_modifications",
-    )
-
-    # user that created this contact
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="%(app_label)s_%(class)s_creations", null=True
-    )
-
     last_seen_on = models.DateTimeField(null=True)
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, db_index=False, related_name="+"
+    )
+    modified_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, db_index=False, related_name="+"
+    )
 
     # maximum number of contacts to release without using a background task
     BULK_RELEASE_IMMEDIATELY_LIMIT = 50
@@ -703,7 +705,7 @@ class Contact(LegacyUUIDMixin, SmartModel):
         return (
             SystemLabel.get_queryset(self.org, SystemLabel.TYPE_SCHEDULED)
             .filter(schedule__next_fire__gte=timezone.now())
-            .filter(Q(contacts__in=[self]) | Q(urns__in=self.get_urns()) | Q(groups__in=self.groups.all()))
+            .filter(Q(contacts__in=[self]) | Q(groups__in=self.groups.all()))
             .select_related("org", "schedule")
         )
 
@@ -711,7 +713,9 @@ class Contact(LegacyUUIDMixin, SmartModel):
         from temba.triggers.models import Trigger
 
         return (
-            self.org.triggers.filter(trigger_type=Trigger.TYPE_SCHEDULE, schedule__next_fire__gte=timezone.now())
+            self.org.triggers.filter(
+                trigger_type=Trigger.TYPE_SCHEDULE, schedule__next_fire__gte=timezone.now(), is_archived=False
+            )
             .filter(Q(contacts__in=[self]) | Q(groups__in=self.groups.all()))
             .exclude(exclude_groups__in=self.groups.all())
             .select_related("schedule")
@@ -748,7 +752,7 @@ class Contact(LegacyUUIDMixin, SmartModel):
                     "type": "scheduled_broadcast",
                     "scheduled": broadcast.schedule.next_fire.isoformat(),
                     "repeat_period": broadcast.schedule.repeat_period,
-                    "message": broadcast.get_text(self),
+                    "message": broadcast.get_translation()["text"],
                 }
             )
 
@@ -771,13 +775,14 @@ class Contact(LegacyUUIDMixin, SmartModel):
         from temba.flows.models import FlowExit
         from temba.ivr.models import Call
         from temba.mailroom.events import get_event_time
+        from temba.msgs.models import Msg
         from temba.tickets.models import TicketEvent
 
         msgs = (
             self.msgs.filter(created_on__gte=after, created_on__lt=before)
-            .order_by("-created_on")
-            .select_related("channel", "contact_urn", "broadcast")
-            .prefetch_related("channel_logs")[:limit]
+            .exclude(status=Msg.STATUS_PENDING)
+            .order_by("-created_on", "-id")
+            .select_related("channel", "contact_urn", "broadcast")[:limit]
         )
 
         # get all runs start started or ended in this period
@@ -830,9 +835,9 @@ class Contact(LegacyUUIDMixin, SmartModel):
 
         ticket_events = ticket_events[:limit]
 
-        transfers = self.airtime_transfers.filter(created_on__gte=after, created_on__lt=before).order_by(
-            "-created_on"
-        )[:limit]
+        transfers = self.airtime_transfers.filter(created_on__gte=after, created_on__lt=before).order_by("-created_on")[
+            :limit
+        ]
 
         session_events = self.get_session_events(after, before, include_event_types)
 
@@ -1015,7 +1020,8 @@ class Contact(LegacyUUIDMixin, SmartModel):
             raise e
 
         def modified(contact):
-            return len(response.get(contact.id, {}).get("events", [])) > 0
+            c = response.get("modified", {}).get(contact.id, {}) or response.get(contact.id, {})
+            return len(c.get("events", [])) > 0
 
         return [c.id for c in contacts if modified(c)]
 
@@ -1160,14 +1166,21 @@ class Contact(LegacyUUIDMixin, SmartModel):
         Deletes everything owned by this contact
         """
 
+        from temba.msgs.models import Msg
+
+        assert not self.is_active, "can't fully release a contact which hasn't been released"
+
         with transaction.atomic():
             # release our tickets
             for ticket in self.tickets.all():
                 ticket.delete()
 
-            # release our messages
-            for msg in self.msgs.all():
-                msg.delete()
+            # delete our messages in batches
+            while True:
+                msg_batch = list(self.msgs.all()[:1000])
+                if not msg_batch:
+                    break
+                Msg.bulk_delete(msg_batch)
 
             # any urns currently owned by us
             for urn in self.urns.all():
@@ -1226,6 +1239,18 @@ class Contact(LegacyUUIDMixin, SmartModel):
             contact = contact_map[urn.contact_id]
             urn.org = contact.org
             getattr(contact, "_urns_cache").append(urn)
+
+    @classmethod
+    def bulk_inspect(self, contacts) -> dict:
+        """
+        Fetches additional information about the given contacts from mailroom
+        """
+        if not contacts:
+            return {}
+
+        resp = mailroom.get_client().contact_inspect(contacts[0].org_id, [c.id for c in contacts])
+
+        return {c: resp[str(c.id)] for c in contacts}
 
     def get_groups(self, *, manual_only=False):
         """
@@ -1393,9 +1418,7 @@ class ContactURN(models.Model):
         # is this a TWITTER scheme? check TWITTERID scheme by looking up by display
         if scheme == URN.TWITTER_SCHEME:
             twitterid_urn = (
-                cls.objects.filter(org=org, scheme=URN.TWITTERID_SCHEME, display=path)
-                .select_related("contact")
-                .first()
+                cls.objects.filter(org=org, scheme=URN.TWITTERID_SCHEME, display=path).select_related("contact").first()
             )
             if twitterid_urn:
                 return twitterid_urn
@@ -1434,15 +1457,6 @@ class ContactURN(models.Model):
             return self.ANON_MASK
 
         return URN.format(self.urn, international=international, formatted=formatted)
-
-    def get_for_api(self) -> str:
-        """
-        Gets a representation for the API which will be scheme:path and will have the path redacted if the org is anon
-        """
-        if self.org.is_anon:
-            return URN.from_parts(self.scheme, self.ANON_MASK)
-
-        return URN.from_parts(self.scheme, self.path)
 
     @property
     def urn(self) -> str:
@@ -1506,7 +1520,7 @@ class ContactGroup(LegacyUUIDMixin, TembaModel, DependencyMixin):
     query_fields = models.ManyToManyField(ContactField, related_name="dependent_groups")
 
     org_limit_key = Org.LIMIT_GROUPS
-    soft_dependent_types = {"flow"}
+    soft_dependent_types = {"flow", "trigger"}
 
     @classmethod
     def create_system_groups(cls, org):
@@ -1636,7 +1650,7 @@ class ContactGroup(LegacyUUIDMixin, TembaModel, DependencyMixin):
 
     @property
     def icon(self) -> str:
-        return "icon.group_smart" if self.group_type == self.TYPE_SMART else "icon.group"
+        return "group_smart" if self.group_type == self.TYPE_SMART else "group"
 
     def get_attrs(self):
         return {"icon": self.icon}
@@ -1698,6 +1712,10 @@ class ContactGroup(LegacyUUIDMixin, TembaModel, DependencyMixin):
         assert not (self.is_system and self.org.is_active), "can't release system groups"
 
         from .tasks import release_group_task
+
+        # delete all triggers for this group
+        for trigger in self.triggers.all():
+            trigger.release(user)
 
         super().release(user)
 
@@ -1848,6 +1866,7 @@ class ExportContactsTask(BaseExport):
             dict(label="Contact UUID", key="uuid", field=None, urn_scheme=None),
             dict(label="Name", key="name", field=None, urn_scheme=None),
             dict(label="Language", key="language", field=None, urn_scheme=None),
+            dict(label="Status", key="status", field=None, urn_scheme=None),
             dict(label="Created On", key="created_on", field=None, urn_scheme=None),
             dict(label="Last Seen On", key="last_seen_on", field=None, urn_scheme=None),
         ]
@@ -1889,10 +1908,7 @@ class ExportContactsTask(BaseExport):
                     )
 
         contact_fields_list = (
-            ContactField.user_fields.active_for_org(org=self.org)
-            .using("readonly")
-            .select_related("org")
-            .order_by("-priority", "pk")
+            ContactField.get_fields(self.org).using("readonly").select_related("org").order_by("-priority", "pk")
         )
         for contact_field in contact_fields_list:
             fields.append(
@@ -1988,6 +2004,8 @@ class ExportContactsTask(BaseExport):
             return contact.uuid
         elif field["key"] == "language":
             return contact.language
+        elif field["key"] == "status":
+            return contact.get_status_display()
         elif field["key"] == "created_on":
             return contact.created_on
         elif field["key"] == "last_seen_on":
@@ -2015,7 +2033,7 @@ class ExportContactsTask(BaseExport):
 
 def get_import_upload_path(instance: Any, filename: str):
     ext = Path(filename).suffix.lower()
-    return f"contact_imports/{instance.org_id}/{uuid4()}{ext}"
+    return f"{settings.STORAGE_ROOT_DIR}/{instance.org_id}/contact_imports/{uuid4()}{ext}"
 
 
 class ContactImport(SmartModel):
@@ -2156,9 +2174,9 @@ class ContactImport(SmartModel):
 
             if header_prefix == "":
                 attribute = header_name.lower()
-                attribute = attribute.removeprefix("contact ")  # header "Contact UUID" -> uuid etc
+                attribute = attribute.removeprefix("contact ")  # header "contact uuid" -> "uuid" etc
 
-                if attribute in ("uuid", "name", "language"):
+                if attribute in ("uuid", "name", "language", "status"):
                     mapping = {"type": "attribute", "name": attribute}
             elif header_prefix == "urn" and header_name:
                 mapping = {"type": "scheme", "scheme": header_name.lower()}
@@ -2281,7 +2299,7 @@ class ContactImport(SmartModel):
             batch.import_async()
 
         # flag org if the set of imported URNs looks suspicious
-        if not self.org.is_verified() and self._detect_spamminess(urns):
+        if not self.org.is_verified and self._detect_spamminess(urns):
             self.org.flag()
 
     def _batches_generator(self, row_iter):
@@ -2382,7 +2400,7 @@ class ContactImport(SmartModel):
 
             if mapping["type"] == "attribute":
                 attribute = mapping["name"]
-                if attribute in ("uuid", "language"):
+                if attribute in ("uuid", "language", "status"):
                     value = value.lower()
                 spec[attribute] = value
             elif mapping["type"] == "scheme":

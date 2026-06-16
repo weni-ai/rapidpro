@@ -10,11 +10,6 @@
         margin: 0 
       }
     -compress css
-      {% lessblock %}
-        :plain
-          @import (optional) "../brands/{{brand.slug}}/less/style.less";
-      {% endlessblock %}
-
       // any additional brand styling such as fonts, etc
       -for style in brand.styles
         -if 'less' in style

@@ -3,48 +3,47 @@ on: [push, pull_request]
 jobs:
   test:
     name: Test
+    runs-on: ubuntu-latest
     env:
       python-version: "3.10.x"
-      pg-version: "14"
-      postgis-version: "3.2"
-      redis-version: "6.2"
       node-version: "12"
-      elastic-version: "7.17.28"
-      rpindexer-version: "7.5.0"
-      mailroom-version: "7.5.36"
+      rpindexer-version: "8.2.0"
+      mailroom-version: "8.2.0"
       DJANGO_SETTINGS_MODULE: temba.settings_ci
-    runs-on: ubuntu-latest
+
     services:
+      redis:
+        image: redis:6.2-alpine
+        ports:
+          - 6379:6379
+      postgres:
+        image: postgis/postgis:14-3.3-alpine
+        env:
+          POSTGRES_DB: temba
+          POSTGRES_USER: temba
+          POSTGRES_PASSWORD: temba
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
       elastic:
-        image: docker.elastic.co/elasticsearch/elasticsearch:7.17.28
+        image: elasticsearch:7.17.9
         ports:
           - 9200:9200
           - 9300:9300
         env:
           discovery.type: single-node
-          xpack.security.enabled: "false"
-          ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    
     steps:
       - name: Checkout code
-        uses: actions/checkout@v1
-
-      - name: Install PostgreSQL and PostGIS
-        uses: nyaruka/postgis-action@v2.1.0
-        with:
-          postgresql version: ${{ env.pg-version }}
-          postgis version: ${{ env.postgis-version }}
-          postgresql db: temba
-          postgresql user: temba
-          postgresql password: temba
-          postgresql arguments: "--jit=off"
+        uses: actions/checkout@v4
 
       - name: Install Linux packages
         run: |
           sudo apt update
-          sudo apt install -y --no-install-recommends libgdal-dev gettext ffmpeg
+          sudo apt install -y --no-install-recommends libgdal-dev ffmpeg
 
       - name: Install Python
-        uses: actions/setup-python@v1
+        uses: actions/setup-python@v4
         with:
           python-version: ${{ env.python-version }}
 
@@ -53,28 +52,8 @@ jobs:
         with:
           virtualenvs-in-project: true
 
-      - name: Install Redis
-        uses: zhulik/redis-action@v1.0.0
-        with:
-          redis version: ${{ env.redis-version }}
-
-      - name: Wait for Elasticsearch
-        run: |
-          for i in $(seq 1 30); do
-            if curl -fsS http://localhost:9200/_cluster/health >/dev/null 2>&1; then
-              echo "Elasticsearch is up"
-              curl -s http://localhost:9200
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "Elasticsearch did not become ready - dumping container logs:"
-          ES_CONTAINER=$(docker ps -aq --filter "ancestor=docker.elastic.co/elasticsearch/elasticsearch:${{ env.elastic-version }}" | head -n1)
-          [ -n "$ES_CONTAINER" ] && docker logs "$ES_CONTAINER" 2>&1 || echo "No ES container found"
-          exit 1
-
       - name: Install Node
-        uses: actions/setup-node@v1
+        uses: actions/setup-node@v4
         with:
           node-version: ${{ env.node-version }}
 
@@ -84,7 +63,7 @@ jobs:
           yarn install
           sudo yarn global add less@3.13.1
           ln -s ${{ github.workspace }}/temba/settings.py.dev ${{ github.workspace }}/temba/settings.py
-          poetry run ./manage.py migrate
+          poetry run python manage.py migrate
           # fetch and extract rp-indexer
           wget https://github.com/nyaruka/rp-indexer/releases/download/v${{ env.rpindexer-version }}/rp-indexer_${{ env.rpindexer-version }}_linux_amd64.tar.gz
           tar -xvf rp-indexer_${{ env.rpindexer-version }}_linux_amd64.tar.gz rp-indexer
@@ -96,15 +75,23 @@ jobs:
       - name: Run pre-test checks
         run: |
           # test that everything is well formatted, no missing migrations etc
-          poetry run ./code_check.py --debug
+          poetry run python code_check.py --debug
           # check we can collect and compress all static files
-          poetry run ./manage.py collectstatic --noinput --verbosity=0
-          poetry run ./manage.py compress --extension=".haml" --settings=temba.settings_compress
+          poetry run python manage.py collectstatic --noinput --verbosity=0
+          poetry run python manage.py compress --extension=".haml" --settings=temba.settings_compress
 
       - name: Run tests
         run: |
           poetry run coverage run manage.py test --keepdb --noinput --verbosity=2
           poetry run coverage report -i
+          poetry run coverage xml
+          poetry run coverage html
+
+      - name: Save coverage report as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: htmlcov/
 
       - name: Mailroom log
         if: failure()

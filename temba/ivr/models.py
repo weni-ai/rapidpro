@@ -7,7 +7,7 @@ from django.db.models import Q
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from temba.channels.models import Channel
+from temba.channels.models import Channel, ChannelLog
 from temba.contacts.models import Contact, ContactURN
 from temba.orgs.models import Org
 
@@ -51,7 +51,7 @@ class Call(models.Model):
 
     RETRY_CHOICES = ((-1, _("Never")), (30, _("After 30 minutes")), (60, _("After 1 hour")), (1440, _("After 1 day")))
 
-    org = models.ForeignKey(Org, on_delete=models.PROTECT)
+    org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="calls")
     direction = models.CharField(max_length=1, choices=DIRECTION_CHOICES)
     status = models.CharField(max_length=1, choices=STATUS_CHOICES)
 
@@ -103,9 +103,10 @@ class Call(models.Model):
         except ObjectDoesNotExist:  # pragma: no cover
             return None
 
-    def release(self):
-        self.channel_logs.all().delete()
+    def get_logs(self) -> list:
+        return ChannelLog.get_logs(self.channel, self.log_uuids or [])
 
+    def release(self):
         session = self.get_session()
         if session:
             session.delete()

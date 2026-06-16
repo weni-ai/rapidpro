@@ -17,7 +17,6 @@ class MtargetType(ChannelType):
     courier_url = r"^mt/(?P<uuid>[a-z0-9\-]+)/(?P<action>status|receive)$"
 
     name = "Mtarget"
-    icon = "icon-mtarget"
 
     available_timezones = ["Africa/Kigali", "Africa/Yaoundé", "Africa/Porto-Novo", "Africa/Kinshasa", "Europe/Paris"]
     recommended_timezones = ["Africa/Kigali", "Africa/Yaoundé", "Africa/Porto-Novo", "Africa/Kinshasa", "Europe/Paris"]
@@ -27,7 +26,7 @@ class MtargetType(ChannelType):
 
     claim_view = ClaimView
     claim_blurb = _("If you have an %(link)s account, you can quickly connect it using their APIs.") % {
-        "link": '<a href="https://www.mtarget.fr/">Mtarget</a>'
+        "link": '<a target="_blank" href="https://www.mtarget.fr/">Mtarget</a>'
     }
 
     configuration_blurb = _(

@@ -1,3 +1,1193 @@
+v8.2.0 (2023-08-07)
+-------------------------
+ * Update stable versions
+
+v8.1.245 (2023-08-05)
+-------------------------
+ * Truncate query lables on flow start
+ * Fix line length formatting
+ * Fixes for login and API titles
+
+v8.1.244 (2023-08-04)
+-------------------------
+ * Fix error handling for temba-contact-search
+
+v8.1.243 (2023-08-03)
+-------------------------
+ * Fix DELETE endpoints in API explorer
+ * Bump cryptography from 41.0.2 to 41.0.3
+
+v8.1.242 (2023-08-02)
+-------------------------
+ * Update to components with modax serialize fix
+
+v8.1.241 (2023-08-02)
+-------------------------
+ * Fix two factor disable and initial QR code rendering
+
+v8.1.240 (2023-08-01)
+-------------------------
+ * Update components with checkbox value update
+ * Stop writing no longer used Org.brand
+
+v8.1.239 (2023-08-01)
+-------------------------
+ * Temp fix for org export page by replacing temba-checkbox with regular inputs
+ * Cleanup msg_console
+
+v8.1.238 (2023-07-28)
+-------------------------
+ * Fix flow start log when starts don't have exclusions
+ * Remove unnecessary CSS class to hover
+
+v8.1.237 (2023-07-28)
+-------------------------
+ * Only consider the parsed query string in contact_search clean
+ * Add show CSS class to icon for contact list sorting
+
+v8.1.236 (2023-07-27)
+-------------------------
+ * Rename flow_broadcast to flow_start
+ * Update editor to fix cases on result split
+ * Add new channel log types used by courier
+ * Update contact search widget for flow starts
+
+v8.1.235 (2023-07-26)
+-------------------------
+ * Convert templates in dashboard, docs, globals, ivr, locations and notifications apps
+ * Use title-text for just overriding the text
+ * Restore missing msg box templates
+
+v8.1.234 (2023-07-25)
+-------------------------
+ * Fix org export page
+ * Fix permissions for viewer for flow results
+
+v8.1.233 (2023-07-25)
+-------------------------
+ * Simpliy convert_templates script
+ * Consistent title for initial page load
+ * Remove spa-title and spa-style
+ * Add archives to STORAGES
+
+v8.1.232 (2023-07-24)
+-------------------------
+ * Do not set the max for y axis chart to allow that to be calculated
+ * Convert templates in the triggers app from haml
+
+v8.1.231 (2023-07-21)
+-------------------------
+ * Simplify redis settings and organize settings better in sections
+
+v8.1.230 (2023-07-20)
+-------------------------
+ * Tweak system check for storage settings to check different storages are configured
+ * Convert S3 log access to be via django storages
+ * Use pg_dump/restore from docker container in mailroom_db command so it's always correct version
+
+v8.1.229 (2023-07-19)
+-------------------------
+ * Fix tickets list, to show compose properly on Firefox
+ * Add cpAddress parameter as optional for MTN channel type
+
+v8.1.228 (2023-07-18)
+-------------------------
+ * Update Instagram docs broken link
+ * Allow initiating flow results download form the the flow labels filter view
+
+v8.1.227 (2023-07-17)
+-------------------------
+ * Bump cryptography from 41.0.0 to 41.0.2
+
+v8.1.226 (2023-07-13)
+-------------------------
+ * Rework trimming cron tasks to use delete_in_batches
+ * Drop no longer used Binary Optional Data field
+
+v8.1.225 (2023-07-13)
+-------------------------
+ * Fix icon for globals delete
+ * Migrate old Twilio channels using .bod to use .config instead
+ * Remove duplicate menu views in classifiers and channels apps
+
+v8.1.224 (2023-07-12)
+-------------------------
+ * Add log_policy to channel
+
+v8.1.223 (2023-07-11)
+-------------------------
+ * More tweaks to org deletion
+
+v8.1.222 (2023-07-11)
+-------------------------
+ * Add delete_in_batches util function to improve org deletion
+ * Actually fix deletion of campaign events during org deletion
+
+v8.1.221 (2023-07-11)
+-------------------------
+ * Fix deleting of campaign events and add more logging to org deletion
+
+v8.1.220 (2023-07-10)
+-------------------------
+ * Delete is only for deleting child workspaces
+
+v8.1.219 (2023-07-10)
+-------------------------
+ * Fix problems with org deletion
+
+v8.1.218 (2023-07-07)
+-------------------------
+ * Update to flow editor with fix for ward cases
+
+v8.1.217 (2023-07-06)
+-------------------------
+ * Convert haml files in contacts app
+ * Bump django from 4.2.2 to 4.2.3
+
+v8.1.216 (2023-07-05)
+-------------------------
+ * Add data migration to fix archived message counts for labels
+ * Convert haml templates in campaigns and classifiers apps
+
+v8.1.215 (2023-07-05)
+-------------------------
+ * Add missing migration that rebuilds constraint on contact URNs
+ * Update channel log retention to 2 weeks
+ * Disable old 360 Dilalog channel type, and take the new integration out of beta
+
+v8.1.214 (2023-07-03)
+-------------------------
+ * Update to psycopg3 non-binary
+ * Reference templates as html
+
+v8.1.213 (2023-07-03)
+-------------------------
+ * Convert flows app to be hamless
+
+v8.1.212 (2023-07-03)
+-------------------------
+ * Sorted group list when editing contacts
+ * Switch channel charts to load with json instead of embedded data
+
+v8.1.211 (2023-06-28)
+-------------------------
+ * Fix Twilio channel update modal
+
+v8.1.210 (2023-06-28)
+-------------------------
+ * Fix mangling of option attributes
+ * Save channel logs with channels/ prefix
+ * Add configurable agent access per contact field
+
+v8.1.209 (2023-06-28)
+-------------------------
+ * Fix creating PublicFileStorage
+
+v8.1.208 (2023-06-28)
+-------------------------
+ * Fix S3 channel logs paths to not start with slash
+ * Update to Django 4.2
+
+v8.1.207 (2023-06-27)
+-------------------------
+ * Convert some haml templates to html
+
+v8.1.206 (2023-06-27)
+-------------------------
+ * Drop duplicate index
+ * Look for channel logs in S3 when not found in database
+ * Move tracking label counts to statement level triggers
+
+v8.1.205 (2023-06-27)
+-------------------------
+ * Replace index on channellog.channel
+
+v8.1.204 (2023-06-26)
+-------------------------
+ * Fix inline group created and broadcast action
+
+v8.1.203 (2023-06-26)
+-------------------------
+ * Update contact action fix
+
+v8.1.202 (2023-06-26)
+-------------------------
+ * Rework settings for S3 buckets
+
+v8.1.201 (2023-06-23)
+-------------------------
+ * Support runtime locales in components
+
+v8.1.200 (2023-06-23)
+-------------------------
+ * Update for flow editor text inputs with null values
+
+v8.1.199 (2023-06-22)
+-------------------------
+ * Updates for select widget to behave with more standard form controls
+
+v8.1.198 (2023-06-22)
+-------------------------
+ * Rollback components
+
+v8.1.197 (2023-06-22)
+-------------------------
+ * Override the correct alpha3 code for Oromifa
+ * Update form components to use element internals
+ * Rework loading of channel logs so easier to fetch from S3 too
+
+v8.1.196 (2023-06-21)
+-------------------------
+ * Improve ExternalURLField and don't assume http
+ * Use org import task to import flows
+
+v8.1.195 (2023-06-19)
+-------------------------
+ * Name override for oro language
+ * Remove no longer used code relating to contact fields
+
+v8.1.194 (2023-06-19)
+-------------------------
+ * Don't ignore user provided role for somleng shortcodes
+ * Fix flow export button height
+ * Fix import translation to use new UI
+ * Fix parent ID lookup in import geojson
+ * Support Dialog360 Cloud API channels
+
+v8.1.193 (2023-06-14)
+-------------------------
+ * Add surveyor icon
+
+v8.1.192 (2023-06-14)
+-------------------------
+ * Add icons for flows, fix issue with some spload fires
+
+v8.1.191 (2023-06-13)
+-------------------------
+ * Broadcast update via wizard and updated list styling
+
+v8.1.190 (2023-06-12)
+-------------------------
+ * Add agent_access to API fields endpoint
+ * Restrict agent users view of field values on API contacts endpoint
+ * Remove use of django tags inside javascript
+
+v8.1.189 (2023-06-12)
+-------------------------
+ * Fix broken list view template
+ * Add djlint and latest django-hamlpy
+
+v8.1.188 (2023-06-09)
+-------------------------
+ * Tweak contact field access backfill migration
+
+v8.1.187 (2023-06-09)
+-------------------------
+ * Add ContactField.agent_access and backfill to view
+ * Use statement level triggers for tracking current node counts
+ * Remove old scheduled broadcast create view
+
+v8.1.186 (2023-06-08)
+-------------------------
+ * Format api_root.html and fix errors
+ * Fix channel log pretty printing
+
+v8.1.183 (2023-06-08)
+-------------------------
+ * Add djLint config
+ * Add basic wizard support
+
+v8.1.182 (2023-06-08)
+-------------------------
+ * Support imports with Status column
+ * Make viewer role users a feature that can be toggled
+ * Allow exporting of blocked, stopped and archived contacts
+
+v8.1.181 (2023-06-07)
+-------------------------
+ * Add redact_values for FBA and IG channel types
+ * Remove unused code for legacy UI contact read and list pages
+ * Rework channel log anonymization so even staff users have to explicitly break out of it
+ * Rework channel log rendering to start from JSONified version
+ * Fix adding queued braodcasts to Outbox view and counts
+ * Cleanup db triggers for broadcasts
+
+v8.1.180 (2023-06-05)
+-------------------------
+ * Fix failed message resending and archived message deletion
+
+v8.1.179 (2023-06-05)
+-------------------------
+ * Drop ChannelLog.msg and .call
+
+v8.1.178 (2023-06-05)
+-------------------------
+ * Bump cryptography from 39.0.2 to 41.0.0
+ * Stop reading from ChannelLog.msg and .call
+ * Use per-statement db triggers for system label counts
+
+v8.1.177 (2023-06-02)
+-------------------------
+ * Remove dupe from changelog
+
+v8.1.176 (2023-06-02)
+-------------------------
+ * Add some blocks on main templates
+
+v8.1.175 (2023-06-02)
+-------------------------
+ * Add select all on list pages
+
+v8.1.174 (2023-06-01)
+-------------------------
+ * Noop when releasing an already released org
+ * Rework and simplify channel count db triggers
+
+v8.1.173 (2023-06-01)
+-------------------------
+ * Remove support for filtering channel logs by folder
+
+v8.1.171 (2023-05-31)
+-------------------------
+ * Add index on channellog.uuid
+ * Impove and expose the call list view
+
+v8.1.170 (2023-05-31)
+-------------------------
+ * Remove rendering of contact history as template now that new UI only consumes it as JSON
+ * Fix inbox msg type for Android channels
+
+v8.1.169 (2023-05-30)
+-------------------------
+ * Allow call count backfill migration to be called offline
+ * Fix ivr call trigger migration
+ * Remove unused stuff from inbox views
+
+v8.1.168 (2023-05-30)
+-------------------------
+ * Add data migration to backfill ivr call counts
+
+v8.1.167 (2023-05-29)
+-------------------------
+ * Add DB triggers to track counts of calls as a new system label
+
+v8.1.166 (2023-05-29)
+-------------------------
+ * Stop writing SystemLabelCount.is_archived so it can be dropped
+
+v8.1.165 (2023-05-29)
+-------------------------
+ * Always write system label counts with is_archived=False and make field nullable
+
+v8.1.164 (2023-05-29)
+-------------------------
+ * Add data migration to delete old system label counts for is_archived=true because they're no longer updated
+ * Fix getting FB business ID for WAC channels
+
+v8.1.163 (2023-05-25)
+-------------------------
+ * Return empty sample/fields on preview_start endpoint until contactsearch component is updated
+
+v8.1.162 (2023-05-25)
+-------------------------
+ * Add BroadcastCRUDL.Preview
+ * Fix broadcast send history template
+
+v8.1.161 (2023-05-24)
+-------------------------
+ * User orgs based on request
+ * Switch brand array to dict
+ * Move plivo connect view to channel type
+
+v8.1.160 (2023-05-19)
+-------------------------
+ * Fix field update and deleting with same key
+
+v8.1.159 (2023-05-19)
+-------------------------
+ * Don't allow horizontal scroll by default
+
+v8.1.158 (2023-05-19)
+-------------------------
+ * Fix scrolling for content pages without full height
+ * Tweak how we run python scripts in CI
+
+v8.1.157 (2023-05-18)
+-------------------------
+ * Add ticket editing
+ * Remove old ticket assign view and support for notes with assignment
+ * Add ticket topic menu and resizer
+ * Move WAC connect view to the WhatsApp cloud channel type package
+ * Remove accounts formax from workspace view as it isn't needed with new UI
+
+v8.1.156 (2023-05-17)
+-------------------------
+ * Update components for 302 fix
+ * Make post_url work identically to posterize
+
+v8.1.155 (2023-05-17)
+-------------------------
+ * Better handling of post_url for spa content menu
+ * Really fix hiding surveyor form
+
+v8.1.154 (2023-05-17)
+-------------------------
+ * Hide the surveyor password input and not just the help texti
+ * Fix URLs in JS files
+
+v8.1.153 (2023-05-17)
+-------------------------
+ * Move channel type constants to the channel type class
+ * Don't show option to enter surveyor password if surveyor feature not enabled
+ * Scoped javascript for flow broadcast modal
+
+v8.1.152 (2023-05-15)
+-------------------------
+ * Make js function name unique
+ * Fix no_nav extra-script blocks
+
+v8.1.151 (2023-05-15)
+-------------------------
+ * Fix the API explorer scripts and styles blocks
+
+v8.1.150 (2023-05-15)
+-------------------------
+ * Cleanup broken or unused posterized links
+ * Drop old flow start fields
+
+v8.1.149 (2023-05-14)
+-------------------------
+ * Fix signups
+
+v8.1.148 (2023-05-12)
+-------------------------
+ * Fix backwards compat for send message to somebody else
+
+v8.1.147 (2023-05-12)
+-------------------------
+ * Fix flow refresh and global redirect hook
+
+v8.1.146 (2023-05-12)
+-------------------------
+ * Add some null checks for frame selectors
+
+v8.1.145 (2023-05-11)
+-------------------------
+ * Fix width for other views and posterize on choose
+
+v8.1.144 (2023-05-11)
+-------------------------
+ * Fix login width
+ * Tweak Somleng claim blurb
+
+v8.1.143 (2023-05-11)
+-------------------------
+ * Stop reading from old FlowStart fields
+ * Merge and clean up main frame
+ * Rename Twiml API channel to Somleng
+
+v8.1.142 (2023-05-11)
+-------------------------
+ * Add base mixin for channel type specific views that gives access to the type class
+ * Update components and editor to support compose for somebody else
+ * Move vonage connect view to the channel type
+ * Allow deleting of archived triggers
+
+v8.1.141 (2023-05-10)
+-------------------------
+ * Fix contacts title
+ * Fix vanilla landing
+ * Remove lessblock and replace with compiled css
+ * Bump django from 4.1.7 to 4.1.9
+
+v8.1.140 (2023-05-09)
+-------------------------
+ * Fix ticket padding
+ * Remove remaining spa files
+ * Add link to reset the latest credentials
+ * Preset channel connection
+
+v8.1.139 (2023-05-09)
+-------------------------
+ * Add blocked icon
+
+v8.1.138 (2023-05-09)
+-------------------------
+ * Update labeling to use temba-checkbox and remove jQuery
+ * Fix trim_channel_logs config and rework so task olny runs for an hour max
+ * Change test_db to create single org at a time
+
+v8.1.137 (2023-05-09)
+-------------------------
+ * Add exclusions and params fields to FlowStart and start writing them
+
+v8.1.136 (2023-05-09)
+-------------------------
+ * Don't include brand variables in less node
+
+v8.1.135 (2023-05-09)
+-------------------------
+ * Remove references to old icon set
+ * Remove unused jquery bits and intercooler
+ * Remove bootstrap
+
+v8.1.134 (2023-05-08)
+-------------------------
+ * Remove no longer used perms
+ * Remove any old non-spa templates not being extended by the spa version
+ * Remove is_spa logic from templates
+ * Remove old contact update fields views
+
+v8.1.133 (2023-05-05)
+-------------------------
+ * Add default color
+
+v8.1.132 (2023-05-05)
+-------------------------
+ * Remove settings turd
+
+v8.1.131 (2023-05-05)
+-------------------------
+ * Remove old nav from landing page
+
+v8.1.130 (2023-05-04)
+-------------------------
+ * Remove spa checking in views
+
+v8.1.129 (2023-05-04)
+-------------------------
+ * Remove JSON view to list notifications now that has moved to the internal API
+ * Remove non-spa items from content menus
+
+v8.1.128 (2023-05-03)
+-------------------------
+ * Fix contact import
+
+v8.1.127 (2023-05-03)
+-------------------------
+ * Remove support for adding bulk sender delegate channels
+ * Remove ability to create IVR delegates for android channels
+ * Remove org home view altogether and update links to point to workspace view
+
+v8.1.126 (2023-05-03)
+-------------------------
+ * Change cookie checking for UI so that we always default to new UI
+ * Add color picker widget
+ * Remove ability to store twilio credentials on the org
+
+v8.1.125 (2023-05-02)
+-------------------------
+ * Tweak notifications index to match API endpoint
+ * Add new internal API with a notifications endpoint
+ * Use DRF defaults for STRICT_JSON and UNICODE_JSON
+ * Remove unused .api URL suffixes
+
+v8.1.124 (2023-05-01)
+-------------------------
+ * Make contact.modify work with new and old format
+ * Make ticket a reserved field name
+
+v8.1.123 (2023-04-27)
+-------------------------
+ * Hide Open Ticket option on contact read page if there's already an open a ticket
+ * Rework soft and hard msg deleting to be more performant
+
+v8.1.122 (2023-04-26)
+-------------------------
+ * Remove db constriants on Msg.flow and Msg.ticket
+
+v8.1.121 (2023-04-26)
+-------------------------
+ * Tweak migration dependency
+ * Show counts of tickets by topic on tickets menu
+
+v8.1.120 (2023-04-25)
+-------------------------
+ * Add topic counts to the API endpoint
+ * Add undocumented param to contacts API endpoint which allows URNs to be expanded
+ * Data migration to backfill ticket counts by topic
+
+v8.1.119 (2023-04-25)
+-------------------------
+ * Start writing ticket counts for topics
+
+v8.1.118 (2023-04-24)
+-------------------------
+ * Fix deleting of flows and tickets which are referenced by messages
+ * Fix pattern match for folder uuid
+ * Stop writing TicketCount.assignee
+
+v8.1.117 (2023-04-24)
+-------------------------
+ * Stop reading from TicketCount.assignee
+
+v8.1.116 (2023-04-21)
+-------------------------
+ * Add more channel icons
+
+v8.1.115 (2023-04-21)
+-------------------------
+ * Update icons
+ * Add ticket topic folders
+
+v8.1.114 (2023-04-20)
+-------------------------
+ * Add migration to backfill TicketCount.scope
+
+v8.1.113 (2023-04-20)
+-------------------------
+ * Add scope field to TicketCount and start writing
+
+v8.1.112 (2023-04-20)
+-------------------------
+ * Dropdowns for slow clickers
+ * Tighten up animations
+ * Use services for redis, elastic and postgres in CI
+
+v8.1.111 (2023-04-18)
+-------------------------
+ * Fix and archive keyword triggers with no match_type
+
+v8.1.110 (2023-04-18)
+-------------------------
+ * Prefetch flows on message views and make titles consistent
+
+v8.1.109 (2023-04-18)
+-------------------------
+ * Add links for menu, add flow badge, update label badges
+ * Remove Chikka channel type which no longer exists
+ * Update mailroom_db command to allow connecting to non-file socket postgres
+
+v8.1.108 (2023-04-17)
+-------------------------
+ * Add ticket field to msg model
+
+v8.1.107 (2023-04-13)
+-------------------------
+ * Allow deleting of groups used in triggers
+
+v8.1.106 (2023-04-13)
+-------------------------
+ * Don't show topics on tickets until clicked
+
+v8.1.105 (2023-04-12)
+-------------------------
+ * Fix js items on context menus
+
+v8.1.104 (2023-04-11)
+-------------------------
+ * Do not display schedule events for archived triggers
+ * Don't require db superuser for test_db command
+ * Make ticket banner expandable
+
+v8.1.103 (2023-04-10)
+-------------------------
+ * Fix urls when searching and paging
+ * Follow message on auto assign for unassigned folder
+
+v8.1.102 (2023-04-10)
+-------------------------
+ * Add contact details pane, hide empty tabs
+ * Auto assign tickets when sending messages
+ * Add nicer ticket assignment using temba-contact-tickets component
+ * Fix deleting of orgs with incidents
+
+v8.1.101 (2023-04-06)
+-------------------------
+ * Add field search handler on tickets
+
+v8.1.100 (2023-04-06)
+-------------------------
+ * Add fields to tickets
+
+v8.1.99 (2023-04-06)
+-------------------------
+ * Add test util to make it easier to mess with brands
+ * Drop Org.stripe_customer_id
+
+v8.1.98 (2023-04-06)
+-------------------------
+ * Link contact name on tickets to the contact page if permitted
+ * Drop Org.plan, plan_start and plan_end
+
+v8.1.97 (2023-04-05)
+-------------------------
+ * Pull tickets out of contact chat
+ * Scheduled messages to broadcasts with compose widget
+
+v8.1.96 (2023-04-03)
+-------------------------
+ * Stop reading Org.plan and .plan_end
+ * Bump redis from 4.5.3 to 4.5.4
+
+v8.1.95 (2023-03-31)
+-------------------------
+ * Fix temba-store race on load
+
+v8.1.94 (2023-03-29)
+-------------------------
+ * Bump version of openpyxl
+
+v8.1.93 (2023-03-29)
+-------------------------
+ * Update Excel reading dependencies
+
+v8.1.92 (2023-03-29)
+-------------------------
+ * Use unittests.mock.Mock in tests instead of custom mock_object
+
+v8.1.91 (2023-03-28)
+-------------------------
+ * Upgrade redis library version
+
+v8.1.90 (2023-03-27)
+-------------------------
+ * NOOP instead of assert if archiving msg which is already archived etc
+
+v8.1.89 (2023-03-27)
+-------------------------
+ * Do not fail to release channel when missing mtn subscription id in config
+ * Add incident type for org suspension
+
+v8.1.88 (2023-03-23)
+-------------------------
+ * Fix suspending and unsuspending orgs so that it correctly updates children
+ * Use a name for the active org that doesn't collide
+
+v8.1.87 (2023-03-23)
+-------------------------
+ * Manually fix version number
+
+v8.1.86 (2023-03-23)
+-------------------------
+ * Fix scrolling on WhatsApp templates page
+
+v8.1.85 (2023-03-23)
+-------------------------
+ * Handle short screens better on run list page
+
+v8.1.84 (2023-03-22)
+-------------------------
+ * Update to coverage 7.x
+
+v8.1.83 (2023-03-22)
+-------------------------
+ * Use onSpload to wire handlers on account form
+
+v8.1.82 (2023-03-22)
+-------------------------
+ * Support setting and removing the subscription URL for MTN channels
+
+v8.1.81 (2023-03-21)
+-------------------------
+ * Update ruff and isort
+
+v8.1.80 (2023-03-21)
+-------------------------
+ * Update black
+
+v8.1.79 (2023-03-20)
+-------------------------
+ * Add mouseover text for temba-date
+ * Reload page on org mismatch
+ * Use embedded title instead of response header
+
+v8.1.78 (2023-03-20)
+-------------------------
+ * Add globals to new ui
+ * Make it harder to accidentally delete an org
+ * Rewrite org deletion test and fix deletion issues
+
+v8.1.77 (2023-03-16)
+-------------------------
+ * Limit groups to a single line on contact page
+
+v8.1.76 (2023-03-16)
+-------------------------
+ * Remove unused fields and indexes on broadcast model
+ * Reload page on version mismatch
+ * Add support for MTN Developer Portal channel
+
+v8.1.75 (2023-03-16)
+-------------------------
+ * Add menu path for org export and import
+ * Fix legacy goto function for old UI
+ * Warn users who go back to the old interface
+ * Remove support for broadcasts with associated tickets
+
+v8.1.74 (2023-03-15)
+-------------------------
+ * Show version number on public index page
+ * Add poetry plugin to maintain version number in temba/__init__.py
+ * Fix textinput inner scrolling
+
+v8.1.73 (2023-03-15)
+-------------------------
+ * Stop returning type=flow|inbox on messages endpoint
+ * Cleanup location app models
+
+v8.1.72 (2023-03-14)
+-------------------------
+ * Convert Org.config and Channel.config to be real JSON
+
+v8.1.71 (2023-03-14)
+-------------------------
+ * Strip out invalid HTTP header characters from page title response headers
+ * Fix mailroom db command to patch uuid generation after migrations are run
+ * Expose flow on messages API endpoint
+
+v8.1.70 (2023-03-13)
+-------------------------
+ * Broad support for meta click for new tabs
+ * Make Org.config and Channel.config non-null
+
+v8.1.69 (2023-03-13)
+-------------------------
+ * Simplify use of config fields on channel update forms
+ * Fix alias editor to use the new UI frame
+ * Support updating Twilio credentials for T, TMS and TWA channels
+
+v8.1.68 (2023-03-13)
+-------------------------
+ * Rework messages and broadcasts API endpoints to accept media ojects UUIDs as attachments
+ * Make Msg.uuid and msg_type non-null
+
+v8.1.67 (2023-03-10)
+-------------------------
+ * Fix layering for menu
+
+v8.1.66 (2023-03-09)
+-------------------------
+ * Fix initial editor load
+ * Schedule message validation
+
+v8.1.65 (2023-03-09)
+-------------------------
+ * Update endpoints for messages and media
+
+v8.1.64 (2023-03-08)
+-------------------------
+ * Tweak layout for editor
+ * Cleanup fail_old_messages task. Use correct statuses and return number failed.
+
+v8.1.63 (2023-03-08)
+-------------------------
+ * Adjust export download page for new UI
+ * Make media list page (still staff only) filter by org and add index
+
+v8.1.62 (2023-03-08)
+-------------------------
+ * Small z-index tweak
+
+v8.1.61 (2023-03-07)
+-------------------------
+ * Tweak simulator placement in new ui
+
+v8.1.60 (2023-03-07)
+-------------------------
+ * Encourage users to try the new interface
+ * Add lightbox for contact history
+
+v8.1.59 (2023-03-07)
+-------------------------
+ * Rework code depending on msg_type=I|F
+
+v8.1.58 (2023-03-07)
+-------------------------
+ * Add missing channels migration
+ * Use msg.created_by if set in ticket list view
+ * Remove SMS type channel alerts
+
+v8.1.57 (2023-03-06)
+-------------------------
+ * Move index on msg.external_id onto the model
+
+v8.1.56 (2023-03-06)
+-------------------------
+ * Fix soft deleting of scheduled messages so schedule is deleted too
+ * Stop saving JSONAsTextField values as null for empty dicts and lists
+ * Update select s3 usage for msg exports to not rely on type=inbox|flow
+ * Add created_by to Msg and populate on events in contact histories
+
+v8.1.55 (2023-03-02)
+-------------------------
+ * Fix import for sync fcm task
+ * Create new filters and partial indexes for Inbox, Flows and Archived
+
+v8.1.54 (2023-03-02)
+-------------------------
+ * Fix enter on compose
+
+v8.1.53 (2023-03-01)
+-------------------------
+ * Add compose component to contact chat
+ * Pixel tweak on contact read page
+ * Move more Android relayer code out of Channel
+
+v8.1.52 (2023-03-01)
+-------------------------
+ * Simplify what we display for Android channels on read page
+
+v8.1.50 (2023-02-28)
+-------------------------
+ * Make spload universal
+
+v8.1.49 (2023-02-28)
+-------------------------
+ * Make spload work on formax pages
+
+v8.1.48 (2023-02-28)
+-------------------------
+ * Add more goto(event)  
+ * Fix content differing from page-load vs inline load  
+ * Add page title for spa response headers  
+ * Clean up subtitles on spa pages  
+ * Add link to flow starts (and clean up list page styling)
+ * Add link for webhook calls (and cleanup styling here too)  
+ * Update styling for log pages for both old / new ui
+
+v8.1.47 (2023-02-27)
+-------------------------
+ * Be less clever with page titles. Fix label js errors.
+ * Make sure tests can run without making requests to external URLs
+ * Unpublicize folder=incoming on messages API docs and re-add index with status=H
+
+v8.1.46 (2023-02-23)
+-------------------------
+ * Fix external links in old ui
+
+v8.1.45 (2023-02-23)
+-------------------------
+ * Fix external channel links
+ * No longer intercept clicks in spa-content
+ * Cleanup Channel model fields
+ * Fix channel claim  external URLs in new UI
+
+v8.1.44 (2023-02-23)
+-------------------------
+ * Exclude PENDING messages in contact history and API by org and contact
+ * Add -id to msg fetch ordering in Contact.get_history
+ * For both messages and tickets, replace the default indexes on org and contact with indexes that match the API ordering
+
+v8.1.43 (2023-02-23)
+-------------------------
+ * Use statement level db trigger for broadcast msg counts
+ * Update django to 4.1.7
+
+v8.1.42 (2023-02-22)
+-------------------------
+ * Only look at queued messages when syncing android channels
+ * Re-add Msg.STATUS_INITIALIZING to use for outgoing messages which fail to queue
+ * Include STATUS_ERRORED messages in Outbox views
+
+v8.1.41 (2023-02-22)
+-------------------------
+ * Remove suprious property
+
+v8.1.40 (2023-02-22)
+-------------------------
+ * Fix contact imports in new ui
+ * Fix menu refresh race
+ * Remove window.lastFetch
+ * Adjust menu paths for new UI channel views
+ * Use SpaMixin to more channels extra views
+
+v8.1.39 (2023-02-22)
+-------------------------
+ * Move Msg.update into android package
+ * Make text optional on broadcasts endpoint (messages need text or attachments)
+
+v8.1.38 (2023-02-21)
+-------------------------
+ * Fix dashboard not loading when content
+ * Fix handling FCM sync failure
+
+v8.1.37 (2023-02-21)
+-------------------------
+ * Don't lookup related fields in API if lookup value type is wrong
+ * Update django 4.0.10
+ * Fetching sent folder on messages endpoint should return messages ordered by -sent_on same as UI
+ * Exclude unhandled messages from Incoming folder on messages API endpoint
+ * More agressive menu refreshing
+ * Move much of the old android relayer code into its own package
+ * Add media API endpoint, undocumented for now
+ * Open up new UI access to everyone
+
+v8.1.36 (2023-02-20)
+-------------------------
+ * Cleanup use of validators in the API
+ * Add support for Msg.TYPE_TEXT to be used (for now) for outgoing messages
+
+v8.1.35 (2023-02-17)
+-------------------------
+ * Add org start redirection view
+ * Convert Attachment to be a dataclass
+ * Rework msg write serializer to create a transient Msg instance that the read serializer can use without hitting the db
+ * Add unpublicized API endpoint to send a single message
+ * Add msg_send to mailroom client
+
+v8.1.34 (2023-02-16)
+-------------------------
+ * Drop raw_urns field on Broadcast
+ * Pass group id instead of uuid to contact_search mailroom endpoint
+ * Remove unused expression_migrate from mailroom client
+
+v8.1.33 (2023-02-15)
+-------------------------
+ * Fix routing of current workspace to settings
+ * Add Broadcast.urns which matches the JSON and FlowStart.urns
+
+v8.1.32 (2023-02-14)
+-------------------------
+ * Drop Broadcast.urns and .send_all
+
+v8.1.30 (2023-02-13)
+-------------------------
+ * Fix keyword triggers match type
+
+v8.1.29 (2023-02-13)
+-------------------------
+ * Fix omnibox search for anon org to allow search by contact name
+ * Prepare to drop Broadcast.send_all and .urns
+
+v8.1.27 (2023-02-10)
+-------------------------
+ * Move all form text from Trigger model to forms
+ * Add migration to convert URNs to contacts on scheduled broadcasts
+
+v8.1.26 (2023-02-10)
+-------------------------
+ * Remove returning specific URNs from omniboxes and instead match contacts by URN
+ * Rework spa menu eliminate mapping
+
+v8.1.25 (2023-02-09)
+-------------------------
+ * Remove support for unused v1 omnibox format
+ * Update broadcasts API endpoint to support attachments
+
+v8.1.24 (2023-02-08)
+-------------------------
+ * Update to latest cryptography library
+ * Add task to interrupt flow sessions after 90 days
+
+v8.1.23 (2023-02-06)
+-------------------------
+ * Fix flow results redirecting to it's own page
+ * Make sure WA numbers can only be claimed once
+
+v8.1.22 (2023-02-06)
+-------------------------
+ * Update to latest django to get security fix
+
+v8.1.21 (2023-02-06)
+-------------------------
+ * Fix export > import path on new ui
+ * Fix login redirects from pjax calls
+
+v8.1.20 (2023-02-02)
+-------------------------
+ * Add servicing menu on org read
+
+v8.1.19 (2023-02-01)
+-------------------------
+ * Add Msg.quick_replies
+ * Add Broadcast.query
+ * More generic servicing for staff users
+
+v8.1.18 (2023-02-01)
+-------------------------
+ * Drop un-used Media.name field
+
+v8.1.17 (2023-01-31)
+-------------------------
+ * Fix modax from menu bug
+
+v8.1.15 (2023-01-30)
+-------------------------
+ * Add new org chooser with avatars in new UI
+ * Add dashboard to menu in new UI
+
+v8.1.14 (2023-01-27)
+-------------------------
+ * Add ordering support for filters
+ * Fix redirect ping pong when managing orgs
+ * Tweak inspect_flows command to report spec veresion mismatches
+
+v8.1.13 (2023-01-26)
+-------------------------
+ * Update flow editor
+
+v8.1.12 (2023-01-26)
+-------------------------
+ * Add locale field to Msg
+
+v8.1.11 (2023-01-25)
+-------------------------
+ * Add migration to alter flow language field to first update any remaining flows with 'base'
+
+v8.1.10 (2023-01-25)
+-------------------------
+ * Require flow and broadcast base languages to 3 letters
+ * Require broadcast.translations to be non-null
+
+v8.1.9 (2023-01-25)
+-------------------------
+ * Drop unused broadcast fields
+
+v8.1.8 (2023-01-24)
+-------------------------
+ * Make Broadcast.text nullable and stop writing it
+
+v8.1.7 (2023-01-24)
+-------------------------
+ * Stop reading from Broadcast.text
+
+v8.1.6 (2023-01-23)
+-------------------------
+ * Fix campaign imports so we don't import base as a language
+ * Increase max-width for channel configuration page
+ * Support bandwidth channel type
+
+v8.1.5 (2023-01-23)
+-------------------------
+ * Data migration to backfill broadcast.translations and replace base with und
+
+v8.1.4 (2023-01-20)
+-------------------------
+ * Update campaign message events with language base
+ * Make servicing to use posterize
+
+v8.1.3 (2023-01-19)
+-------------------------
+ * Tweak broadcasts API endpoint so it filters by is_active and hits index
+ * Fix indexes used for tickets API endpoint
+ * Remove unused indexes on contacts_contact
+ * Bump engine version to 13.2
+
+v8.1.2 (2023-01-19)
+-------------------------
+ * Fixes for content menu changes
+ * Fix test_db to create orgs with flow languages
+
+v8.1.1 (2023-01-18)
+-------------------------
+ * Restrict creating surveyor flows unless that is enabled as a feature
+ * Always create braodcasts with status = QUEUED, create index for fetching queued broadcasts
+ * Add new translations JSON field to broadcasts and start writing it
+ * Remove support for creating broadcasts with legacy expressions
+ * New content menu component
+
+v8.1.0 (2023-01-17)
+-------------------------
+ * Update contact import styling
+ * Implement squashed migrations
+ * Stop trimming flow starts as this will be handled by archiver
+
+v8.0.1 (2023-01-12)
+-------------------------
+ * Tweak migration dependencies to ensure clean installs run them in order that works
+ * Add empty migrations required for squashing
+
 v8.0.0 (2023-01-10)
 -------------------------
  * Update deps

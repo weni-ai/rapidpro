@@ -32,9 +32,7 @@ class ConnectView(BaseConnectView):
             label=_("URL"),
             widget=forms.URLInput(
                 attrs={
-                    "placeholder": _(
-                        "Ex.: https://my.rocket.chat/api/apps/public/51c5cebe-b8e4-48ae-89d3-2b7746019cc4"
-                    )
+                    "placeholder": _("Ex.: https://my.rocket.chat/api/apps/public/51c5cebe-b8e4-48ae-89d3-2b7746019cc4")
                 }
             ),
             help_text=_("URL of the Rocket.Chat Tickets app"),
@@ -67,7 +65,7 @@ class ConnectView(BaseConnectView):
             if base_url:
                 base_url = base_url.group()
             else:
-                raise forms.ValidationError(_("Invalid URL: %(base_url)s") % self.cleaned_data)
+                raise forms.ValidationError(_("Enter a valid URL."))
 
             base_url_exists = org.ticketers.filter(
                 is_active=True,
@@ -134,4 +132,4 @@ class ConnectView(BaseConnectView):
         return super().get_context_data(**kwargs)
 
     form_class = Form
-    template_name = "tickets/types/rocketchat/connect.haml"
+    template_name = "tickets/types/rocketchat/connect.html"

@@ -67,10 +67,9 @@ class SignalWireType(ChannelType):
     courier_url = r"^sw/(?P<uuid>[a-z0-9\-]+)/(?P<action>receive)$"
 
     name = "SignalWire"
-    icon = "icon-signalwire"
 
     claim_blurb = _("Easily add a two way number you have with %(link)s using their APIs.") % {
-        "link": '<a href="http://www.signalwire.com/">SignalWire</a>'
+        "link": '<a target="_blank" href="http://www.signalwire.com/">SignalWire</a>'
     }
     claim_view = SignalWireClaimView
 

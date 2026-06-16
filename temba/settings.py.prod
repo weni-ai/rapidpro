@@ -106,7 +106,6 @@ REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["v2.runs"] = env("V2_RUNS", default="30
 REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["v2.api"] = env("V2_API", default="3000/hour")
 REST_FRAMEWORK["PAGE_SIZE"] = env.int("REST_FRAMEWORK_PAGE_SIZE", default=250)
 REST_FRAMEWORK["DEFAULT_AUTHENTICATION_CLASSES"] = [
-    "mozilla_django_oidc.contrib.drf.OIDCAuthentication",
     "temba.api.support.APISessionAuthentication",
     "temba.api.support.APITokenAuthentication",
     "temba.api.support.APIBasicAuthentication",
@@ -152,7 +151,7 @@ COMPRESS_CSS_HASHING_METHOD = "content"
 # the runtime will request keys that aren't in the manifest and raise
 # OfflineGenerationError. Inspired by Nyaruka's pattern (settings_common.py iterates
 # BRANDS), extended here to also cover the BRANDING dict that Weni introduced.
-_offline_brands = list(BRANDS)
+_offline_brands = [BRAND]
 for _b in BRANDING.values():
     if id(_b) not in {id(x) for x in _offline_brands}:
         _offline_brands.append(_b)
@@ -229,7 +228,13 @@ AWS_S3_REGION_NAME = env("AWS_S3_REGION_NAME", default=None)
 AWS_S3_SIGNATURE_VERSION = "s3v4"
 STORAGE_URL = f"https://{AWS_BUCKET_DOMAIN}"
 
-DEFAULT_FILE_STORAGE = env("DEFAULT_FILE_STORAGE", default="storages.backends.s3boto3.S3Boto3Storage")
+# DEFAULT_FILE_STORAGE = env("DEFAULT_FILE_STORAGE", default="storages.backends.s3boto3.S3Boto3Storage")
+_default_s3_storage = {
+    "BACKEND": env("DEFAULT_FILE_STORAGE", default="storages.backends.s3boto3.S3Boto3Storage"),
+    "OPTIONS": {"bucket_name": AWS_STORAGE_BUCKET_NAME},
+}
+STORAGES["default"] = _default_s3_storage
+STORAGES["public"] = _default_s3_storage
 
 S3_NETWORK_TIMEOUT = env.int("S3_NETWORK_TIMEOUT", default=120)
 S3_NETWORK_RETRY_COUNT = env.int("S3_NETWORK_RETRY_COUNT", default=5)
@@ -265,32 +270,10 @@ INSTALLED_APPS += (
     "gunicorn",
     "storages",
     "elasticapm.contrib.django",
-    # gRPC
-    "django_grpc_framework",
-    # Weni apps
-    "weni.template_message",
-    "weni.channel_stats",
-    "weni.analytics_api",
-    "weni.grpc.core",
-    "weni.grpc.org",
-    "weni.grpc.user",
-    "weni.grpc.flow",
-    "weni.grpc.billing",
-    "weni.grpc.statistic",
-    "weni.orgs_api",
-    # OIDC authentication
-    "mozilla_django_oidc",
-    "weni.auth",
     # Templates (django-template-macros)
     "macros",
     "corsheaders",
 )
-
-if env("USE_INTERNAL_APP", default=True):
-    INSTALLED_APPS += (
-        "weni.internal",
-        "weni.ticketer_queues",
-    )
 
 # SENTRY
 # ------------------------------------------------------------------------------
@@ -314,9 +297,6 @@ LOGGING = {
         "elasticapm.errors": {"level": "ERROR", "handlers": ["console"], "propagate": False},
         "pycountry": {"level": "ERROR", "handlers": ["console"], "propagate": False},
         "django.security.DisallowedHost": {"handlers": ["null"], "propagate": False},
-        # OIDC
-        "mozilla_django_oidc": {"level": "DEBUG", "handlers": ["console"], "propagate": False},
-        "weni_django_oidc": {"level": "DEBUG", "handlers": ["console"], "propagate": False},
     },
 }
 
@@ -364,33 +344,10 @@ RETENTION_PERIODS.update(
     httplog=timedelta(days=env.int("RETENTION_PERIODS_HTTPLOG", default=3)),
 )
 
-# Adds gRPC services
-GRPC_FRAMEWORK = {
-    "ROOT_HANDLERS_HOOK": "weni.grpc.core.urls.grpc_handlers",
-}
-
 # --------------------------------------------------------------------------------------------------
 # OpenID Connect settings
 # https://mozilla-django-oidc.readthedocs.io/en/stable/installation.html#add-settings-to-settings-py
 # --------------------------------------------------------------------------------------------------
-OIDC_RP_CLIENT_ID = env("OIDC_RP_CLIENT_ID")
-OIDC_RP_CLIENT_SECRET = env("OIDC_RP_CLIENT_SECRET")
-OIDC_OP_AUTHORIZATION_ENDPOINT = env("OIDC_OP_AUTHORIZATION_ENDPOINT")
-OIDC_OP_TOKEN_ENDPOINT = env("OIDC_OP_TOKEN_ENDPOINT")
-OIDC_OP_USER_ENDPOINT = env("OIDC_OP_USER_ENDPOINT")
-OIDC_OP_JWKS_ENDPOINT = env("OIDC_OP_JWKS_ENDPOINT")
-OIDC_RP_SIGN_ALGO = env("OIDC_RP_SIGN_ALGO", default="RS256")
-OIDC_RP_SCOPES = env("OIDC_RP_SCOPES", default="openid email")
-OIDC_EXEMPT_URL_PATTERNS = [re.compile(url) for url in env.list("OIDC_EXEMPT_URL_PATTERNS", default=[])]
-OIDC_EXEMPT_URLS = OIDC_EXEMPT_URL_PATTERNS + env.list("OIDC_EXEMPT_URLS", default=[])
-OIDC_RENEW_ID_TOKEN_EXPIRY_SECONDS = env.int("OIDC_RENEW_ID_TOKEN_EXPIRY_SECONDS", default=(15 * 60))
-
-# Tells Django to authenticate via OIDC
-AUTHENTICATION_BACKENDS += ("weni.auth.backends.WeniOIDCAuthenticationBackend",)
-OIDC_DRF_AUTH_BACKEND = "weni.auth.backends.WeniOIDCAuthenticationBackend"
-
-# Used to enable authentication via Keycloak to legacy users
-SECRET_KEY_CHECK_LEGACY_USER = env("SECRET_KEY_CHECK_LEGACY_USER")
 
 # By default, rapidpro redirects the user to choose an org after login. Inside Weni Connect, the org is already selected, so we can bypass and take user to msg inbox.
 LOGIN_REDIRECT_URL = env("LOGIN_REDIRECT_URL", default="/msg/inbox/")
@@ -465,35 +422,6 @@ USER_RECOVER_MAX_ATTEMPTS = env.int("USER_RECOVER_MAX_ATTEMPTS", default=5)
 
 # Channel that should not be displayed in the old design
 OLD_DESIGN_EXCLUDED_CHANNELS_CODES = env.list("OLD_DESIGN_EXCLUDED_CHANNELS_CODES", default=["TG", "WWC", "IG"])
-
-
-# ------------------------------------------------------------------------------------------
-# Option to disable mozilla_django_oidc completely, removing it from:
-#   REST_FRAMEWORK["DEFAULT_AUTHENTICATION_CLASSES]
-#   MIDDLEWARE
-#   INSTALLED_APPS
-#   LOGGING
-#   AUTHENTICATION_BACKENDS
-# ------------------------------------------------------------------------------------------
-DISABLE_OIDC = env.bool("DISABLE_OIDC", default=False)
-if DISABLE_OIDC:
-    REST_FRAMEWORK["DEFAULT_AUTHENTICATION_CLASSES"].remove(
-        "mozilla_django_oidc.contrib.drf.OIDCAuthentication"
-    )
-
-    installed_apps_list = list(INSTALLED_APPS)
-    installed_apps_list.remove("mozilla_django_oidc")
-    installed_apps_list.remove("weni.auth")
-    INSTALLED_APPS = tuple(installed_apps_list)
-
-    LOGGING["loggers"].pop("mozilla_django_oidc")
-    LOGGING["loggers"].pop("weni_django_oidc")
-
-    authentication_backend_list = list(AUTHENTICATION_BACKENDS)
-    authentication_backend_list.remove("weni.auth.backends.WeniOIDCAuthenticationBackend")
-    AUTHENTICATION_BACKENDS = tuple(authentication_backend_list)
-
-    OIDC_DRF_AUTH_BACKEND = None
 
 CONNECT_BASE_URL = env("CONNECT_BASE_URL", default="https://api.dev.cloud.weni.ai")
 

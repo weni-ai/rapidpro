@@ -9,14 +9,19 @@ from django.utils.translation import gettext_lazy as _
 from django.views.decorators.csrf import csrf_exempt
 from django.views.generic import RedirectView, View
 
+from temba import __version__ as temba_version
 from temba.apks.models import Apk
 from temba.public.models import Lead, Video
 from temba.utils import analytics, get_anonymous_user, json
 from temba.utils.text import random_string
+from temba.utils.views import NoNavMixin, SpaMixin
 
 
-class IndexView(SmartTemplateView):
-    template_name = "public/public_index.haml"
+class IndexView(NoNavMixin, SmartTemplateView):
+    template_name = "public/public_index.html"
+
+    def derive_title(self):
+        return f"{self.request.branding['name']} - {self.request.branding['title']}"
 
     def pre_process(self, request, *args, **kwargs):
         response = super().pre_process(request, *args, **kwargs)
@@ -27,6 +32,7 @@ class IndexView(SmartTemplateView):
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
+        context["version"] = temba_version
         context["thanks"] = "thanks" in self.request.GET
         context["errors"] = "errors" in self.request.GET
         if context["errors"]:
@@ -42,7 +48,7 @@ class WelcomeRedirect(RedirectView):
 
 
 class Style(SmartTemplateView):
-    template_name = "public/public_style.haml"
+    template_name = "public/public_style.html"
 
 
 class Android(SmartTemplateView):
@@ -67,8 +73,9 @@ class Android(SmartTemplateView):
             return HttpResponseRedirect(apk.apk_file.url)
 
 
-class Welcome(SmartTemplateView):
-    template_name = "public/public_welcome.haml"
+class Welcome(SpaMixin, SmartTemplateView):
+    template_name = "public/public_welcome.html"
+    menu_path = "/settings"
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)

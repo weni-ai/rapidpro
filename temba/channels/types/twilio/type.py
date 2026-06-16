@@ -1,4 +1,5 @@
 from twilio.base.exceptions import TwilioRestException
+from twilio.rest import Client as TwilioClient
 
 from django.urls import re_path
 from django.utils.translation import gettext_lazy as _
@@ -6,14 +7,17 @@ from django.utils.translation import gettext_lazy as _
 from temba.contacts.models import URN
 from temba.utils.timezones import timezone_to_country_code
 
-from ...models import ChannelType
-from .views import SUPPORTED_COUNTRIES, ClaimView, SearchView
+from ...models import Channel, ChannelType
+from .views import SUPPORTED_COUNTRIES, ClaimView, Connect, SearchView, UpdateForm
 
 
 class TwilioType(ChannelType):
     """
     An Twilio channel
     """
+
+    SESSION_ACCOUNT_SID = "TWILIO_ACCOUNT_SID"
+    SESSION_AUTH_TOKEN = "TWILIO_AUTH_TOKEN"
 
     code = "T"
     category = ChannelType.Category.PHONE
@@ -22,11 +26,12 @@ class TwilioType(ChannelType):
     courier_url = r"^t/(?P<uuid>[a-z0-9\-]+)/(?P<action>receive|status)$"
 
     name = "Twilio"
-    icon = "icon-channel-twilio"
+
     claim_blurb = _("Easily add a two way number you have configured with %(link)s using their APIs.") % {
-        "link": '<a href="https://www.twilio.com/">Twilio</a>'
+        "link": '<a target="_blank" href="https://www.twilio.com/">Twilio</a>'
     }
     claim_view = ClaimView
+    update_form = UpdateForm
 
     schemes = [URN.TEL_SCHEME]
     max_length = 1600
@@ -48,7 +53,7 @@ class TwilioType(ChannelType):
 
     def deactivate(self, channel):
         config = channel.config
-        client = channel.org.get_twilio_client()
+        client = TwilioClient(config[Channel.CONFIG_ACCOUNT_SID], config[Channel.CONFIG_AUTH_TOKEN])
         number_update_args = dict()
 
         if not channel.is_delegate_sender():
@@ -59,7 +64,7 @@ class TwilioType(ChannelType):
 
         try:
             try:
-                number_sid = channel.bod or channel.config.get("number_sid")
+                number_sid = channel.config["number_sid"]
                 client.api.incoming_phone_numbers.get(number_sid).update(**number_update_args)
             except Exception:
                 if client:
@@ -80,7 +85,23 @@ class TwilioType(ChannelType):
                 raise e
 
     def get_urls(self):
-        return [self.get_claim_url(), re_path(r"^search$", SearchView.as_view(), name="search")]
+        return [
+            self.get_claim_url(),
+            re_path(r"^search$", SearchView.as_view(channel_type=self), name="search"),
+            re_path(r"^connect$", Connect.as_view(channel_type=self), name="connect"),
+        ]
 
     def get_error_ref_url(self, channel, code: str) -> str:
         return f"https://www.twilio.com/docs/api/errors/{code}"
+
+    def check_credentials(self, config: dict) -> bool:
+        account_sid = config.get("account_sid", None)
+        account_token = config.get("auth_token", None)
+
+        try:
+            client = TwilioClient(account_sid, account_token)
+            # get the actual primary auth tokens from twilio and use them
+            client.api.account.fetch()
+        except Exception:  # pragma: needs cover
+            return False
+        return True

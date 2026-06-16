@@ -37,9 +37,6 @@ class TicketerType(metaclass=ABCMeta):
     # the short code for this ticketer type (< 16 chars, lowercase)
     slug = None
 
-    # the icon to show for this ticketer type
-    icon = "icon-channel-external"
-
     # the blurb to show on the main connect page
     connect_blurb = None
 
@@ -122,7 +119,7 @@ class Ticketer(TembaModel, DependencyMixin):
         return TYPES.values()
 
     @property
-    def type(self):
+    def type(self):  # pragma: no cover
         """
         Returns the type instance
         """
@@ -213,9 +210,9 @@ class Ticket(models.Model):
     MAX_NOTE_LEN = 4096
 
     uuid = models.UUIDField(unique=True, default=uuid4)
-    org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="tickets")
+    org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="tickets", db_index=False)  # indexed below
     ticketer = models.ForeignKey(Ticketer, on_delete=models.PROTECT, related_name="tickets")
-    contact = models.ForeignKey(Contact, on_delete=models.PROTECT, related_name="tickets")
+    contact = models.ForeignKey(Contact, on_delete=models.PROTECT, related_name="tickets", db_index=False)
 
     # ticket content
     topic = models.ForeignKey(Topic, on_delete=models.PROTECT, related_name="tickets")
@@ -243,17 +240,17 @@ class Ticket(models.Model):
     # when this ticket last had activity which includes messages being sent and received, and is used for ordering
     last_activity_on = models.DateTimeField(default=timezone.now)
 
-    def assign(self, user: User, *, assignee: User, note: str):
-        self.bulk_assign(self.org, user, [self], assignee=assignee, note=note)
+    def assign(self, user: User, *, assignee: User):
+        self.bulk_assign(self.org, user, [self], assignee=assignee)
 
     def add_note(self, user: User, *, note: str):
         self.bulk_add_note(self.org, user, [self], note=note)
 
     @classmethod
-    def bulk_assign(cls, org, user: User, tickets: list, assignee: User, note: str = None):
+    def bulk_assign(cls, org, user: User, tickets: list, assignee: User):
         ticket_ids = [t.id for t in tickets if t.ticketer.is_active]
         assignee_id = assignee.id if assignee else None
-        return mailroom.get_client().ticket_assign(org.id, user.id, ticket_ids, assignee_id, note)
+        return mailroom.get_client().ticket_assign(org.id, user.id, ticket_ids, assignee_id)
 
     @classmethod
     def bulk_add_note(cls, org, user: User, tickets: list, note: str):
@@ -281,7 +278,7 @@ class Ticket(models.Model):
 
     def delete(self):
         self.events.all().delete()
-        self.broadcasts.update(ticket=None)
+
         super().delete()
 
     def __str__(self):
@@ -304,9 +301,9 @@ class Ticket(models.Model):
                 fields=["ticketer", "external_id"],
                 condition=Q(external_id__isnull=False),
             ),
-            # used by API tickets endpoint
-            models.Index(name="tickets_modified_on", fields=["-modified_on"]),
-            models.Index(name="tickets_contact_modified_on", fields=["contact", "-modified_on"]),
+            # used by API tickets endpoint hence the ordering, and general fetching by org or contact
+            models.Index(name="tickets_api_by_org", fields=["org", "-modified_on", "-id"]),
+            models.Index(name="tickets_api_by_contact", fields=["contact", "-modified_on", "-id"]),
         ]
 
 
@@ -351,7 +348,7 @@ class TicketEvent(models.Model):
 
 
 class TicketFolder(metaclass=ABCMeta):
-    slug = None
+    id = None
     name = None
     icon = None
     verbose_name = None
@@ -365,12 +362,32 @@ class TicketFolder(metaclass=ABCMeta):
         return qs.select_related("topic", "assignee").prefetch_related("contact")
 
     @classmethod
-    def from_slug(cls, slug: str):
-        return FOLDERS[slug]
+    def from_id(cls, org, id: str):
+        folder = FOLDERS.get(id, None)
+        if not folder:
+            topic = Topic.objects.filter(org=org, uuid=id).first()
+            if topic:
+                folder = TopicFolder(topic)
+        return folder
 
     @classmethod
     def all(cls):
         return FOLDERS
+
+
+class TopicFolder(TicketFolder):
+    """
+    Tickets assigned to the current user
+    """
+
+    def __init__(self, topic: Topic):
+        self.topic = topic
+        self.id = topic.uuid
+        self.name = topic.name
+        self.is_system = topic.is_system
+
+    def get_queryset(self, org, user, ordered):
+        return super().get_queryset(org, user, ordered).filter(topic=self.topic)
 
 
 class MineFolder(TicketFolder):
@@ -378,9 +395,9 @@ class MineFolder(TicketFolder):
     Tickets assigned to the current user
     """
 
-    slug = "mine"
+    id = "mine"
     name = _("My Tickets")
-    icon = "icon.tickets_mine"
+    icon = "tickets_mine"
 
     def get_queryset(self, org, user, ordered):
         return super().get_queryset(org, user, ordered).filter(assignee=user)
@@ -391,10 +408,10 @@ class UnassignedFolder(TicketFolder):
     Tickets not assigned to any user
     """
 
-    slug = "unassigned"
+    id = "unassigned"
     name = _("Unassigned")
     verbose_name = _("Unassigned Tickets")
-    icon = "icon.tickets_unassigned"
+    icon = "tickets_unassigned"
 
     def get_queryset(self, org, user, ordered):
         return super().get_queryset(org, user, ordered).filter(assignee=None)
@@ -405,56 +422,43 @@ class AllFolder(TicketFolder):
     All tickets
     """
 
-    slug = "all"
+    id = "all"
     name = _("All")
     verbose_name = _("All Tickets")
-    icon = "icon.tickets_all"
+    icon = "tickets_all"
 
     def get_queryset(self, org, user, ordered):
         return super().get_queryset(org, user, ordered)
 
 
-FOLDERS = {f.slug: f() for f in TicketFolder.__subclasses__()}
+FOLDERS = {f.id: f() for f in TicketFolder.__subclasses__() if f.id}
 
 
 class TicketCount(SquashableModel):
     """
-    Counts of tickets by assignment and status
+    Counts of tickets by assignment/topic and status
     """
 
-    SQUASH_OVER = ("org_id", "assignee_id", "status")
+    SQUASH_OVER = ("org_id", "scope", "status")
 
     org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="ticket_counts")
-    assignee = models.ForeignKey(User, null=True, on_delete=models.PROTECT, related_name="ticket_counts")
+    scope = models.CharField(max_length=32)
     status = models.CharField(max_length=1, choices=Ticket.STATUS_CHOICES)
     count = models.IntegerField(default=0)
 
     @classmethod
     def get_squash_query(cls, distinct_set) -> tuple:
-        if distinct_set.assignee_id:
-            sql = """
-            WITH removed as (
-                DELETE FROM %(table)s WHERE "org_id" = %%s AND "assignee_id" = %%s AND "status" = %%s RETURNING "count"
-            )
-            INSERT INTO %(table)s("org_id", "assignee_id", "status", "count", "is_squashed")
-            VALUES (%%s, %%s, %%s, GREATEST(0, (SELECT SUM("count") FROM removed)), TRUE);
-            """ % {
-                "table": cls._meta.db_table
-            }
+        sql = """
+        WITH removed as (
+            DELETE FROM %(table)s WHERE "org_id" = %%s AND "scope" = %%s AND "status" = %%s RETURNING "count"
+        )
+        INSERT INTO %(table)s("org_id", "scope", "status", "count", "is_squashed")
+        VALUES (%%s, %%s, %%s, GREATEST(0, (SELECT SUM("count") FROM removed)), TRUE);
+        """ % {
+            "table": cls._meta.db_table
+        }
 
-            params = (distinct_set.org_id, distinct_set.assignee_id, distinct_set.status) * 2
-        else:
-            sql = """
-            WITH removed as (
-                DELETE FROM %(table)s WHERE "org_id" = %%s AND "assignee_id" IS NULL AND "status" = %%s RETURNING "count"
-            )
-            INSERT INTO %(table)s("org_id", "assignee_id", "status", "count", "is_squashed")
-            VALUES (%%s, NULL, %%s, GREATEST(0, (SELECT SUM("count") FROM removed)), TRUE);
-            """ % {
-                "table": cls._meta.db_table
-            }
-
-            params = (distinct_set.org_id, distinct_set.status) * 2
+        params = (distinct_set.org_id, distinct_set.scope, distinct_set.status) * 2
 
         return sql, params
 
@@ -463,26 +467,55 @@ class TicketCount(SquashableModel):
         """
         Gets counts for a set of assignees (None means no assignee)
         """
-        counts = cls.objects.filter(org=org, status=status)
-        counts = counts.values_list("assignee").annotate(count_sum=Sum("count"))
-        counts_by_assignee = {c[0]: c[1] for c in counts}
 
-        return {a: counts_by_assignee.get(a.id if a else None, 0) for a in assignees}
+        scopes = [cls._assignee_scope(a) for a in assignees]
+        counts = (
+            cls.objects.filter(org=org, scope__in=scopes, status=status)
+            .values_list("scope")
+            .annotate(count_sum=Sum("count"))
+        )
+        counts_by_scope = {c[0]: c[1] for c in counts}
+
+        return {a: counts_by_scope.get(cls._assignee_scope(a), 0) for a in assignees}
+
+    @classmethod
+    def get_by_topics(cls, org, topics: list, status: str) -> dict:
+        """
+        Gets counts for a set of topics
+        """
+
+        scopes = [cls._topic_scope(t) for t in topics]
+        counts = (
+            cls.objects.filter(org=org, scope__in=scopes, status=status)
+            .values_list("scope")
+            .annotate(count_sum=Sum("count"))
+        )
+        counts_by_scope = {c[0]: c[1] for c in counts}
+
+        return {t: counts_by_scope.get(cls._topic_scope(t), 0) for t in topics}
 
     @classmethod
     def get_all(cls, org, status: str) -> int:
         """
         Gets count for org and status regardless of assignee
         """
-        return cls.sum(cls.objects.filter(org=org, status=status))
+        return cls.sum(cls.objects.filter(org=org, scope__startswith="assignee:", status=status))
+
+    @staticmethod
+    def _assignee_scope(user) -> str:
+        return f"assignee:{user.id if user else 0}"
+
+    @staticmethod
+    def _topic_scope(topic) -> str:
+        return f"topic:{topic.id}"
 
     class Meta:
         indexes = [
             models.Index(fields=("org", "status")),
-            models.Index(fields=("org", "assignee", "status")),
+            models.Index(fields=("org", "scope", "status")),
             # for squashing task
             models.Index(
-                name="ticket_count_unsquashed", fields=("org", "assignee", "status"), condition=Q(is_squashed=False)
+                name="ticket_count_unsquashed", fields=("org", "scope", "status"), condition=Q(is_squashed=False)
             ),
         ]
 

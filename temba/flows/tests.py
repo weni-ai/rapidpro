@@ -1,8 +1,6 @@
-import copy
 import decimal
 import io
 import os
-import re
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
@@ -15,7 +13,6 @@ from django.db.models.functions import TruncDate
 from django.test.utils import override_settings
 from django.urls import reverse
 from django.utils import timezone
-from django.utils.encoding import force_str
 
 from temba import mailroom
 from temba.api.models import Resthook
@@ -27,13 +24,15 @@ from temba.globals.models import Global
 from temba.mailroom import FlowValidationException
 from temba.orgs.integrations.dtone import DTOneType
 from temba.templates.models import Template, TemplateTranslation
-from temba.tests import AnonymousOrg, CRUDLTestMixin, MockResponse, TembaTest, matchers, mock_mailroom
+from temba.tests import AnonymousOrg, CRUDLTestMixin, MockResponse, TembaTest, matchers, mock_mailroom, override_brand
+from temba.tests.base import get_contact_search
 from temba.tests.engine import MockSessionWriter
 from temba.tests.s3 import MockS3Client, jsonlgz_encode
 from temba.tickets.models import Ticketer
 from temba.triggers.models import Trigger
 from temba.utils import json
 from temba.utils.uuid import uuid4
+from temba.utils.views import TEMBA_MENU_SELECTION
 
 from .checks import mailroom_url
 from .models import (
@@ -54,16 +53,16 @@ from .models import (
     get_flow_user,
 )
 from .tasks import (
+    interrupt_flow_sessions,
     squash_flow_counts,
     trim_flow_revisions,
     trim_flow_sessions,
-    trim_flow_starts,
     update_session_wait_expires,
 )
 from .views import FlowCRUDL
 
 
-class FlowTest(TembaTest):
+class FlowTest(TembaTest, CRUDLTestMixin):
     def setUp(self):
         super().setUp()
 
@@ -164,7 +163,7 @@ class FlowTest(TembaTest):
     def test_ensure_current_version(self):
         # importing migrates to latest spec version
         flow = self.get_flow("favorites_v13")
-        self.assertEqual("13.1.0", flow.version_number)
+        self.assertEqual("13.2.0", flow.version_number)
         self.assertEqual(1, flow.revisions.count())
 
         # rewind one spec version..
@@ -181,39 +180,13 @@ class FlowTest(TembaTest):
         flow.ensure_current_version()
 
         # check we migrate to current spec version
-        self.assertEqual("13.1.0", flow.version_number)
+        self.assertEqual("13.2.0", flow.version_number)
         self.assertEqual(2, flow.revisions.count())
         self.assertEqual(get_flow_user(self.org), flow.revisions.order_by("id").last().created_by)
 
         # saved on won't have been updated but modified on will
         self.assertEqual(old_saved_on, flow.saved_on)
         self.assertGreater(flow.modified_on, old_modified_on)
-
-    def test_campaign_filter(self):
-        self.login(self.admin)
-        self.get_flow("the_clinic")
-
-        # should have a list of four flows for our appointment schedule
-        response = self.client.get(reverse("flows.flow_list"))
-        self.assertContains(response, "Appointment Schedule")
-        self.assertEqual(4, response.context["campaigns"][0]["count"])
-
-        campaign = Campaign.objects.filter(name="Appointment Schedule").first()
-        self.assertIsNotNone(campaign)
-
-        # check that our four flows in the campaign are there
-        response = self.client.get(reverse("flows.flow_campaign", args=[campaign.id]))
-        self.assertContains(response, "Confirm Appointment")
-        self.assertContains(response, "Start Notifications")
-        self.assertContains(response, "Stop Notifications")
-        self.assertContains(response, "Appointment Followup")
-
-        # check we can't see farmers
-        farmers = ContactGroup.create_manual(self.org2, self.admin, "Farmers")
-        campaign2 = Campaign.create(self.org2, self.admin, Campaign.get_unique_name(self.org, "Reminders"), farmers)
-
-        response = self.client.get(reverse("flows.flow_campaign", args=[campaign2.id]))
-        self.assertLoginRedirect(response)
 
     def test_flow_archive_with_campaign(self):
         self.login(self.admin)
@@ -260,19 +233,15 @@ class FlowTest(TembaTest):
 
         self.login(self.admin)
 
-        response = self.client.get(reverse("flows.flow_editor", args=[flow.uuid]))
+        flow_editor_url = reverse("flows.flow_editor", args=[flow.uuid])
+
+        response = self.client.get(flow_editor_url)
 
         self.assertTrue(response.context["mutable"])
         self.assertTrue(response.context["can_start"])
         self.assertTrue(response.context["can_simulate"])
         self.assertContains(response, reverse("flows.flow_simulate", args=[flow.id]))
-        self.assertContains(response, "id='rp-flow-editor'")
-
-        # customer service gets a service button
-        self.login(self.customer_support)
-
-        response = self.client.get(reverse("flows.flow_editor", args=[flow.uuid]))
-        self.assertContains(response, "Service")
+        self.assertContains(response, 'id="rp-flow-editor"')
 
         # flows that are archived can't be edited, started or simulated
         self.login(self.admin)
@@ -280,12 +249,11 @@ class FlowTest(TembaTest):
         flow.is_archived = True
         flow.save(update_fields=("is_archived",))
 
-        response = self.client.get(reverse("flows.flow_editor", args=[flow.uuid]))
+        response = self.client.get(flow_editor_url)
 
         self.assertFalse(response.context["mutable"])
         self.assertFalse(response.context["can_start"])
         self.assertFalse(response.context["can_simulate"])
-        self.assertNotContains(response, reverse("flows.flow_simulate", args=[flow.id]))
 
     def test_editor_feature_filters(self):
         flow = self.create_flow("Test")
@@ -1290,104 +1258,6 @@ class FlowTest(TembaTest):
             ],
         )
 
-    def test_views_viewers(self):
-        flow = self.get_flow("color")
-
-        # create a flow for another org and a flow label
-        flow2 = Flow.create(self.org2, self.admin2, "Flow2")
-        flow_label = FlowLabel.create(self.org, self.admin, "one")
-
-        flow_list_url = reverse("flows.flow_list")
-        flow_archived_url = reverse("flows.flow_archived")
-        flow_create_url = reverse("flows.flow_create")
-        flowlabel_create_url = reverse("flows.flowlabel_create")
-
-        # no login, no list
-        response = self.client.get(flow_list_url)
-        self.assertRedirect(response, reverse("users.user_login"))
-
-        self.user.first_name = "Test"
-        self.user.last_name = "Contact"
-        self.user.save()
-
-        self.login(self.user)
-
-        # list, should have only one flow (the one created in setUp)
-
-        response = self.client.get(flow_list_url)
-        self.assertEqual(1, len(response.context["object_list"]))
-        # no create links
-        self.assertNotContains(response, flow_create_url)
-        self.assertNotContains(response, flowlabel_create_url)
-        # verify the action buttons we have
-        self.assertNotContains(response, "object-btn-unlabel")
-        self.assertNotContains(response, "object-btn-restore")
-        self.assertNotContains(response, "object-btn-archive")
-        self.assertNotContains(response, "object-btn-label")
-        self.assertContains(response, "object-btn-export")
-
-        # can not label
-        post_data = dict()
-        post_data["action"] = "label"
-        post_data["objects"] = flow.id
-        post_data["label"] = flow_label.id
-        post_data["add"] = True
-
-        response = self.client.post(flow_list_url, post_data, follow=True)
-        self.assertEqual(403, response.status_code)
-
-        flow.refresh_from_db()
-        self.assertEqual(0, flow.labels.count())
-
-        # can not archive
-        post_data = dict()
-        post_data["action"] = "archive"
-        post_data["objects"] = flow.pk
-        response = self.client.post(flow_list_url, post_data, follow=True)
-        self.assertEqual(403, response.status_code)
-
-        flow.refresh_from_db()
-        self.assertFalse(flow.is_archived)
-
-        # inactive list shouldn't have any flows
-        response = self.client.get(flow_archived_url)
-        self.assertEqual(0, len(response.context["object_list"]))
-
-        response = self.client.get(reverse("flows.flow_editor", args=[flow.uuid]))
-        self.assertEqual(200, response.status_code)
-        self.assertFalse(response.context["mutable"])
-
-        flow.is_archived = True
-        flow.save()
-
-        response = self.client.get(flow_list_url)
-        self.assertEqual(0, len(response.context["object_list"]))
-
-        # cannot restore
-        post_data = dict()
-        post_data["action"] = "restore"
-        post_data["objects"] = flow.id
-        response = self.client.post(flow_archived_url, post_data, follow=True)
-        self.assertEqual(403, response.status_code)
-
-        flow.refresh_from_db()
-        self.assertTrue(flow.is_archived)
-
-        response = self.client.get(flow_archived_url)
-        self.assertEqual(1, len(response.context["object_list"]))
-
-        # cannot create a flow
-        response = self.client.get(flow_create_url)
-        self.assertEqual(302, response.status_code)
-
-        # cannot create a flowlabel
-        response = self.client.get(flowlabel_create_url)
-        self.assertEqual(302, response.status_code)
-
-        # also shouldn't be able to view other flow
-        response = self.client.get(reverse("flows.flow_editor", args=[flow2.uuid]))
-        self.assertEqual(302, response.status_code)
-
     def test_legacy_validate_definition(self):
         with self.assertRaises(ValueError):
             FlowRevision.validate_legacy_definition({"flow_type": "U", "nodes": []})
@@ -1486,26 +1356,6 @@ class FlowTest(TembaTest):
 
         # fetching a flow with a group send shouldn't throw
         self.get_flow("group_send_flow")
-
-    @mock_mailroom
-    def test_preview_start(self, mr_mocks):
-        flow = self.create_flow("Test")
-        contact1 = self.create_contact("Ann", phone="+1234567111")
-        contact2 = self.create_contact("Bob", phone="+1234567222")
-        doctors = self.create_group("Doctors", contacts=[contact1, contact2])
-
-        mr_mocks.flow_preview_start(
-            query='group = "Doctors" AND status = "active"', total=100, sample=[contact1, contact2]
-        )
-
-        query, total, sample, metadata = flow.preview_start(
-            include=mailroom.QueryInclusions(group_uuids=[str(doctors.uuid)]),
-            exclude=mailroom.QueryExclusions(non_active=True),
-        )
-
-        self.assertEqual('group = "Doctors" AND status = "active"', query)
-        self.assertEqual(100, total)
-        self.assertEqual([contact1, contact2], list(sample))
 
     def test_flow_delete_of_inactive_flow(self):
         flow = self.get_flow("favorites")
@@ -1748,7 +1598,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         response = self.assertListFetch(menu_url, allow_viewers=True, allow_editors=True, allow_agents=False)
         menu = response.json()["results"]
         self.assertEqual(
-            ["Active", "Archived", "Labels"],
+            ["Active", "Archived", "divider", "Globals", "History", "Labels"],
             [m.get("name") or m.get("type") for m in menu],
         )
 
@@ -1773,6 +1623,23 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
             ],
             response.context["form"].fields["flow_type"].choices,
         )
+
+        # if surveyor feature is disabled, that is no longer a flow type option
+        with self.settings(FEATURES={}):
+            response = self.assertCreateFetch(
+                create_url,
+                allow_viewers=False,
+                allow_editors=True,
+                form_fields=["name", "keyword_triggers", "flow_type", "base_language"],
+            )
+            self.assertEqual(
+                [
+                    (Flow.TYPE_MESSAGE, "Messaging"),
+                    (Flow.TYPE_VOICE, "Phone Call"),
+                    (Flow.TYPE_BACKGROUND, "Background"),
+                ],
+                response.context["form"].fields["flow_type"].choices,
+            )
 
         # try to submit without name or language
         self.assertCreateSubmit(
@@ -1897,9 +1764,12 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         user.save()
         self.login(user)
 
-        self.assertContentMenu(reverse("flows.flow_list"), self.admin, ["Import", "Export"])
+        self.assertContentMenu(reverse("flows.flow_list"), self.user, ["Export"])
+
         self.assertContentMenu(
-            reverse("flows.flow_list"), self.admin, ["New Flow", "New Label", "Import", "Export"], True
+            reverse("flows.flow_list"),
+            self.admin,
+            ["New Flow", "New Label", "Import", "Export"],
         )
 
         # list, should have only one flow (the one created in setUp)
@@ -1933,7 +1803,12 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # add a trigger on this flow
         Trigger.objects.create(
-            org=self.org, keyword="unique", flow=flow1, created_by=self.admin, modified_by=self.admin
+            org=self.org,
+            keyword="unique",
+            match_type=Trigger.MATCH_FIRST_WORD,
+            flow=flow1,
+            created_by=self.admin,
+            modified_by=self.admin,
         )
 
         # create a new surveyor flow
@@ -1996,7 +1871,12 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # create another trigger so there are two in the way
         trigger = Trigger.objects.create(
-            org=self.org, keyword="this", flow=flow1, created_by=self.admin, modified_by=self.admin
+            org=self.org,
+            keyword="this",
+            match_type=Trigger.MATCH_FIRST_WORD,
+            flow=flow1,
+            created_by=self.admin,
+            modified_by=self.admin,
         )
 
         response = self.client.post(
@@ -2041,6 +1921,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual(flow3.triggers.count(), 5)
         self.assertEqual(flow3.triggers.filter(is_archived=True).count(), 2)
         self.assertEqual(flow3.triggers.filter(is_archived=False).count(), 3)
+        self.assertEqual(flow3.triggers.filter(is_archived=False, match_type=Trigger.MATCH_FIRST_WORD).count(), 3)
         self.assertEqual(flow3.triggers.filter(is_archived=False).exclude(groups=None).count(), 0)
 
         # update flow with unformatted keyword
@@ -2272,6 +2153,8 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual(1, response.context["folders"][0]["count"])
         self.assertEqual(2, response.context["folders"][1]["count"])
 
+        self.assertEqual(("archive", "label", "download-results"), response.context["actions"])
+
         # but does appear in archived list
         response = self.client.get(reverse("flows.flow_archived"))
         self.assertContains(response, flow1.name)
@@ -2287,6 +2170,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         # flow should no longer appear in archived list
         response = self.client.get(reverse("flows.flow_archived"))
         self.assertNotContains(response, flow1.name)
+        self.assertEqual(("restore",), response.context["actions"])
 
         # but does appear in normal list
         response = self.client.get(reverse("flows.flow_list"))
@@ -2356,9 +2240,13 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         response = self.client.get(reverse("flows.flow_filter", args=[label1.uuid]))
         self.assertEqual([flow2, flow1], list(response.context["object_list"]))
         self.assertEqual(2, len(response.context["labels"]))
+        self.assertEqual(("label", "download-results"), response.context["actions"])
 
         response = self.client.get(reverse("flows.flow_filter", args=[label2.uuid]))
         self.assertEqual([flow2], list(response.context["object_list"]))
+
+        response = self.client.get(reverse("flows.flow_filter", args=[label2.uuid]))
+        self.assertEquals(f"/flow/labels/{label2.uuid}", response.headers.get(TEMBA_MENU_SELECTION))
 
     def test_get_definition(self):
         flow = self.get_flow("color_v13")
@@ -2429,7 +2317,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
                     "user": {"email": "admin@nyaruka.com", "name": "Andy"},
                     "created_on": matchers.ISODate(),
                     "id": revisions[0].id,
-                    "version": "13.1.0",
+                    "version": Flow.CURRENT_SPEC_VERSION,
                     "revision": 2,
                 },
                 {
@@ -2459,7 +2347,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # make sure we can read the definition
         definition = response.json()["definition"]
-        self.assertEqual("base", definition["language"])
+        self.assertEqual("und", definition["language"])
 
         # really break the legacy revision
         revisions[1].definition = {"foo": "bar"}
@@ -2537,24 +2425,15 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
     @mock_mailroom
     @patch("temba.flows.models.Flow.is_starting")
     def test_preview_start(self, mr_mocks, mock_flow_is_starting):
-
         mock_flow_is_starting.return_value = False
 
-        # now set our brand to redirect
-        brands = copy.deepcopy(settings.BRANDS)
-        brands[0]["inactive_threshold"] = 1000
-
-        with self.settings(BRANDS=brands):
+        with override_brand(inactive_threshold=1000):
             flow = self.create_flow("Test")
             self.create_field("age", "Age")
-            contact1 = self.create_contact("Ann", phone="+16302222222", fields={"age": 40})
-            contact2 = self.create_contact("Bob", phone="+16303333333", fields={"age": 33})
+            self.create_contact("Ann", phone="+16302222222", fields={"age": 40})
+            self.create_contact("Bob", phone="+16303333333", fields={"age": 33})
 
-            mr_mocks.flow_preview_start(
-                query='age > 30 AND status = "active" AND history != "Test Flow"',
-                total=100,
-                sample=[contact1, contact2],
-            )
+            mr_mocks.flow_preview_start(query='age > 30 AND status = "active" AND history != "Test Flow"', total=100)
 
             preview_url = reverse("flows.flow_preview_start", args=[flow.id])
 
@@ -2572,25 +2451,6 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
                 {
                     "query": 'age > 30 AND status = "active" AND history != "Test Flow"',
                     "total": 100,
-                    "sample": [
-                        {
-                            "uuid": contact1.uuid,
-                            "name": "Ann",
-                            "primary_urn": "+1 630-222-2222",
-                            "fields": {"age": "40"},
-                            "created_on": contact1.created_on.isoformat(),
-                            "last_seen_on": None,
-                        },
-                        {
-                            "uuid": contact2.uuid,
-                            "name": "Bob",
-                            "primary_urn": "+1 630-333-3333",
-                            "fields": {"age": "33"},
-                            "created_on": contact2.created_on.isoformat(),
-                            "last_seen_on": None,
-                        },
-                    ],
-                    "fields": [{"key": "age", "name": "Age"}],
                     "warnings": [],
                     "blockers": [],
                 },
@@ -2609,14 +2469,12 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
                 content_type="application/json",
             )
             self.assertEqual(400, response.status_code)
-            self.assertEqual(
-                {"query": "", "total": 0, "sample": [], "error": "Invalid query syntax at '((('"}, response.json()
-            )
+            self.assertEqual({"query": "", "total": 0, "error": "Invalid query syntax at '((('"}, response.json())
 
             # suspended orgs should block
             self.org.is_suspended = True
             self.org.save()
-            mr_mocks.flow_preview_start(query="age > 30", total=2, sample=[contact1, contact2])
+            mr_mocks.flow_preview_start(query="age > 30", total=2)
             response = self.client.post(preview_url, {"query": "age > 30"}, content_type="application/json")
             self.assertEqual(
                 [
@@ -2629,7 +2487,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
             self.org.is_suspended = False
             self.org.is_flagged = True
             self.org.save()
-            mr_mocks.flow_preview_start(query="age > 30", total=2, sample=[contact1, contact2])
+            mr_mocks.flow_preview_start(query="age > 30", total=2)
             response = self.client.post(preview_url, {"query": "age > 30"}, content_type="application/json")
             self.assertEqual(
                 [
@@ -2643,11 +2501,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
             # trying to start again should fail because there is already a pending start for this flow
             mock_flow_is_starting.return_value = True
-            mr_mocks.flow_preview_start(
-                query='age > 30 AND status = "active" AND history != "Test Flow"',
-                total=100,
-                sample=[contact1, contact2],
-            )
+            mr_mocks.flow_preview_start(query='age > 30 AND status = "active" AND history != "Test Flow"', total=100)
 
             response = self.client.post(
                 preview_url,
@@ -2671,11 +2525,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
             # shouldn't be able to since we don't have a call channel
             mock_flow_is_starting.return_value = False
-            mr_mocks.flow_preview_start(
-                query='age > 30 AND status = "active" AND history != "Test Flow"',
-                total=100,
-                sample=[contact1, contact2],
-            )
+            mr_mocks.flow_preview_start(query='age > 30 AND status = "active" AND history != "Test Flow"', total=100)
 
             response = self.client.post(
                 preview_url,
@@ -2693,11 +2543,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
             # check warning for lots of contacts
             preview_url = reverse("flows.flow_preview_start", args=[flow.id])
-            mr_mocks.flow_preview_start(
-                query='age > 30 AND status = "active" AND history != "Test Flow"',
-                total=10000,
-                sample=[contact1, contact2],
-            )
+            mr_mocks.flow_preview_start(query='age > 30 AND status = "active" AND history != "Test Flow"', total=10000)
 
             response = self.client.post(
                 preview_url,
@@ -2715,11 +2561,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
             # if we release our send channel we also can't start a regular messaging flow
             self.channel.release(self.admin)
-            mr_mocks.flow_preview_start(
-                query='age > 30 AND status = "active" AND history != "Test Flow"',
-                total=100,
-                sample=[contact1, contact2],
-            )
+            mr_mocks.flow_preview_start(query='age > 30 AND status = "active" AND history != "Test Flow"', total=100)
 
             response = self.client.post(
                 preview_url,
@@ -2742,7 +2584,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
         self.login(self.admin)
 
-        mr_mocks.flow_preview_start(query="age > 30", total=2, sample=[])
+        mr_mocks.flow_preview_start(query="age > 30", total=2)
         response = self.client.post(
             reverse("flows.flow_preview_start", args=[no_topic.id]),
             {
@@ -2759,7 +2601,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         self.channel.save()
 
         # should see a warning for no topic now
-        mr_mocks.flow_preview_start(query="age > 30", total=2, sample=[])
+        mr_mocks.flow_preview_start(query="age > 30", total=2)
         response = self.client.post(
             reverse("flows.flow_preview_start", args=[no_topic.id]),
             {
@@ -2774,7 +2616,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         )
 
         # warning shouldn't be present for flow with a topic
-        mr_mocks.flow_preview_start(query="age > 30", total=2, sample=[])
+        mr_mocks.flow_preview_start(query="age > 30", total=2)
         response = self.client.post(
             reverse("flows.flow_preview_start", args=[with_topic.id]),
             {
@@ -2793,7 +2635,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         # bring up broadcast dialog
         self.login(self.admin)
 
-        mr_mocks.flow_preview_start(query="age > 30", total=2, sample=[])
+        mr_mocks.flow_preview_start(query="age > 30", total=2)
         response = self.client.post(
             reverse("flows.flow_preview_start", args=[flow.id]),
             {
@@ -2810,7 +2652,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         self.channel.channel_type = "TWA"
         self.channel.save()
 
-        mr_mocks.flow_preview_start(query="age > 30", total=2, sample=[])
+        mr_mocks.flow_preview_start(query="age > 30", total=2)
         response = self.client.post(
             reverse("flows.flow_preview_start", args=[flow.id]),
             {
@@ -2830,7 +2672,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         flow.metadata = {}
         flow.save(update_fields=["metadata"])
 
-        mr_mocks.flow_preview_start(query="age > 30", total=2, sample=[])
+        mr_mocks.flow_preview_start(query="age > 30", total=2)
         response = self.client.post(
             reverse("flows.flow_preview_start", args=[flow.id]),
             {
@@ -2851,7 +2693,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         flow.save(update_fields=["metadata"])
 
         # template doesn't exit, will be warned
-        mr_mocks.flow_preview_start(query="age > 30", total=2, sample=[])
+        mr_mocks.flow_preview_start(query="age > 30", total=2)
         response = self.client.post(
             reverse("flows.flow_preview_start", args=[flow.id]),
             {
@@ -2869,7 +2711,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         Template.objects.create(org=self.org, name="affirmation", uuid="f712e05c-bbed-40f1-b3d9-671bb9b60775")
 
         # will be warned again
-        mr_mocks.flow_preview_start(query="age > 30", total=2, sample=[])
+        mr_mocks.flow_preview_start(query="age > 30", total=2)
         response = self.client.post(
             reverse("flows.flow_preview_start", args=[flow.id]),
             {
@@ -2896,7 +2738,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         )
 
         # will be warned again
-        mr_mocks.flow_preview_start(query="age > 30", total=2, sample=[])
+        mr_mocks.flow_preview_start(query="age > 30", total=2)
         response = self.client.post(
             reverse("flows.flow_preview_start", args=[flow.id]),
             {
@@ -2913,7 +2755,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         TemplateTranslation.objects.update(status=TemplateTranslation.STATUS_APPROVED)
 
         # no warnings
-        mr_mocks.flow_preview_start(query="age > 30", total=2, sample=[])
+        mr_mocks.flow_preview_start(query="age > 30", total=2)
         response = self.client.post(
             reverse("flows.flow_preview_start", args=[flow.id]),
             {
@@ -2928,34 +2770,27 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
     def test_broadcast(self, mr_mocks):
         contact = self.create_contact("Bob", phone="+593979099111")
         flow = self.create_flow("Test")
-
-        broadcast_url = reverse("flows.flow_broadcast", args=[])
+        start_url = f"{reverse('flows.flow_start', args=[])}?flow={flow.id}"
 
         self.assertUpdateFetch(
-            broadcast_url,
+            start_url,
             allow_viewers=False,
             allow_editors=True,
             allow_org2=True,
-            form_fields=["query", "flow", "recipients"],
+            form_fields=["flow", "contact_search"],
         )
-
-        # fetch the broadcast with flow prepopulated
-        response = self.client.get(f"{broadcast_url}?flow={flow.id}")
-        self.assertContains(response, flow.name)
 
         # create flow start with a query
         mr_mocks.parse_query("frank", cleaned='name ~ "frank"')
-
         self.assertUpdateSubmit(
-            broadcast_url,
-            {"flow": flow.id, "query": "frank"},
+            start_url,
+            {"flow": flow.id, "contact_search": get_contact_search(query="frank")},
         )
 
         start = FlowStart.objects.get()
         self.assertEqual(flow, start.flow)
         self.assertEqual(FlowStart.STATUS_PENDING, start.status)
-        self.assertTrue(start.restart_participants)
-        self.assertTrue(start.include_active)
+        self.assertEqual({}, start.exclusions)
         self.assertEqual('name ~ "frank"', start.query)
 
         self.assertEqual(1, len(mr_mocks.queued_batch_tasks))
@@ -2965,19 +2800,26 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # create flow start with a bogus query
         mr_mocks.error("query contains an error")
-
         self.assertUpdateSubmit(
-            broadcast_url,
-            {"flow": flow.id, "query": 'name = "frank'},
-            form_errors={"query": "query contains an error"},
+            start_url,
+            {"flow": flow.id, "contact_search": get_contact_search(query='name = "frank')},
+            form_errors={"contact_search": "query contains an error"},
+            object_unchanged=flow,
+        )
+
+        # try missing contacts
+        self.assertUpdateSubmit(
+            start_url,
+            {"flow": flow.id, "contact_search": get_contact_search(contacts=[])},
+            form_errors={"contact_search": "Contacts or groups are required."},
             object_unchanged=flow,
         )
 
         # try to create with an empty query
         self.assertUpdateSubmit(
-            broadcast_url,
-            {"flow": flow.id, "query": ""},
-            form_errors={"query": "This field is required."},
+            start_url,
+            {"flow": flow.id, "contact_search": get_contact_search(query="")},
+            form_errors={"contact_search": "A contact query is required."},
             object_unchanged=flow,
         )
 
@@ -2986,8 +2828,8 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # create flow start with exclude_in_other and exclude_reruns both left unchecked
         self.assertUpdateSubmit(
-            broadcast_url,
-            {"flow": flow.id, "query": query},
+            start_url,
+            {"flow": flow.id, "contact_search": get_contact_search(query=query)},
         )
 
         start = FlowStart.objects.get()
@@ -2996,8 +2838,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual(flow, start.flow)
         self.assertEqual(FlowStart.TYPE_MANUAL, start.start_type)
         self.assertEqual(FlowStart.STATUS_PENDING, start.status)
-        self.assertTrue(start.restart_participants)
-        self.assertTrue(start.include_active)
+        self.assertEqual({}, start.exclusions)
 
         self.assertEqual(2, len(mr_mocks.queued_batch_tasks))
         self.assertEqual("start_flow", mr_mocks.queued_batch_tasks[1]["type"])
@@ -3011,14 +2852,13 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         # create flow start with a query
         mr_mocks.parse_query("frank", cleaned='name ~ "frank"')
 
-        broadcast_url = reverse("flows.flow_broadcast", args=[])
-        self.assertUpdateSubmit(broadcast_url, {"flow": flow.id, "query": "frank"})
+        start_url = f"{reverse('flows.flow_start', args=[])}?flow={flow.id}"
+        self.assertUpdateSubmit(start_url, {"flow": flow.id, "contact_search": get_contact_search(query="frank")})
 
         start = FlowStart.objects.get()
         self.assertEqual(flow, start.flow)
         self.assertEqual(FlowStart.STATUS_PENDING, start.status)
-        self.assertTrue(start.restart_participants)  # should default to true
-        self.assertTrue(start.include_active)
+        self.assertEqual({}, start.exclusions)
         self.assertEqual('name ~ "frank"', start.query)
 
     def test_copy_view(self):
@@ -3138,162 +2978,85 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
         self.login(self.admin)
 
-        with patch("temba.flows.views.FlowCRUDL.RunTable.paginate_by", 1):
-            response = self.client.get(reverse("flows.flow_results", args=[flow.uuid]))
+        response = self.client.get(reverse("flows.flow_results", args=[flow.uuid]))
+        self.assertEqual(200, response.status_code)
 
-            # the rulesets should be present as column headers
-            self.assertContains(response, "Beer")
-            self.assertContains(response, "Color")
-            self.assertContains(response, "Name")
+        # fetch counts endpoint, should have 2 color results (one is a test contact)
+        response = self.client.get(reverse("flows.flow_category_counts", args=[flow.uuid]))
+        counts = response.json()["counts"]
+        self.assertEqual("Color", counts[0]["name"])
+        self.assertEqual(2, counts[0]["total"])
 
-            # fetch counts endpoint, should have 2 color results (one is a test contact)
-            response = self.client.get(reverse("flows.flow_category_counts", args=[flow.uuid]))
-            counts = response.json()["counts"]
-            self.assertEqual("Color", counts[0]["name"])
-            self.assertEqual(2, counts[0]["total"])
+        FlowCRUDL.ActivityChart.HISTOGRAM_MIN = 0
+        FlowCRUDL.ActivityChart.PERIOD_MIN = 0
 
-            # fetch our intercooler rows for the run table
-            response = self.client.get(reverse("flows.flow_run_table", args=[flow.id]))
-            self.assertEqual(len(response.context["runs"]), 1)
-            self.assertEqual(200, response.status_code)
-            self.assertContains(response, "Jimmy")
-            self.assertContains(response, "red")
-            self.assertContains(response, "Red")
-            self.assertContains(response, "turbo")
-            self.assertContains(response, "Turbo King")
-            self.assertNotContains(response, "skol")
+        # and some charts
+        response = self.client.get(reverse("flows.flow_activity_data", args=[flow.id]))
+        data = response.json()
 
-            # one more row to add
-            self.assertEqual(1, len(response.context["runs"]))
-            # self.assertNotContains(response, "ic-append-from")
+        # we have two waiting runs, one failed run
+        self.assertEqual(data["summary"]["failed"], 1)
+        self.assertEqual(data["summary"]["active"], 0)
+        self.assertEqual(data["summary"]["waiting"], 2)
+        self.assertEqual(data["summary"]["completed"], 0)
+        self.assertEqual(data["summary"]["expired"], 0)
+        self.assertEqual(data["summary"]["interrupted"], 0)
+        self.assertEqual(data["summary"]["title"], "3 Responses")
 
-            next_link = re.search('ic-append-from="(.*)" ic-trigger-on', force_str(response.content)).group(1)
-            response = self.client.get(next_link)
-            self.assertEqual(200, response.status_code)
+        # now complete the flow for Pete
+        (
+            pete_session.resume(msg=self.create_incoming_msg(pete, "primus"))
+            .set_result("Beer", "primus", "Primus", "primus")
+            .visit(name_prompt)
+            .send_msg("Mmmmm... delicious Primus. Lastly, what is your name?")
+            .visit(name_split)
+            .wait()
+            .resume(msg=self.create_incoming_msg(pete, "Pete"))
+            .visit(end_prompt)
+            .complete()
+            .save()
+        )
 
-            FlowCRUDL.ActivityChart.HISTOGRAM_MIN = 0
-            FlowCRUDL.ActivityChart.PERIOD_MIN = 0
+        # now only one waiting, one completed, one failed and 5 total responses
+        response = self.client.get(reverse("flows.flow_activity_data", args=[flow.id]))
+        data = response.json()
 
-            # and some charts
-            response = self.client.get(reverse("flows.flow_activity_chart", args=[flow.id]))
+        self.assertEqual(data["summary"]["failed"], 1)
+        self.assertEqual(data["summary"]["active"], 0)
+        self.assertEqual(data["summary"]["waiting"], 1)
+        self.assertEqual(data["summary"]["completed"], 1)
+        self.assertEqual(data["summary"]["expired"], 0)
+        self.assertEqual(data["summary"]["interrupted"], 0)
+        self.assertEqual(data["summary"]["title"], "5 Responses")
 
-            # we have two waiting runs, one failed run
-            self.assertEqual(response.context["failed"], 1)
-            self.assertEqual(response.context["active"], 0)
-            self.assertEqual(response.context["waiting"], 2)
-            self.assertEqual(response.context["completed"], 0)
-            self.assertEqual(response.context["expired"], 0)
-            self.assertEqual(response.context["interrupted"], 0)
-            self.assertContains(response, "3 Responses")
+        # they all happened on the same day
+        response = self.client.get(reverse("flows.flow_activity_data", args=[flow.id]))
+        data = response.json()
+        points = data["histogram"]
+        self.assertEqual(1, len(points))
 
-            # now complete the flow for Pete
-            (
-                pete_session.resume(msg=self.create_incoming_msg(pete, "primus"))
-                .set_result("Beer", "primus", "Primus", "primus")
-                .visit(name_prompt)
-                .send_msg("Mmmmm... delicious Primus. Lastly, what is your name?")
-                .visit(name_split)
-                .wait()
-                .resume(msg=self.create_incoming_msg(pete, "Pete"))
-                .visit(end_prompt)
-                .complete()
-                .save()
-            )
+        # put one of our counts way in the past so we get a different histogram scale
+        count = FlowPathCount.objects.filter(flow=flow).order_by("id")[1]
+        count.period = count.period - timedelta(days=25)
+        count.save()
 
-            response = self.client.get(reverse("flows.flow_run_table", args=[flow.id]))
-            self.assertEqual(len(response.context["runs"]), 1)
-            self.assertEqual(200, response.status_code)
-            self.assertContains(response, "Pete")
-            self.assertNotContains(response, "Jimmy")
+        response = self.client.get(reverse("flows.flow_activity_data", args=[flow.id]))
+        data = response.json()
+        points = data["histogram"]
+        self.assertTrue(timedelta(days=24).total_seconds() * 1000 < (points[1][0] - points[0][0]))
 
-            # one more row to add
-            self.assertEqual(1, len(response.context["runs"]))
+        # pick another scale
+        count.period = count.period - timedelta(days=600)
+        count.save()
+        response = self.client.get(reverse("flows.flow_activity_data", args=[flow.id]))
 
-            next_link = re.search('ic-append-from="(.*)" ic-trigger-on', force_str(response.content)).group(1)
-            response = self.client.get(next_link)
-            self.assertEqual(200, response.status_code)
-            self.assertEqual(1, len(response.context["runs"]))
-            self.assertContains(response, "Jimmy")
+        # this should give us a more compressed histogram
+        data = response.json()
+        points = data["histogram"]
+        self.assertTrue(timedelta(days=620).total_seconds() * 1000 < (points[1][0] - points[0][0]))
 
-            # now only one waiting, one completed, one failed and 5 total responses
-            response = self.client.get(reverse("flows.flow_activity_chart", args=[flow.id]))
-
-            self.assertEqual(response.context["failed"], 1)
-            self.assertEqual(response.context["active"], 0)
-            self.assertEqual(response.context["waiting"], 1)
-            self.assertEqual(response.context["completed"], 1)
-            self.assertEqual(response.context["expired"], 0)
-            self.assertEqual(response.context["interrupted"], 0)
-            self.assertContains(response, "5 Responses")
-
-            # they all happened on the same day
-            response = self.client.get(reverse("flows.flow_activity_chart", args=[flow.id]))
-            points = response.context["histogram"]
-            self.assertEqual(1, len(points))
-
-            # put one of our counts way in the past so we get a different histogram scale
-            count = FlowPathCount.objects.filter(flow=flow).order_by("id")[1]
-            count.period = count.period - timedelta(days=25)
-            count.save()
-            response = self.client.get(reverse("flows.flow_activity_chart", args=[flow.id]))
-            points = response.context["histogram"]
-            self.assertTrue(timedelta(days=24) < (points[1]["bucket"] - points[0]["bucket"]))
-
-            # pick another scale
-            count.period = count.period - timedelta(days=600)
-            count.save()
-            response = self.client.get(reverse("flows.flow_activity_chart", args=[flow.id]))
-
-            # this should give us a more compressed histogram
-            points = response.context["histogram"]
-            self.assertTrue(timedelta(days=620) < (points[1]["bucket"] - points[0]["bucket"]))
-
-            self.assertEqual(24, len(response.context["hod"]))
-            self.assertEqual(7, len(response.context["dow"]))
-
-        # delete a run
-        with patch("temba.flows.views.FlowCRUDL.RunTable.paginate_by", 100):
-            response = self.client.get(reverse("flows.flow_run_table", args=[flow.id]))
-            self.assertEqual(len(response.context["runs"]), 2)
-
-            self.client.post(reverse("flows.flowrun_delete", args=[response.context["runs"][0].id]))
-            response = self.client.get(reverse("flows.flow_run_table", args=[flow.id]))
-            self.assertEqual(len(response.context["runs"]), 1)
-
-        with patch("temba.flows.views.FlowCRUDL.RunTable.paginate_by", 1):
-            # create one empty run
-            FlowRun.objects.create(
-                org=self.org,
-                flow=flow,
-                contact=pete,
-                responded=True,
-                status=FlowRun.STATUS_COMPLETED,
-                exited_on=timezone.now(),
-            )
-
-            # fetch our intercooler rows for the run table
-            response = self.client.get(reverse("flows.flow_run_table", args=[flow.id]))
-            self.assertEqual(len(response.context["runs"]), 1)
-            self.assertEqual(200, response.status_code)
-
-        with patch("temba.flows.views.FlowCRUDL.RunTable.paginate_by", 1):
-            # create one empty run
-            FlowRun.objects.create(
-                org=self.org,
-                flow=flow,
-                contact=pete,
-                responded=False,
-                status=FlowRun.STATUS_COMPLETED,
-                exited_on=timezone.now(),
-            )
-
-            # fetch our intercooler rows for the run table
-            response = self.client.get("%s?responded=bla" % reverse("flows.flow_run_table", args=[flow.id]))
-            self.assertEqual(len(response.context["runs"]), 1)
-            self.assertEqual(200, response.status_code)
-
-            response = self.client.get("%s?responded=true" % reverse("flows.flow_run_table", args=[flow.id]))
-            self.assertEqual(len(response.context["runs"]), 1)
+        self.assertEqual(24, len(data["hod"]))
+        self.assertEqual(7, len(data["dow"]))
 
     def test_activity(self):
         flow = self.get_flow("favorites_v13")
@@ -3342,15 +3105,6 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
         self.login(self.admin)
         response = self.client.get(reverse("flows.flow_activity_chart", args=[flow.id]))
-
-        self.assertEqual(404, response.status_code)
-
-    def test_run_table_of_inactive_flow(self):
-        flow = self.get_flow("favorites")
-        flow.release(self.admin)
-
-        self.login(self.admin)
-        response = self.client.get(reverse("flows.flow_run_table", args=[flow.id]))
 
         self.assertEqual(404, response.status_code)
 
@@ -3975,7 +3729,83 @@ class FlowRunTest(TembaTest):
         )
 
 
+class FlowRunCRUDLTest(TembaTest, CRUDLTestMixin):
+    def test_delete(self):
+        contact = self.create_contact("Ann", phone="+1234567890")
+        flow = self.create_flow("Test")
+
+        run1 = FlowRun.objects.create(
+            uuid=uuid4(),
+            org=self.org,
+            flow=flow,
+            contact=contact,
+            status=FlowRun.STATUS_COMPLETED,
+            created_on=timezone.now(),
+            modified_on=timezone.now(),
+            exited_on=timezone.now(),
+        )
+        run2 = FlowRun.objects.create(
+            uuid=uuid4(),
+            org=self.org,
+            flow=flow,
+            contact=contact,
+            status=FlowRun.STATUS_COMPLETED,
+            created_on=timezone.now(),
+            modified_on=timezone.now(),
+            exited_on=timezone.now(),
+        )
+
+        delete_url = reverse("flows.flowrun_delete", args=[run1.id])
+
+        self.assertDeleteSubmit(delete_url, object_deleted=run1, success_status=200)
+
+        self.assertFalse(FlowRun.objects.filter(id=run1.id).exists())
+        self.assertTrue(FlowRun.objects.filter(id=run2.id).exists())  # unchanged
+
+
 class FlowSessionTest(TembaTest):
+    @mock_mailroom
+    def test_interrupt(self, mr_mocks):
+        contact = self.create_contact("Ben Haggerty", phone="+250788123123")
+
+        def create_session(org, created_on: datetime):
+            return FlowSession.objects.create(
+                uuid=uuid4(),
+                org=org,
+                contact=contact,
+                created_on=created_on,
+                output_url="http://sessions.com/123.json",
+                status=FlowSession.STATUS_WAITING,
+                wait_started_on=timezone.now(),
+                wait_expires_on=timezone.now() + timedelta(days=7),
+                wait_resume_on_expire=False,
+            )
+
+        create_session(self.org, timezone.now() - timedelta(days=89))
+        session2 = create_session(self.org, timezone.now() - timedelta(days=91))
+        session3 = create_session(self.org, timezone.now() - timedelta(days=92))
+        session4 = create_session(self.org2, timezone.now() - timedelta(days=92))
+
+        interrupt_flow_sessions()
+
+        self.assertEqual(
+            [
+                {
+                    "type": "interrupt_sessions",
+                    "org_id": self.org.id,
+                    "queued_on": matchers.Datetime(),
+                    "task": {"session_ids": [session2.id, session3.id]},
+                },
+                {
+                    "type": "interrupt_sessions",
+                    "org_id": self.org2.id,
+                    "queued_on": matchers.Datetime(),
+                    "task": {"session_ids": [session4.id]},
+                },
+            ],
+            mr_mocks.queued_batch_tasks,
+        )
+
     def test_trim(self):
         contact = self.create_contact("Ben Haggerty", phone="+250788123123")
         flow = self.get_flow("color")
@@ -4064,78 +3894,6 @@ class FlowSessionTest(TembaTest):
 
         # only sessions for run2 and run3 are left
         self.assertEqual(FlowSession.objects.count(), 2)
-
-
-class FlowStartTest(TembaTest):
-    def test_trim(self):
-        contact = self.create_contact("Ben Haggerty", phone="+250788123123")
-        group = self.create_group("Testers", contacts=[contact])
-        flow = self.get_flow("color")
-
-        def create_start(user, start_type, status, modified_on, **kwargs):
-            start = FlowStart.create(flow, user, start_type, **kwargs)
-            start.status = status
-            start.modified_on = modified_on
-            start.save(update_fields=("status", "modified_on"))
-
-            session = FlowSession.objects.create(
-                uuid=uuid4(),
-                org=self.org,
-                contact=contact,
-                output_url="http://sessions.com/123.json",
-                status=FlowSession.STATUS_WAITING,
-                wait_started_on=timezone.now(),
-                wait_expires_on=timezone.now() + timedelta(days=7),
-                wait_resume_on_expire=False,
-            )
-            FlowRun.objects.create(
-                org=self.org, contact=contact, flow=flow, session=session, start=start, status=FlowRun.STATUS_WAITING
-            )
-
-            FlowStartCount.objects.create(start=start, count=1, is_squashed=False)
-
-        date1 = timezone.now() - timedelta(days=8)
-        date2 = timezone.now()
-
-        # some starts that won't be deleted because they are user created
-        create_start(self.admin, FlowStart.TYPE_API, FlowStart.STATUS_COMPLETE, date1, contacts=[contact])
-        create_start(self.admin, FlowStart.TYPE_MANUAL, FlowStart.STATUS_COMPLETE, date1, groups=[group])
-        create_start(self.admin, FlowStart.TYPE_MANUAL, FlowStart.STATUS_FAILED, date1, query="name ~ Ben")
-
-        # some starts that are mailroom created and will be deleted
-        create_start(None, FlowStart.TYPE_FLOW_ACTION, FlowStart.STATUS_COMPLETE, date1, contacts=[contact])
-        create_start(None, FlowStart.TYPE_TRIGGER, FlowStart.STATUS_FAILED, date1, groups=[group])
-
-        # some starts that are mailroom created but not completed so won't be deleted
-        create_start(None, FlowStart.TYPE_FLOW_ACTION, FlowStart.STATUS_STARTING, date1, contacts=[contact])
-        create_start(None, FlowStart.TYPE_TRIGGER, FlowStart.STATUS_PENDING, date1, groups=[group])
-        create_start(None, FlowStart.TYPE_TRIGGER, FlowStart.STATUS_PENDING, date1, groups=[group])
-
-        # some starts that are mailroom created but too new so won't be deleted
-        create_start(None, FlowStart.TYPE_FLOW_ACTION, FlowStart.STATUS_COMPLETE, date2, contacts=[contact])
-        create_start(None, FlowStart.TYPE_TRIGGER, FlowStart.STATUS_FAILED, date2, groups=[group])
-
-        trim_flow_starts()
-
-        # check that related objects still exist!
-        contact.refresh_from_db()
-        group.refresh_from_db()
-        flow.refresh_from_db()
-
-        # check user created starts still exist
-        self.assertEqual(3, FlowStart.objects.filter(created_by=self.admin).count())
-
-        # 5 mailroom created starts remain
-        self.assertEqual(5, FlowStart.objects.filter(created_by=None).count())
-
-        # only runs from our remaining starts still have start ids
-        self.assertEqual(8, FlowRun.objects.exclude(start=None).count())
-
-        # the 3 that aren't complete...
-        self.assertEqual(3, FlowStart.objects.filter(created_by=None).exclude(status="C").exclude(status="F").count())
-
-        # and the 2 that are too new
-        self.assertEqual(2, FlowStart.objects.filter(created_by=None, modified_on=date2).count())
 
 
 class ExportFlowResultsTest(TembaTest):
@@ -4329,11 +4087,11 @@ class ExportFlowResultsTest(TembaTest):
 
         # try to submit with start date in future
         response = self.client.post(export_url, {"start_date": "2200-01-01", "end_date": "2022-09-28"})
-        self.assertFormError(response, "form", "__all__", "Start date can't be in the future.")
+        self.assertFormError(response, "form", None, "Start date can't be in the future.")
 
         # try to submit with start date > end date
         response = self.client.post(export_url, {"start_date": "2022-09-01", "end_date": "2022-03-01"})
-        self.assertFormError(response, "form", "__all__", "End date can't be before start date.")
+        self.assertFormError(response, "form", None, "End date can't be before start date.")
 
         with self.assertNumQueries(44):
             workbook = self._export(
@@ -5535,7 +5293,7 @@ class SimulationTest(TembaTest):
         replies = []
         for event in response.get("events", []):
             if event["type"] == "broadcast_created":
-                replies.append(event["text"])
+                replies.append(event["translations"][event["base_language"]]["text"])
             elif event["type"] == "msg_created":
                 replies.append(event["msg"]["text"])
         return replies
@@ -5659,7 +5417,7 @@ class FlowSessionCRUDLTest(TembaTest):
         self.assertLoginRedirect(response)
 
         # but logged in as a CS rep we can
-        self.login(self.customer_support)
+        self.login(self.customer_support, choose_org=self.org)
 
         response = self.client.get(url)
         self.assertEqual(200, response.status_code)
@@ -5685,6 +5443,26 @@ class FlowSessionCRUDLTest(TembaTest):
             self.assertEqual(session.uuid, response_json["uuid"])
 
 
+class FlowStartTest(TembaTest):
+    @mock_mailroom
+    def test_preview(self, mr_mocks):
+        flow = self.create_flow("Test")
+        contact1 = self.create_contact("Ann", phone="+1234567111")
+        contact2 = self.create_contact("Bob", phone="+1234567222")
+        doctors = self.create_group("Doctors", contacts=[contact1, contact2])
+
+        mr_mocks.flow_preview_start(query='group = "Doctors" AND status = "active"', total=100)
+
+        query, total = FlowStart.preview(
+            flow,
+            include=mailroom.Inclusions(group_uuids=[str(doctors.uuid)]),
+            exclude=mailroom.Exclusions(non_active=True),
+        )
+
+        self.assertEqual('group = "Doctors" AND status = "active"', query)
+        self.assertEqual(100, total)
+
+
 class FlowStartCRUDLTest(TembaTest, CRUDLTestMixin):
     def test_list(self):
         list_url = reverse("flows.flowstart_list")
@@ -5693,8 +5471,10 @@ class FlowStartCRUDLTest(TembaTest, CRUDLTestMixin):
         contact = self.create_contact("Bob", phone="+1234567890")
         group = self.create_group("Testers", contacts=[contact])
         start1 = FlowStart.create(flow, self.admin, contacts=[contact])
-        start2 = FlowStart.create(flow, self.admin, query="name ~ Bob", restart_participants=False, start_type="A")
-        start3 = FlowStart.create(flow, self.admin, groups=[group], include_active=False, start_type="Z")
+        start2 = FlowStart.create(
+            flow, self.admin, query="name ~ Bob", start_type="A", exclusions={"started_previously": True}
+        )
+        start3 = FlowStart.create(flow, self.admin, groups=[group], start_type="Z", exclusions={"in_a_flow": True})
 
         FlowStartCount.objects.create(start=start3, count=1000)
         FlowStartCount.objects.create(start=start3, count=234)
@@ -5706,11 +5486,10 @@ class FlowStartCRUDLTest(TembaTest, CRUDLTestMixin):
             list_url, allow_viewers=True, allow_editors=True, context_objects=[start3, start2, start1]
         )
 
-        self.assertContains(response, "was started by admin@nyaruka.com for")
-        self.assertContains(response, "was started by an API call for")
-        self.assertContains(response, "was started by Zapier for")
-        self.assertContains(response, "all contacts")
-        self.assertContains(response, "contacts who haven't already been through this flow")
+        self.assertContains(response, "was started by admin@nyaruka.com")
+        self.assertContains(response, "was started by an API call")
+        self.assertContains(response, "was started by Zapier")
+        self.assertContains(response, "Skip contacts currently in a flow")
         self.assertContains(response, "<b>1,234</b> runs")
 
         response = self.assertListFetch(

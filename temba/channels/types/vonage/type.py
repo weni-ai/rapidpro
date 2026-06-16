@@ -1,11 +1,12 @@
 from django.urls import re_path
 from django.utils.translation import gettext_lazy as _
 
-from temba.channels.models import Channel, ChannelType
+from temba.channels.models import ChannelType
 from temba.contacts.models import URN
 from temba.utils.timezones import timezone_to_country_code
 
-from .views import ClaimView, SearchView, UpdateForm
+from .client import VonageClient
+from .views import ClaimView, Connect, SearchView, UpdateForm
 
 RECOMMENDED_COUNTRIES = {
     "US",
@@ -48,16 +49,23 @@ class VonageType(ChannelType):
         busy: The number being dialled was on another call
     """
 
+    SESSION_API_KEY = "VONAGE_API_KEY"
+    SESSION_API_SECRET = "VONAGE_API_SECRET"
+
+    CONFIG_API_KEY = "nexmo_api_key"
+    CONFIG_API_SECRET = "nexmo_api_secret"
+    CONFIG_APP_ID = "nexmo_app_id"
+    CONFIG_APP_PRIVATE_KEY = "nexmo_app_private_key"
+
     code = "NX"
     category = ChannelType.Category.PHONE
 
     courier_url = r"^nx/(?P<uuid>[a-z0-9\-]+)/(?P<action>status|receive)$"
 
     name = "Vonage"
-    icon = "icon-vonage"
 
     claim_blurb = _("Easily add a two way number you have configured with %(link)s using their APIs.") % {
-        "link": '<a href="https://www.vonage.com/">Vonage</a>'
+        "link": '<a target="_blank" href="https://www.vonage.com/">Vonage</a>'
     }
     claim_view = ClaimView
     update_form = UpdateForm
@@ -95,13 +103,19 @@ class VonageType(ChannelType):
         return timezone_to_country_code(org.timezone) in RECOMMENDED_COUNTRIES
 
     def deactivate(self, channel):
-        app_id = channel.config.get(Channel.CONFIG_VONAGE_APP_ID)
-        if app_id:
-            client = channel.org.get_vonage_client()
+        app_id = channel.config.get(self.CONFIG_APP_ID)
+        api_key = channel.config.get(self.CONFIG_API_KEY)
+        api_secret = channel.config.get(self.CONFIG_API_SECRET)
+        if api_key and api_secret and app_id:
+            client = VonageClient(api_key=api_key, api_secret=api_secret)
             client.delete_application(app_id)
 
     def get_urls(self):
-        return [self.get_claim_url(), re_path(r"^search$", SearchView.as_view(), name="search")]
+        return [
+            self.get_claim_url(),
+            re_path(r"^search$", SearchView.as_view(channel_type=self), name="search"),
+            re_path(r"^connect$", Connect.as_view(channel_type=self), name="connect"),
+        ]
 
     def get_error_ref_url(self, channel, code: str) -> str:
         if code.startswith("send:"):

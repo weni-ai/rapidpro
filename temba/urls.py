@@ -4,8 +4,9 @@ from django.conf.urls.static import static
 from django.urls import re_path
 from django.views.generic import RedirectView
 from django.views.i18n import JavaScriptCatalog
+from django.views.static import serve
 
-from temba.channels.views import register, sync
+from temba.channels.android.views import register, sync
 
 from .views import WeniRedirect
 
@@ -46,6 +47,8 @@ urlpatterns = [
 
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+else:
+    urlpatterns.append(re_path(r"^sitestatic/(?P<path>.*)$", serve, {"document_root": settings.STATIC_ROOT}))
 
 
 # import any additional urls

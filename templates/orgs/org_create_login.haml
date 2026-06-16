@@ -2,12 +2,21 @@
 -load smartmin
 -load i18n
 
--block title
-  {{title}}
+-block extra-style
+  {{block.super}}
+  :css
+    .content-card {
+      max-width: 600px !important;
+    }
+
+    .form-actions .button-light {
+      display: none;
+    }
 
 -block fields
+  arst
   .control-group
-    %temba-textinput#id_username(type="text" name="username" maxlenght="150" label="{% trans 'Email Address' %}" value="{{email}}" disabled)
+    %temba-textinput#id_username(type="text" name="username" maxlength="150" label="{% trans 'Email Address' %}" value="{{email}}" disabled)
 
   -render_field 'password'
 

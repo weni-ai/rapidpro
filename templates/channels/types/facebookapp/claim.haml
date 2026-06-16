@@ -6,7 +6,7 @@
     You can connect your Facebook page to {{name}} in just a few simple steps.
 
   -if claim_error
-    .alert-error.my-4
+    %temba-alert.my-4(level="error")
       {{ claim_error }}
 
 -block form
@@ -42,28 +42,22 @@
     %p(style="font-size:1rem;")
       -trans "Select the page you want to add as a channel:"
 
--block extra-less
-  -compress css inline
-    {% lessblock %}
-      :plain
-        #fb-channel-options {
-          margin-top: 2rem;
-
-          .fb-page-channel-option {
-            display: inline-block;
-            border: 3px solid #eee;
-            cursor: pointer;
-            text-align: center;
-            font-size: 1rem;
-
-            &:hover {
-              background-color: #eee;
-            }
-          }
-
-        }
-    {% endlessblock %}
-
+-block extra-style
+  {{block.super}}
+  :css
+    #fb-channel-options {
+      margin-top: 2rem;
+    }
+    #fb-channel-options .fb-page-channel-option {
+      display: inline-block;
+      border: 3px solid #eee;
+      cursor: pointer;
+      text-align: center;
+      font-size: 1rem;
+    }
+    #fb-channel-options .fb-page-channel-option:hover {
+      background-color: #eee;
+    }
 
 -block extra-script
   {{ block.super }}

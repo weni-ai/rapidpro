@@ -9,6 +9,7 @@ from django.http import HttpResponseRedirect, JsonResponse
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
+from temba.channels.views import ChannelTypeMixin
 from temba.orgs.views import ModalMixin, OrgObjPermsMixin, OrgPermsMixin
 from temba.utils.fields import InputWidget
 from temba.utils.text import truncate
@@ -31,10 +32,10 @@ class ClaimView(ClaimViewMixin, SmartFormView):
     form_class = Form
 
     def pre_process(self, request, *args, **kwargs):
-        oauth_user_token = self.request.session.get(Channel.CONFIG_WHATSAPP_CLOUD_USER_TOKEN, None)
+        oauth_user_token = self.request.session.get(self.channel_type.SESSION_USER_TOKEN, None)
         if not oauth_user_token:
             self.remove_token_credentials_from_session()
-            return HttpResponseRedirect(reverse("orgs.org_whatsapp_cloud_connect"))
+            return HttpResponseRedirect(reverse("channels.types.whatsapp_cloud.connect"))
 
         app_id = settings.WHATSAPP_APPLICATION_ID
         app_secret = settings.WHATSAPP_APPLICATION_SECRET
@@ -45,13 +46,13 @@ class ClaimView(ClaimViewMixin, SmartFormView):
         response = requests.get(url, params=params)
         if response.status_code != 200:  # pragma: no cover
             self.remove_token_credentials_from_session()
-            return HttpResponseRedirect(reverse("orgs.org_whatsapp_cloud_connect"))
+            return HttpResponseRedirect(reverse("channels.types.whatsapp_cloud.connect"))
 
         response_json = response.json()
         for perm in ["business_management", "whatsapp_business_management", "whatsapp_business_messaging"]:
             if perm not in response_json["data"]["scopes"]:
                 self.remove_token_credentials_from_session()
-                return HttpResponseRedirect(reverse("orgs.org_whatsapp_cloud_connect"))
+                return HttpResponseRedirect(reverse("channels.types.whatsapp_cloud.connect"))
 
         return super().pre_process(request, *args, **kwargs)
 
@@ -61,9 +62,9 @@ class ClaimView(ClaimViewMixin, SmartFormView):
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
 
-        oauth_user_token = self.request.session.get(Channel.CONFIG_WHATSAPP_CLOUD_USER_TOKEN, None)
-        app_id = settings.WHATSAPP_APPLICATION_ID
-        app_secret = settings.WHATSAPP_APPLICATION_SECRET
+        oauth_user_token = self.request.session.get(self.channel_type.SESSION_USER_TOKEN, None)
+        app_id = settings.FACEBOOK_APPLICATION_ID
+        app_secret = settings.FACEBOOK_APPLICATION_SECRET
 
         url = "https://graph.facebook.com/v18.0/debug_token"
         params = {"access_token": f"{app_id}|{app_secret}", "input_token": oauth_user_token}
@@ -99,8 +100,9 @@ class ClaimView(ClaimViewMixin, SmartFormView):
                 response_json = response.json()
 
                 target_waba_details = response_json
-
-                business_id = target_waba_details["on_behalf_of_business_info"]["id"]
+                business_id = target_waba_details.get(
+                    "on_behalf_of_business_info", target_waba_details.get("owner_business_info")
+                ).get("id")
 
                 url = f"https://graph.facebook.com/v18.0/{target_waba}/phone_numbers"
                 params = {"access_token": oauth_user_token}
@@ -125,9 +127,8 @@ class ClaimView(ClaimViewMixin, SmartFormView):
 
         context["claim_url"] = reverse("channels.types.whatsapp_cloud.claim")
         context["clear_session_token_url"] = reverse("channels.types.whatsapp_cloud.clear_session_token")
-        context["connect_whatsapp_url"] = reverse("orgs.org_whatsapp_cloud_connect")
-        context["whatsapp_app_id"] = settings.WHATSAPP_APPLICATION_ID
-        context["whatsapp_config_id"] = settings.WHATSAPP_CONFIGURATION_ID
+        context["connect_whatsapp_url"] = reverse("channels.types.whatsapp_cloud.connect")
+        context["facebook_app_id"] = settings.FACEBOOK_APPLICATION_ID
 
         claim_error = None
         if context["form"].errors:
@@ -167,23 +168,15 @@ class ClaimView(ClaimViewMixin, SmartFormView):
         }
 
         # don't add the same number twice to the same account
-        existing = org.channels.filter(
-            is_active=True, address=phone_number_id, schemes__overlap=list(self.channel_type.schemes)
-        ).first()
-        if existing:  # pragma: needs cover
-            form._errors["__all__"] = form.error_class([_("That number is already connected (%s)") % number])
-            return self.form_invalid(form)
-
         existing = Channel.objects.filter(
             is_active=True, address=phone_number_id, schemes__overlap=list(self.channel_type.schemes)
         ).first()
         if existing:  # pragma: needs cover
-            form._errors["__all__"] = form.error_class(
-                [
-                    _("That number is already connected to another account - %(org)s (%(user)s)")
-                    % dict(org=existing.org, user=existing.created_by.username)
-                ]
-            )
+            if existing.org == self.request.org:
+                form._errors["__all__"] = form.error_class([_("Number is already connected to this workspace")])
+                return self.form_invalid(form)
+
+            form._errors["__all__"] = form.error_class([_("Number is already connected to another workspace")])
             return self.form_invalid(form)
 
         # assign system user to WABA
@@ -223,22 +216,22 @@ class ClaimView(ClaimViewMixin, SmartFormView):
         return super().form_valid(form)
 
     def remove_token_credentials_from_session(self):
-        if Channel.CONFIG_WHATSAPP_CLOUD_USER_TOKEN in self.request.session:
-            del self.request.session[Channel.CONFIG_WHATSAPP_CLOUD_USER_TOKEN]
+        if self.channel_type.SESSION_USER_TOKEN in self.request.session:
+            del self.request.session[self.channel_type.SESSION_USER_TOKEN]
 
 
-class ClearSessionToken(OrgPermsMixin, SmartTemplateView):
+class ClearSessionToken(ChannelTypeMixin, OrgPermsMixin, SmartTemplateView):
     permission = "channels.channel_claim"
 
     def pre_process(self, request, *args, **kwargs):
-        if Channel.CONFIG_WHATSAPP_CLOUD_USER_TOKEN in self.request.session:
-            del self.request.session[Channel.CONFIG_WHATSAPP_CLOUD_USER_TOKEN]
+        if self.channel_type.SESSION_USER_TOKEN in self.request.session:
+            del self.request.session[self.channel_type.SESSION_USER_TOKEN]
 
     def render_to_response(self, context, **response_kwargs):
         return JsonResponse({})
 
 
-class RequestCode(ModalMixin, ContentMenuMixin, OrgObjPermsMixin, SmartModelActionView):
+class RequestCode(ChannelTypeMixin, ModalMixin, ContentMenuMixin, OrgObjPermsMixin, SmartModelActionView):
     class Form(forms.Form):
         pass
 
@@ -252,10 +245,13 @@ class RequestCode(ModalMixin, ContentMenuMixin, OrgObjPermsMixin, SmartModelActi
     submit_button_name = _("Request Code")
 
     def get_queryset(self):
-        return Channel.objects.filter(is_active=True, org=self.request.org, channel_type="WAC")
+        return Channel.objects.filter(is_active=True, org=self.request.org, channel_type=self.channel_type.code)
 
     def get_success_url(self):
         return reverse("channels.types.whatsapp_cloud.verify_code", args=[self.object.uuid])
+
+    def derive_menu_path(self):
+        return f"/settings/channels/{self.get_object().uuid}"
 
     def build_content_menu(self, menu):
         obj = self.get_object()
@@ -300,7 +296,7 @@ class RequestCode(ModalMixin, ContentMenuMixin, OrgObjPermsMixin, SmartModelActi
                 )
 
 
-class VerifyCode(ModalMixin, ContentMenuMixin, OrgObjPermsMixin, SmartModelActionView):
+class VerifyCode(ChannelTypeMixin, ModalMixin, ContentMenuMixin, OrgObjPermsMixin, SmartModelActionView):
     class Form(forms.Form):
         code = forms.CharField(
             min_length=6, required=True, help_text=_("The 6-digits number verification code"), widget=InputWidget()
@@ -321,10 +317,12 @@ class VerifyCode(ModalMixin, ContentMenuMixin, OrgObjPermsMixin, SmartModelActio
         menu.add_link(_("Channel"), reverse("channels.channel_read", args=[obj.uuid]))
 
     def get_queryset(self):
-        return Channel.objects.filter(is_active=True, org=self.request.org, channel_type="WAC")
+        return Channel.objects.filter(is_active=True, org=self.request.org, channel_type=self.channel_type.code)
+
+    def derive_menu_path(self):
+        return f"/settings/channels/{self.get_object().uuid}"
 
     def execute_action(self):
-
         form = self.form
         channel = self.object
 
@@ -352,6 +350,77 @@ class VerifyCode(ModalMixin, ContentMenuMixin, OrgObjPermsMixin, SmartModelActio
 
         if resp.status_code != 200:  # pragma: no cover
             raise forms.ValidationError(
-                _("Unable to register phone %s with ID %s from WABA with ID %s")
-                % (wa_number, channel.address, waba_id)
+                _("Unable to register phone %s with ID %s from WABA with ID %s") % (wa_number, channel.address, waba_id)
             )
+
+
+class Connect(ChannelTypeMixin, OrgPermsMixin, SmartFormView):
+    class WhatsappCloudConnectForm(forms.Form):
+        user_access_token = forms.CharField(min_length=32, required=True)
+
+        def clean(self):
+            try:
+                auth_token = self.cleaned_data.get("user_access_token", None)
+
+                app_id = settings.FACEBOOK_APPLICATION_ID
+                app_secret = settings.FACEBOOK_APPLICATION_SECRET
+
+                url = "https://graph.facebook.com/v13.0/debug_token"
+                params = {"access_token": f"{app_id}|{app_secret}", "input_token": auth_token}
+
+                response = requests.get(url, params=params)
+                if response.status_code != 200:  # pragma: no cover
+                    raise Exception("Failed to debug user token")
+
+                response_json = response.json()
+
+                for perm in ["business_management", "whatsapp_business_management", "whatsapp_business_messaging"]:
+                    if perm not in response_json.get("data", dict()).get("scopes", []):
+                        raise Exception(
+                            'Missing permission, we need all the following permissions "business_management", "whatsapp_business_management", "whatsapp_business_messaging"'
+                        )
+            except Exception:
+                raise forms.ValidationError(_("Sorry account could not be connected. Please try again"), code="invalid")
+
+            return self.cleaned_data
+
+    permission = "channels.types.whatsapp_cloud.connect"
+    form_class = WhatsappCloudConnectForm
+    success_url = "@channels.types.whatsapp_cloud.claim"
+    field_config = dict(api_key=dict(label=""), api_secret=dict(label=""))
+    submit_button_name = "Save"
+    success_message = "WhatsApp Account successfully connected."
+    template_name = "channels/types/whatsapp_cloud/connect.html"
+    menu_path = "/settings/workspace"
+    title = "Connect WhatsApp"
+
+    def has_org_perm(self, permission):
+        if self.org:
+            return self.get_user().is_beta  # only beta users are allowed
+        return False  # pragma: no cover
+
+    def pre_process(self, request, *args, **kwargs):
+        session_token = self.request.session.get(self.channel_type.SESSION_USER_TOKEN, None)
+        if session_token:
+            return HttpResponseRedirect(self.get_success_url())
+
+        return super().pre_process(request, *args, **kwargs)
+
+    def form_valid(self, form):
+        auth_token = form.cleaned_data["user_access_token"]
+
+        # add the credentials to the session
+        self.request.session[self.channel_type.SESSION_USER_TOKEN] = auth_token
+        return HttpResponseRedirect(self.get_success_url())
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["connect_url"] = reverse("channels.types.whatsapp_cloud.connect")
+        context["facebook_app_id"] = settings.FACEBOOK_APPLICATION_ID
+
+        claim_error = None
+        if context["form"].errors:
+            claim_error = context["form"].errors.get("__all__", [""])[0]
+        context["claim_error"] = claim_error
+
+        return context

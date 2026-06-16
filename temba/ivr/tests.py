@@ -4,9 +4,9 @@ from unittest.mock import patch
 from django.urls import reverse
 from django.utils import timezone
 
-from temba.channels.models import ChannelLog
 from temba.flows.models import FlowSession
-from temba.tests import TembaTest
+from temba.msgs.models import SystemLabel
+from temba.tests import CRUDLTestMixin, MigrationTest, TembaTest
 from temba.utils.uuid import uuid4
 
 from .models import Call
@@ -59,18 +59,53 @@ class CallTest(TembaTest):
             wait_resume_on_expire=False,
             ended_on=timezone.now(),
         )
-        ChannelLog.objects.create(
-            log_type=ChannelLog.LOG_TYPE_IVR_START, channel=self.channel, call=call, http_logs=[], errors=[]
-        )
-        ChannelLog.objects.create(
-            log_type=ChannelLog.LOG_TYPE_IVR_HANGUP, channel=self.channel, call=call, http_logs=[], errors=[]
-        )
 
         call.release()
 
         self.assertEqual(0, FlowSession.objects.count())
-        self.assertEqual(0, ChannelLog.objects.count())
         self.assertEqual(0, Call.objects.count())
+
+
+class CallCRUDLTest(CRUDLTestMixin, TembaTest):
+    def test_list(self):
+        list_url = reverse("ivr.call_list")
+
+        contact = self.create_contact("Bob", phone="+123456789")
+
+        call1 = Call.objects.create(
+            org=self.org,
+            channel=self.channel,
+            direction=Call.DIRECTION_IN,
+            contact=contact,
+            contact_urn=contact.get_urn(),
+            status=Call.STATUS_COMPLETED,
+            duration=15,
+        )
+        call2 = Call.objects.create(
+            org=self.org,
+            channel=self.channel,
+            direction=Call.DIRECTION_OUT,
+            contact=contact,
+            contact_urn=contact.get_urn(),
+            status=Call.STATUS_IN_PROGRESS,
+            duration=30,
+        )
+        Call.objects.create(
+            org=self.org2,
+            channel=self.channel,
+            direction=Call.DIRECTION_IN,
+            contact=contact,
+            contact_urn=contact.get_urn(),
+            status=Call.STATUS_IN_PROGRESS,
+            duration=15,
+        )
+
+        # check query count
+        self.login(self.admin)
+        with self.assertNumQueries(11):
+            self.client.get(list_url)
+
+        self.assertListFetch(list_url, allow_viewers=True, allow_editors=True, context_objects=[call2, call1])
 
 
 class IVRTest(TembaTest):
@@ -78,3 +113,73 @@ class IVRTest(TembaTest):
         response = self.client.get(reverse("mailroom.ivr_handler", args=[self.channel.uuid, "incoming"]))
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.content, b"this URL should be mapped to a Mailroom instance")
+
+
+class BackfillCallCountsTest(MigrationTest):
+    app = "ivr"
+    migrate_from = "0025_alter_call_org"
+    migrate_to = "0026_backfill_call_counts"
+
+    def setUpBeforeMigration(self, apps):
+        contact = self.create_contact("Bob", phone="+123456789")
+
+        self.create_incoming_msg(contact, "Hi")
+
+        Call.objects.create(
+            org=self.org,
+            channel=self.channel,
+            direction=Call.DIRECTION_IN,
+            contact=contact,
+            contact_urn=contact.get_urn(),
+            status=Call.STATUS_COMPLETED,
+            duration=15,
+        )
+        Call.objects.create(
+            org=self.org,
+            channel=self.channel,
+            direction=Call.DIRECTION_IN,
+            contact=contact,
+            contact_urn=contact.get_urn(),
+            status=Call.STATUS_IN_PROGRESS,
+            duration=15,
+        )
+
+        Call.objects.create(
+            org=self.org2,
+            channel=self.channel,
+            direction=Call.DIRECTION_IN,
+            contact=contact,
+            contact_urn=contact.get_urn(),
+            status=Call.STATUS_IN_PROGRESS,
+            duration=15,
+        )
+
+        self.org2.system_labels.all().delete()
+
+    def test_migration(self):
+        self.assertEqual(
+            {
+                SystemLabel.TYPE_INBOX: 1,
+                SystemLabel.TYPE_FLOWS: 0,
+                SystemLabel.TYPE_ARCHIVED: 0,
+                SystemLabel.TYPE_OUTBOX: 0,
+                SystemLabel.TYPE_SENT: 0,
+                SystemLabel.TYPE_FAILED: 0,
+                SystemLabel.TYPE_SCHEDULED: 0,
+                SystemLabel.TYPE_CALLS: 2,
+            },
+            SystemLabel.get_counts(self.org),
+        )
+        self.assertEqual(
+            {
+                SystemLabel.TYPE_INBOX: 0,
+                SystemLabel.TYPE_FLOWS: 0,
+                SystemLabel.TYPE_ARCHIVED: 0,
+                SystemLabel.TYPE_OUTBOX: 0,
+                SystemLabel.TYPE_SENT: 0,
+                SystemLabel.TYPE_FAILED: 0,
+                SystemLabel.TYPE_SCHEDULED: 0,
+                SystemLabel.TYPE_CALLS: 1,
+            },
+            SystemLabel.get_counts(self.org2),
+        )

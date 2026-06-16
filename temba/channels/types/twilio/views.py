@@ -1,23 +1,26 @@
+from typing import Any
+
 import phonenumbers
 from phonenumbers.phonenumberutil import region_code_for_number
 from smartmin.views import SmartFormView
 from twilio.base.exceptions import TwilioException, TwilioRestException
+from twilio.rest import Client as TwilioClient
 
 from django import forms
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.http import HttpResponseRedirect, JsonResponse
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
-from temba.orgs.models import Org
 from temba.orgs.views import OrgPermsMixin
 from temba.utils import countries
-from temba.utils.fields import SelectWidget
+from temba.utils.fields import InputWidget, SelectWidget
 from temba.utils.timezones import timezone_to_country_code
 from temba.utils.uuid import uuid4
 
 from ...models import Channel
-from ...views import ALL_COUNTRIES, BaseClaimNumberMixin, ClaimViewMixin
+from ...views import ALL_COUNTRIES, BaseClaimNumberMixin, ChannelTypeMixin, ClaimViewMixin, UpdateChannelForm
 
 SUPPORTED_COUNTRIES = {
     "AU",  # Australia
@@ -97,16 +100,17 @@ class ClaimView(BaseClaimNumberMixin, SmartFormView):
         self.client = None
 
     def pre_process(self, *args, **kwargs):
-        org = self.request.org
         try:
-            self.client = org.get_twilio_client()
+            self.client = self.get_twilio_client()
             if not self.client:
                 return HttpResponseRedirect(
-                    f'{reverse("orgs.org_twilio_connect")}?claim_type={self.channel_type.slug}'
+                    f'{reverse("channels.types.twilio.connect")}?claim_type={self.channel_type.slug}'
                 )
             self.account = self.client.api.account.fetch()
         except TwilioRestException:
-            return HttpResponseRedirect(f'{reverse("orgs.org_twilio_connect")}?claim_type={self.channel_type.slug}')
+            return HttpResponseRedirect(
+                f'{reverse("channels.types.twilio.connect")}?claim_type={self.channel_type.slug}'
+            )
 
     def get_search_countries_tuple(self):
         return SEARCH_COUNTRY_CHOICES
@@ -122,14 +126,27 @@ class ClaimView(BaseClaimNumberMixin, SmartFormView):
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        context["account_trial"] = self.account.type.lower() == "trial"
+        account_trial = False
+        if self.account:
+            account_trial = self.account.type.lower() == "trial"
+
+        context["account_trial"] = account_trial
+        context["current_creds_account"] = self.request.session.get(self.channel_type.SESSION_ACCOUNT_SID, None)
+
         return context
 
+    def get_twilio_client(self):
+        account_sid = self.request.session.get(self.channel_type.SESSION_ACCOUNT_SID, None)
+        account_token = self.request.session.get(self.channel_type.SESSION_AUTH_TOKEN, None)
+
+        if account_sid and account_token:
+            return TwilioClient(account_sid, account_token)
+        return None
+
     def get_existing_numbers(self, org):
-        client = org.get_twilio_client()
-        if client:
-            twilio_account_numbers = client.api.incoming_phone_numbers.stream(page_size=1000)
-            twilio_short_codes = client.api.short_codes.stream(page_size=1000)
+        client = self.get_twilio_client()
+        twilio_account_numbers = client.api.incoming_phone_numbers.stream(page_size=1000)
+        twilio_short_codes = client.api.short_codes.stream(page_size=1000)
 
         numbers = []
         for number in twilio_account_numbers:
@@ -155,8 +172,7 @@ class ClaimView(BaseClaimNumberMixin, SmartFormView):
 
     def claim_number(self, user, phone_number, country, role):
         org = self.request.org
-
-        client = org.get_twilio_client()
+        client = self.get_twilio_client()
         twilio_phones = client.api.incoming_phone_numbers.stream(phone_number=phone_number)
         channel_uuid = uuid4()
 
@@ -207,7 +223,6 @@ class ClaimView(BaseClaimNumberMixin, SmartFormView):
         else:
             twilio_phone = next(twilio_phones, None)
             if twilio_phone:
-
                 client.api.incoming_phone_numbers.get(twilio_phone.sid).update(
                     voice_application_sid=new_app.sid, sms_application_sid=new_app.sid
                 )
@@ -229,12 +244,11 @@ class ClaimView(BaseClaimNumberMixin, SmartFormView):
 
             number_sid = twilio_phone.sid
 
-        org_config = org.config
         config = {
             Channel.CONFIG_APPLICATION_SID: new_app.sid,
             Channel.CONFIG_NUMBER_SID: number_sid,
-            Channel.CONFIG_ACCOUNT_SID: org_config[Org.CONFIG_TWILIO_SID],
-            Channel.CONFIG_AUTH_TOKEN: org_config[Org.CONFIG_TWILIO_TOKEN],
+            Channel.CONFIG_ACCOUNT_SID: self.request.session.get(self.channel_type.SESSION_ACCOUNT_SID),
+            Channel.CONFIG_AUTH_TOKEN: self.request.session.get(self.channel_type.SESSION_AUTH_TOKEN),
             Channel.CONFIG_CALLBACK_DOMAIN: callback_domain,
         }
 
@@ -253,8 +267,14 @@ class ClaimView(BaseClaimNumberMixin, SmartFormView):
 
         return channel
 
+    def remove_api_credentials_from_session(self):
+        if self.channel_type.SESSION_ACCOUNT_SID in self.request.session:
+            del self.request.session[self.channel_type.SESSION_ACCOUNT_SID]
+        if self.channel_type.SESSION_AUTH_TOKEN in self.request.session:
+            del self.request.session[self.channel_type.SESSION_AUTH_TOKEN]
 
-class SearchView(OrgPermsMixin, SmartFormView):
+
+class SearchView(ChannelTypeMixin, OrgPermsMixin, SmartFormView):
     class Form(forms.Form):
         country = forms.ChoiceField(choices=SEARCH_COUNTRY_CHOICES)
         pattern = forms.CharField(max_length=3, min_length=3, required=False)
@@ -264,6 +284,14 @@ class SearchView(OrgPermsMixin, SmartFormView):
 
     def form_invalid(self, *args, **kwargs):
         return JsonResponse([], safe=False)
+
+    def get_twilio_client(self):
+        account_sid = self.request.session.get(self.channel_type.SESSION_ACCOUNT_SID, None)
+        account_token = self.request.session.get(self.channel_type.SESSION_AUTH_TOKEN, None)
+
+        if account_sid and account_token:
+            return TwilioClient(account_sid, account_token)
+        return None  # pragma: no cover
 
     def search_available(self, client, country: str, **kwargs):
         available_numbers = []
@@ -286,8 +314,7 @@ class SearchView(OrgPermsMixin, SmartFormView):
         return available_numbers
 
     def form_valid(self, form, *args, **kwargs):
-        org = self.request.org
-        client = org.get_twilio_client()
+        client = self.get_twilio_client()
         data = form.cleaned_data
 
         # if the country is not US or CANADA list using contains instead of area code
@@ -315,3 +342,130 @@ class SearchView(OrgPermsMixin, SmartFormView):
             return JsonResponse({"error": str(msg)})
 
         return JsonResponse(numbers, safe=False)
+
+
+class UpdateForm(UpdateChannelForm):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.add_config_field(
+            "account_sid",
+            forms.CharField(
+                max_length=128,
+                label=_("Twilio Account SID"),
+                disabled=True,
+            ),
+            default="",
+        )
+
+        self.add_config_field(
+            "auth_token",
+            forms.CharField(
+                max_length=128,
+                label=_("Twilio Account Auth Token"),
+                required=True,
+                widget=InputWidget(),
+            ),
+            default="",
+        )
+
+    def clean(self) -> dict[str, Any]:
+        """
+        We override the clean method for Twilio we need to make sure we grab the primary auth tokens
+        """
+        account_sid = self.cleaned_data.get("account_sid", None)
+        account_token = self.cleaned_data.get("auth_token", None)
+
+        try:
+            client = TwilioClient(account_sid, account_token)
+
+            # get the actual primary auth tokens from twilio and use them
+            account = client.api.account.fetch()
+            self.cleaned_data["account_sid"] = account.sid
+            self.cleaned_data["auth_token"] = account.auth_token
+        except Exception:  # pragma: needs cover
+            raise ValidationError(
+                _("The Twilio account SID and Token seem invalid. Please check them again and retry.")
+            )
+
+        return super().clean()
+
+    class Meta(UpdateChannelForm.Meta):
+        fields = ("name",)
+
+
+class Connect(ChannelTypeMixin, OrgPermsMixin, SmartFormView):
+    class TwilioConnectForm(forms.Form):
+        account_sid = forms.CharField(help_text=_("Your Twilio Account SID"), widget=InputWidget(), required=True)
+        account_token = forms.CharField(help_text=_("Your Twilio Account Token"), widget=InputWidget(), required=True)
+
+        def clean(self):
+            account_sid = self.cleaned_data.get("account_sid")
+            account_token = self.cleaned_data.get("account_token")
+
+            try:
+                client = TwilioClient(account_sid, account_token)
+
+                # get the actual primary auth tokens from twilio and use them
+                account = client.api.account.fetch()
+                self.cleaned_data["account_sid"] = account.sid
+                self.cleaned_data["account_token"] = account.auth_token
+            except Exception:
+                raise ValidationError(
+                    _("The Twilio account SID and Token seem invalid. Please check them again and retry.")
+                )
+
+            return self.cleaned_data
+
+    form_class = TwilioConnectForm
+    permission = "channels.channel_claim"
+    submit_button_name = "Save"
+    field_config = dict(account_sid=dict(label=""), account_token=dict(label=""))
+    success_message = "Twilio Account successfully connected."
+    template_name = "channels/types/twilio/connect.html"
+    menu_path = "/settings/workspace"
+    title = "Connect Twilio"
+
+    def pre_process(self, *args, **kwargs):
+        reset_creds = self.request.GET.get("reset_creds", "")
+        org = self.request.org
+
+        last_twilio_channel = (
+            org.channels.filter(is_active=True, channel_type__in=["T", "TMS", "TWA"]).order_by("-created_on").first()
+        )
+
+        if last_twilio_channel and not reset_creds:
+            # add the credentials to the session
+            self.request.session[self.channel_type.SESSION_ACCOUNT_SID] = last_twilio_channel.config.get(
+                Channel.CONFIG_ACCOUNT_SID, ""
+            )
+            self.request.session[self.channel_type.SESSION_AUTH_TOKEN] = last_twilio_channel.config.get(
+                Channel.CONFIG_AUTH_TOKEN, ""
+            )
+
+            return HttpResponseRedirect(self.get_success_url())
+        return None
+
+    def get_success_url(self):
+        claim_type = self.request.GET.get("claim_type", "twilio")
+
+        if claim_type == "twilio_messaging_service":
+            return reverse("channels.types.twilio_messaging_service.claim")
+
+        if claim_type == "twilio_whatsapp":
+            return reverse("channels.types.twilio_whatsapp.claim")
+
+        if claim_type == "twilio":
+            return reverse("channels.types.twilio.claim")
+
+        return reverse("channels.channel_claim")
+
+    def form_valid(self, form):
+        account_sid = form.cleaned_data["account_sid"]
+        account_token = form.cleaned_data["account_token"]
+
+        # add the credentials to the session
+        self.request.session[self.channel_type.SESSION_ACCOUNT_SID] = account_sid
+        self.request.session[self.channel_type.SESSION_AUTH_TOKEN] = account_token
+
+        return HttpResponseRedirect(self.get_success_url())

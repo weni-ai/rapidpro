@@ -164,9 +164,7 @@ class LuisTypeTest(TembaTest):
         self.assertFormError(response, "form", "slot", ["This field is required."])
 
         # simulate wrong authoring credentials
-        mock_get_app.side_effect = RequestException(
-            "Not authorized", response=MockResponse(401, '{ "error": "true" }')
-        )
+        mock_get_app.side_effect = RequestException("Not authorized", response=MockResponse(401, '{ "error": "true" }'))
 
         response = self.client.post(
             luis_url,
@@ -180,7 +178,7 @@ class LuisTypeTest(TembaTest):
                 "slot": "staging",
             },
         )
-        self.assertFormError(response, "form", "__all__", "Check authoring credentials: Not authorized")
+        self.assertFormError(response, "form", None, "Check authoring credentials: Not authorized")
 
         # simulate selected slot isn't published
         mock_get_app.side_effect = None
@@ -198,12 +196,10 @@ class LuisTypeTest(TembaTest):
                 "slot": "staging",
             },
         )
-        self.assertFormError(response, "form", "__all__", "App has not yet been published to staging slot.")
+        self.assertFormError(response, "form", None, "App has not yet been published to staging slot.")
 
         # simulate wrong prediction credentials
-        mock_predict.side_effect = RequestException(
-            "Not authorized", response=MockResponse(401, '{ "error": "true" }')
-        )
+        mock_predict.side_effect = RequestException("Not authorized", response=MockResponse(401, '{ "error": "true" }'))
 
         response = self.client.post(
             luis_url,
@@ -217,7 +213,7 @@ class LuisTypeTest(TembaTest):
                 "slot": "production",
             },
         )
-        self.assertFormError(response, "form", "__all__", "Check prediction credentials: Not authorized")
+        self.assertFormError(response, "form", None, "Check prediction credentials: Not authorized")
 
         mock_get_version_intents.return_value = json.loads(GET_VERSION_INTENTS_RESPONSE)
         mock_predict.side_effect = None

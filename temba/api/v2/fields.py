@@ -1,108 +1,146 @@
-from rest_framework import relations, serializers
+from rest_framework import fields, relations, serializers
 
 from django.contrib.auth.models import User
 from django.db.models import Q
+from django.utils.translation import gettext_lazy as _
 
 from temba.campaigns.models import Campaign, CampaignEvent
 from temba.channels.models import Channel
 from temba.contacts.models import URN, Contact, ContactField as ContactFieldModel, ContactGroup, ContactURN
 from temba.flows.models import Flow
-from temba.msgs.models import Label, Msg
+from temba.msgs.models import Attachment, Label, Media, Msg
 from temba.tickets.models import Ticket, Ticketer, Topic
-from temba.utils.uuid import is_uuid
-
-# default maximum number of items in a posted list or dict
-DEFAULT_MAX_LIST_ITEMS = 100
-DEFAULT_MAX_DICT_ITEMS = 100
+from temba.utils import languages
+from temba.utils.uuid import find_uuid, is_uuid
 
 
-def validate_size(value, max_size):
-    if hasattr(value, "__len__") and len(value) > max_size:
-        raise serializers.ValidationError("This field can only contain up to %d items." % max_size)
+def serialize_urn(org, urn):
+    if isinstance(urn, ContactURN):
+        return URN.from_parts(urn.scheme, ContactURN.ANON_MASK if org.is_anon else urn.path)
+    elif isinstance(urn, dict):
+        return {
+            "channel": urn["channel"],
+            "scheme": urn["scheme"],
+            "path": ContactURN.ANON_MASK if org.is_anon else urn["path"],
+            "display": urn["display"] or None,
+        }
 
 
-def validate_translations(value, base_language, max_length):
-    if len(value) == 0:
-        raise serializers.ValidationError("Must include at least one translation.")
-    if base_language not in value:
-        raise serializers.ValidationError("Must include translation for base language '%s'" % base_language)
-
-    for lang, trans in value.items():
-        if not isinstance(lang, str) or len(lang) != 3:
-            raise serializers.ValidationError("Language code %s is not valid." % str(lang))
-        if not isinstance(trans, str):
-            raise serializers.ValidationError("Translations must be strings.")
-        if len(trans) > max_length:
-            raise serializers.ValidationError("Ensure translations have no more than %d characters." % max_length)
+def validate_language(value):
+    if not languages.get_name(str(value)):
+        raise serializers.ValidationError("Not an allowed ISO 639-3 language code.")
 
 
-def validate_urn(value, strict=True, country_code=None):
+def validate_urn(value, country_code=None):
     try:
         normalized = URN.normalize(value, country_code=country_code)
 
-        if strict and not URN.validate(normalized, country_code=country_code):
+        if not URN.validate(normalized, country_code=country_code):
             raise ValueError()
     except ValueError:
         raise serializers.ValidationError("Invalid URN: %s. Ensure phone numbers contain country codes." % value)
     return normalized
 
 
-class TranslatableField(serializers.Field):
-    """
-    A field which is either a simple string or a translations dict
-    """
-
+class LanguageField(serializers.CharField):
     def __init__(self, **kwargs):
-        self.max_length = kwargs.pop("max_length", None)
-        super().__init__(**kwargs)
+        super().__init__(max_length=3, **kwargs)
 
-    def to_representation(self, obj):
-        return obj
-
-    def to_internal_value(self, data):
-        org = self.context["org"]
-        base_language = org.flow_languages[0]
-
-        if isinstance(data, str):
-            if len(data) > self.max_length:
-                raise serializers.ValidationError(
-                    "Ensure this field has no more than %d characters." % self.max_length
-                )
-
-            data = {base_language: data}
-
-        elif isinstance(data, dict):
-            validate_translations(data, base_language, self.max_length)
-        else:
-            raise serializers.ValidationError("Value must be a string or dict of strings.")
-
-        return data, base_language
-
-
-class LimitedListField(serializers.ListField):
-    """
-    A list field which can be only be written to with a limited number of items
-    """
-
-    def to_internal_value(self, data):
-        validate_size(data, DEFAULT_MAX_LIST_ITEMS)
-
-        return super().to_internal_value(data)
+        self.validators.append(validate_language)
 
 
 class LimitedDictField(serializers.DictField):
     """
-    A dict field which can be only be written to with a limited number of items
+    Adds max length validation to the standard DRF DictField
     """
 
+    default_error_messages = {"max_length": _("Ensure this field has no more than {max_length} elements.")}
+
+    def __init__(self, **kwargs):
+        self.max_length = kwargs.pop("max_length", None)
+
+        super().__init__(**kwargs)
+
+        if self.max_length is not None:
+            message = fields.lazy_format(self.error_messages["max_length"], max_length=self.max_length)
+            self.validators.append(fields.MaxLengthValidator(self.max_length, message=message))
+
+
+class LanguageDictField(LimitedDictField):
+    """
+    Dict field where all the keys must be valid languages
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+        self.validators.append(self.validate_keys_as_languages)
+
+    @staticmethod
+    def validate_keys_as_languages(value):
+        errors = {}
+        for key in value:
+            try:
+                validate_language(key)
+            except serializers.ValidationError as e:
+                errors[key] = e.detail
+        if errors:
+            raise serializers.ValidationError(errors)
+
+
+class TranslatedTextField(LanguageDictField):
+    """
+    A field which is either a string or a language -> string translations dict
+    """
+
+    def __init__(self, max_length, **kwargs):
+        super().__init__(allow_empty=False, max_length=50, child=serializers.CharField(max_length=max_length), **kwargs)
+
     def to_internal_value(self, data):
-        validate_size(data, DEFAULT_MAX_DICT_ITEMS)
+        if isinstance(data, str):
+            data = {self.context["org"].flow_languages[0]: data}
 
         return super().to_internal_value(data)
 
 
+class TranslatedAttachmentsField(LanguageDictField):
+    """
+    A field which is either a list of strings or a language -> list of strings translations dict
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(allow_empty=False, max_length=50, child=MediaField(many=True, max_items=10), **kwargs)
+
+    def to_internal_value(self, data):
+        if isinstance(data, list):
+            data = {self.context["org"].flow_languages[0]: data}
+
+        return super().to_internal_value(data)
+
+
+class LimitedManyRelatedField(serializers.ManyRelatedField):
+    """
+    Adds max_length to the standard DRF ManyRelatedField
+    """
+
+    default_error_messages = {"max_length": _("Ensure this field has no more than {max_length} elements.")}
+
+    def __init__(self, **kwargs):
+        self.max_length = kwargs.pop("max_length", None)
+
+        super().__init__(**kwargs)
+
+    def run_validation(self, data=serializers.empty):
+        if self.max_length and hasattr(data, "__len__") and len(data) > self.max_length:
+            message = fields.lazy_format(self.error_messages["max_length"], max_length=self.max_length)
+            raise serializers.ValidationError(message)
+
+        return super().run_validation(data)
+
+
 class URNField(serializers.CharField):
-    max_length = 255
+    def __init__(self, **kwargs):
+        super().__init__(max_length=255, **kwargs)
 
     def to_representation(self, obj):
         if self.context["org"].is_anon:
@@ -113,10 +151,6 @@ class URNField(serializers.CharField):
     def to_internal_value(self, data):
         country_code = self.context["org"].default_country_code
         return validate_urn(str(data), country_code=country_code)
-
-
-class URNListField(LimitedListField):
-    child = URNField()
 
 
 class TembaModelField(serializers.RelatedField):
@@ -130,22 +164,28 @@ class TembaModelField(serializers.RelatedField):
     # throw validation exception if any object not found, otherwise returns none
     require_exists = True
 
-    class LimitedSizeList(serializers.ManyRelatedField):
-        def run_validation(self, data=serializers.empty):
-            validate_size(data, DEFAULT_MAX_LIST_ITEMS)
+    default_max_items = 100  # when many=True this is the default max number of many
 
-            return super().run_validation(data)
+    lookup_validators = {
+        "uuid": is_uuid,
+        "id": lambda v: isinstance(v, int),
+        "name": lambda v: isinstance(v, str) and v,
+    }
 
     @classmethod
-    def many_init(cls, *args, **kwargs):
+    def many_init(cls, max_items=None, *args, **kwargs):
         """
         Overridden to provide a custom ManyRelated which limits number of items
         """
+
+        max_items = max_items or cls.default_max_items
+
         list_kwargs = {"child_relation": cls(*args, **kwargs)}
         for key in kwargs.keys():
             if key in relations.MANY_RELATION_KWARGS:
                 list_kwargs[key] = kwargs[key]
-        return TembaModelField.LimitedSizeList(**list_kwargs)
+
+        return LimitedManyRelatedField(max_length=max_items, **list_kwargs)
 
     def get_queryset(self):
         manager = getattr(self.model, self.model_manager)
@@ -158,7 +198,8 @@ class TembaModelField(serializers.RelatedField):
         # ignore lookup fields that can't be queryed with the given value
         lookup_fields = []
         for lookup_field in self.lookup_fields:
-            if lookup_field != "uuid" or is_uuid(value):
+            validator = self.lookup_validators.get(lookup_field)
+            if not validator or validator(value):
                 lookup_fields.append(lookup_field)
 
         # if we have no possible lookup fields left, there's no matching object
@@ -222,7 +263,7 @@ class ContactField(TembaModelField):
         if self.as_summary:
             urn = obj.get_urn()
             if urn:
-                urn_str, urn_display = urn.get_for_api(), obj.get_urn_display() if not org.is_anon else None
+                urn_str, urn_display = serialize_urn(org, urn), obj.get_urn_display() if not org.is_anon else None
             else:
                 urn_str, urn_display = None, None
 
@@ -289,6 +330,27 @@ class LabelField(TembaModelField):
     model = Label
     lookup_fields = ("uuid", "name")
     ignore_case_for_fields = ("name",)
+
+
+class MediaField(TembaModelField):
+    model = Media
+
+    def _value_to_uuid(self, value) -> str | None:
+        if is_uuid(value):
+            return value
+        try:
+            att = Attachment.parse(value)  # try as a <content-type>:<url> attachment string
+            return find_uuid(att.url)
+        except ValueError:
+            pass
+        return None
+
+    def get_object(self, value):
+        uuid = self._value_to_uuid(value)
+        return self.get_queryset().filter(uuid=uuid).first() if uuid else None
+
+    def to_representation(self, obj):
+        return str(obj.uuid)
 
 
 class MessageField(TembaModelField):

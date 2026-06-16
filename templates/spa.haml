@@ -1,9 +1,5 @@
 
 :css
-  .spa-title {
-
-  }
-
   .text-container {
     min-height:2.5em;
   }
@@ -20,33 +16,30 @@
     display: none;
   }
 
-
--block extra-style
--block extra-less
--block extra-script
-
-
 -block page-header
-
-  -if title or content_menu_buttons or content_menu_links
-    .spa-title.no-menu.flex.items-center.mb-4
+  .mb-4
+    .no-menu.flex.items-center
       .text-container.text-2xl.text-gray-700
         .flex.flex-row
-          -block spa-title
+          -block title
             #title-text
-              {{title}}
+              -block title-text
+                {{title}}
       .line.flex-grow.mr-2.ml-6
         .h-0.border.border-gray-200
       
-      -if content_menu_buttons or content_menu_links
-        .over-everything(style="z-index:9000")
-          -include "spa_page_menu.haml"
+      -if has_content_menu
+        -include "spa_page_menu.html"
 
-    -block subtitle
+    .text-lg.text-gray-600
+      -block subtitle
+
+-block extra-style
+-block extra-script
 
 -block alert-messages
   -if user_org.is_suspended
-    -include "org_suspended_include.haml"
+    -include "org_suspended_include.html"
   -if messages
     -for msg in messages
       %temba-alert.mb-3

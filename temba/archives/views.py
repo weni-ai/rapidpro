@@ -2,34 +2,24 @@ from gettext import gettext as _
 
 from smartmin.views import SmartCRUDL, SmartListView, SmartReadView
 
-from django.db.models import Sum
 from django.http import HttpResponseRedirect
-from django.urls import reverse
 
 from temba.orgs.views import OrgObjPermsMixin, OrgPermsMixin
-from temba.utils.views import ContentMenuMixin, SpaMixin
+from temba.utils.views import SpaMixin
 
 from .models import Archive
 
 
 class ArchiveCRUDL(SmartCRUDL):
-
     model = Archive
     actions = ("read", "run", "message")
     permissions = True
 
-    class BaseList(SpaMixin, OrgPermsMixin, ContentMenuMixin, SmartListView):
+    class BaseList(SpaMixin, OrgPermsMixin, SmartListView):
         title = _("Archive")
         fields = ("url", "start_date", "period", "record_count", "size")
         default_order = ("-start_date", "-period", "archive_type")
         paginate_by = 250
-
-        def build_content_menu(self, menu):
-            if not self.is_spa():
-                archive_type = self.get_archive_type()
-                for choice in Archive.TYPE_CHOICES:
-                    if archive_type != choice[0]:
-                        menu.add_link(f"{choice[1]} {_('Archives')}", reverse(f"archives.archive_{choice[0]}"))
 
         def get_queryset(self, **kwargs):
             queryset = super().get_queryset(**kwargs)
@@ -39,22 +29,13 @@ class ArchiveCRUDL(SmartCRUDL):
 
         def get_context_data(self, **kwargs):
             context = super().get_context_data(**kwargs)
-
-            if "HTTP_X_FORMAX" in self.request.META:  # no additional data needed if request is only for formax
-                context["archive_count"] = Archive.objects.filter(org=self.org, rollup=None).count()
-                context["record_count"] = (
-                    Archive.objects.filter(org=self.org, rollup=None)
-                    .aggregate(Sum("record_count"))
-                    .get("record_count__sum", 0)
-                )
-
-            else:
-                context["archive_types"] = Archive.TYPE_CHOICES
-                context["selected"] = self.get_archive_type()
-
+            context["archive_types"] = Archive.TYPE_CHOICES
+            context["selected"] = self.get_archive_type()
             return context
 
     class Run(BaseList):
+        menu_path = "/settings/archives/run"
+
         @classmethod
         def derive_url_pattern(cls, path, action):
             return r"^%s/%s/$" % (path, Archive.TYPE_FLOWRUN)
@@ -66,6 +47,8 @@ class ArchiveCRUDL(SmartCRUDL):
             return Archive.TYPE_FLOWRUN
 
     class Message(BaseList):
+        menu_path = "/settings/archives/message"
+
         @classmethod
         def derive_url_pattern(cls, path, action):
             return r"^%s/%s/$" % (path, Archive.TYPE_MSG)

@@ -1,8 +1,6 @@
 -extends "orgs/login/login_base.html"
 -load smartmin temba compress i18n
 
--block page-top
-
 -block login-title
   -trans "Create Account"
 
@@ -46,13 +44,15 @@
 
 
 -block extra-script
-  %script{src:"{{ STATIC_URL }}bower/jsTimezoneDetect/jstz.js"}
   {{ block.super }}
+  %script{src:"{{ STATIC_URL }}bower/jsTimezoneDetect/jstz.js"}
 
   :javascript
-    window.addEventListener("DOMContentLoaded", function (){
+    onSpload(function(){
       var timezone = jstz.determine().name();
       document.getElementById("id_timezone").value = timezone;
     });
+  
+
 
 

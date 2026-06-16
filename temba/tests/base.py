@@ -1,3 +1,4 @@
+import copy
 import shutil
 from datetime import datetime
 from functools import wraps
@@ -14,7 +15,7 @@ from django.core import mail
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
-from django.test import TransactionTestCase
+from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 
 from temba.archives.models import Archive
@@ -60,14 +61,11 @@ class TembaTestMixin:
         self.user = self.create_user("viewer@nyaruka.com")
         self.agent = self.create_user("agent@nyaruka.com", first_name="Agnes")
         self.surveyor = self.create_user("surveyor@nyaruka.com")
-        self.customer_support = self.create_user(
-            "support@nyaruka.com", group_names=("Customer Support",), is_staff=True
-        )
+        self.customer_support = self.create_user("support@nyaruka.com", is_staff=True)
 
         self.org = Org.objects.create(
             name="Nyaruka",
             timezone=pytz.timezone("Africa/Kigali"),
-            brand="rapidpro",
             flow_languages=["eng", "kin"],
             created_by=self.user,
             modified_by=self.user,
@@ -84,7 +82,6 @@ class TembaTestMixin:
         self.org2 = Org.objects.create(
             name="Trileet Inc.",
             timezone=pytz.timezone("US/Pacific"),
-            brand="rapidpro",
             flow_languages=["eng"],
             created_by=self.admin2,
             modified_by=self.admin2,
@@ -140,13 +137,11 @@ class TembaTestMixin:
 
     def clear_cache(self):
         """
-        Clears the redis cache. We are extra paranoid here and check that redis host is 'localhost'
-        Redis 10 is our testing redis db
+        Clears the redis cache. Out of paranoia we don't even use the configured cache settings but instead hardcode
+        to the local test instance.
         """
-        if settings.REDIS_HOST != "localhost":
-            raise ValueError(f"Expected redis test server host to be: 'localhost', got '{settings.REDIS_HOST}'")
 
-        r = redis.StrictRedis(host=settings.REDIS_HOST, port=settings.REDIS_PORT, db=10)
+        r = redis.StrictRedis(host="localhost", port=6379, db=10)
         r.flushdb()
 
     def clear_storage(self):
@@ -257,7 +252,16 @@ class TembaTestMixin:
     def create_label(self, name, *, org=None):
         return Label.create(org or self.org, self.admin, name)
 
-    def create_field(self, key, name, value_type=ContactField.TYPE_TEXT, priority=0, show_in_table=False, org=None):
+    def create_field(
+        self,
+        key,
+        name,
+        value_type=ContactField.TYPE_TEXT,
+        priority=0,
+        show_in_table=False,
+        agent_access=ContactField.ACCESS_VIEW,
+        org=None,
+    ):
         org = org or self.org
 
         assert not org.fields.filter(key=key, is_active=True).exists(), f"field with key {key} already exists"
@@ -270,6 +274,7 @@ class TembaTestMixin:
             value_type=value_type,
             priority=priority,
             show_in_table=show_in_table,
+            agent_access=agent_access,
             created_by=self.admin,
             modified_by=self.admin,
         )
@@ -279,33 +284,31 @@ class TembaTestMixin:
         contact,
         text,
         channel=None,
-        msg_type=None,
         attachments=(),
         status=Msg.STATUS_HANDLED,
         visibility=Msg.VISIBILITY_VISIBLE,
         created_on=None,
         external_id=None,
+        voice=False,
         surveyor=False,
         flow=None,
+        logs=None,
     ):
-        assert not msg_type or status != Msg.STATUS_PENDING, "pending messages don't have a msg type"
-
-        if status == Msg.STATUS_HANDLED and not msg_type:
-            msg_type = Msg.TYPE_INBOX
-
         return self._create_msg(
             contact,
             text,
             Msg.DIRECTION_IN,
             channel=channel,
-            msg_type=msg_type,
+            msg_type=Msg.TYPE_VOICE if voice else Msg.TYPE_TEXT,
             attachments=attachments,
+            quick_replies=None,
             status=status,
             created_on=created_on,
             visibility=visibility,
             external_id=external_id,
             surveyor=surveyor,
             flow=flow,
+            logs=logs,
         )
 
     def create_incoming_msgs(self, contact, count):
@@ -317,17 +320,20 @@ class TembaTestMixin:
         contact,
         text,
         channel=None,
-        msg_type=Msg.TYPE_INBOX,
         attachments=(),
         quick_replies=(),
         status=Msg.STATUS_SENT,
         created_on=None,
+        created_by=None,
         sent_on=None,
         high_priority=False,
+        voice=False,
         surveyor=False,
         next_attempt=None,
         failed_reason=None,
         flow=None,
+        ticket=None,
+        logs=None,
     ):
         if status in (Msg.STATUS_WIRED, Msg.STATUS_SENT, Msg.STATUS_DELIVERED) and not sent_on:
             sent_on = timezone.now()
@@ -341,17 +347,21 @@ class TembaTestMixin:
             text,
             Msg.DIRECTION_OUT,
             channel=channel,
-            msg_type=msg_type,
+            msg_type=Msg.TYPE_VOICE if voice else Msg.TYPE_TEXT,
             attachments=attachments,
+            quick_replies=quick_replies,
             status=status,
             created_on=created_on,
+            created_by=created_by,
             sent_on=sent_on,
             high_priority=high_priority,
             surveyor=surveyor,
             flow=flow,
+            ticket=ticket,
             metadata=metadata,
             next_attempt=next_attempt,
             failed_reason=failed_reason,
+            logs=logs,
         )
 
     def _create_msg(
@@ -363,18 +373,23 @@ class TembaTestMixin:
         channel,
         msg_type,
         attachments,
+        quick_replies,
         status,
         created_on,
+        created_by=None,
         sent_on=None,
         visibility=Msg.VISIBILITY_VISIBLE,
         external_id=None,
         high_priority=False,
         surveyor=False,
         flow=None,
+        ticket=None,
         broadcast=None,
+        locale=None,
         metadata=None,
         next_attempt=None,
         failed_reason=None,
+        logs=None,
     ):
         assert not (surveyor and channel), "surveyor messages don't have channels"
         assert not channel or channel.org == contact.org, "channel belong to different org than contact"
@@ -399,45 +414,50 @@ class TembaTestMixin:
             contact=contact,
             contact_urn=contact_urn,
             text=text,
-            channel=channel,
-            status=status,
-            msg_type=msg_type,
             attachments=attachments,
+            quick_replies=quick_replies,
+            locale=locale,
+            channel=channel,
+            status=status or (Msg.STATUS_PENDING if direction == Msg.DIRECTION_IN else Msg.STATUS_INITIALIZING),
+            msg_type=msg_type,
             visibility=visibility,
             external_id=external_id,
             high_priority=high_priority,
             created_on=created_on or timezone.now(),
+            created_by=created_by,
             sent_on=sent_on,
             broadcast=broadcast,
             flow=flow,
+            ticket=ticket,
             metadata=metadata,
             next_attempt=next_attempt,
             failed_reason=failed_reason,
+            log_uuids=[l.uuid for l in logs or []],
         )
 
     def create_broadcast(
         self,
         user,
-        text,
+        text: str | dict,
         contacts=(),
         groups=(),
+        status=Broadcast.STATUS_SENT,
         msg_status=Msg.STATUS_SENT,
         parent=None,
         schedule=None,
-        ticket=None,
         created_on=None,
+        org=None,
     ):
         bcast = Broadcast.create(
-            self.org,
+            org or self.org,
             user,
-            text,
+            {"und": text} if isinstance(text, str) else text,
             contacts=contacts,
             groups=groups,
-            status=Msg.STATUS_SENT,
             parent=parent,
             schedule=schedule,
-            ticket=ticket,
             created_on=created_on or timezone.now(),
+            status=status,
         )
 
         contacts = set(bcast.contacts.all())
@@ -451,12 +471,15 @@ class TembaTestMixin:
                     text,
                     Msg.DIRECTION_OUT,
                     channel=None,
-                    msg_type=Msg.TYPE_INBOX,
+                    msg_type=Msg.TYPE_TEXT,
                     attachments=(),
+                    quick_replies=(),
                     status=msg_status,
                     created_on=timezone.now(),
+                    created_by=user,
                     sent_on=timezone.now(),
                     broadcast=bcast,
+                    locale=bcast.base_language,
                 )
 
         return bcast
@@ -493,10 +516,26 @@ class TembaTestMixin:
 
         return flow
 
-    def create_incoming_call(self, flow, contact, status=Call.STATUS_COMPLETED):
+    def create_incoming_call(self, flow, contact, status=Call.STATUS_COMPLETED, error_reason=None, created_on=None):
         """
         Create something that looks like an incoming IVR call handled by mailroom
         """
+        log = ChannelLog.objects.create(
+            channel=self.channel,
+            log_type=ChannelLog.LOG_TYPE_IVR_START,
+            is_error=status in (Call.STATUS_FAILED, Call.STATUS_ERRORED),
+            http_logs=[
+                {
+                    "url": "https://acme-calls.com/reply",
+                    "status_code": 200,
+                    "request": 'POST /reply\r\n\r\n{"say": "Hello"}',
+                    "response": '{"status": "%s"}' % ("error" if status == Call.STATUS_FAILED else "OK"),
+                    "elapsed_ms": 12,
+                    "retries": 0,
+                    "created_on": "2022-01-01T00:00:00Z",
+                }
+            ],
+        )
         call = Call.objects.create(
             org=self.org,
             channel=self.channel,
@@ -504,7 +543,10 @@ class TembaTestMixin:
             contact=contact,
             contact_urn=contact.get_urn(),
             status=status,
+            error_reason=error_reason,
+            created_on=created_on or timezone.now(),
             duration=15,
+            log_uuids=[log.uuid],
         )
         session = FlowSession.objects.create(
             uuid=uuid4(),
@@ -527,31 +569,16 @@ class TembaTestMixin:
         Msg.objects.create(
             org=self.org,
             channel=self.channel,
-            direction="O",
+            direction=Msg.DIRECTION_OUT,
             contact=contact,
             contact_urn=contact.get_urn(),
             text="Hello",
-            status="S",
+            status=Msg.STATUS_SENT,
+            msg_type=Msg.TYPE_VOICE,
             sent_on=timezone.now(),
             created_on=timezone.now(),
         )
-        ChannelLog.objects.create(
-            channel=self.channel,
-            call=call,
-            log_type=ChannelLog.LOG_TYPE_IVR_START,
-            is_error=status == Call.STATUS_FAILED,
-            http_logs=[
-                {
-                    "url": "https://acme-calls.com/reply",
-                    "status_code": 200,
-                    "request": 'POST /reply\r\n\r\n{"say": "Hello"}',
-                    "response": '{"status": "%s"}' % ("error" if status == Call.STATUS_FAILED else "OK"),
-                    "elapsed_ms": 12,
-                    "retries": 0,
-                    "created_on": "2022-01-01T00:00:00Z",
-                }
-            ],
-        )
+
         return call
 
     def create_archive(
@@ -607,8 +634,9 @@ class TembaTestMixin:
         country=None,
         secret=None,
         config=None,
+        parent=None,
         org=None,
-    ):
+    ) -> Channel:
         channel_type = Channel.get_type_from_code(channel_type)
 
         return Channel.objects.create(
@@ -619,6 +647,7 @@ class TembaTestMixin:
             address=address,
             config=config or {},
             role=role or Channel.DEFAULT_ROLE,
+            parent=parent,
             secret=secret,
             schemes=schemes or channel_type.schemes,
             created_by=self.admin,
@@ -760,7 +789,7 @@ class TembaTestMixin:
 
     def assertModalResponse(self, response, *, redirect: str):
         self.assertEqual(200, response.status_code)
-        self.assertContains(response, "<div class='success-script'>")
+        self.assertContains(response, '<div class="success-script">')
         self.assertEqual(redirect, response.get("Temba-Success"))
         self.assertEqual(redirect, response.get("REDIRECT"))
 
@@ -879,6 +908,12 @@ class MigrationTest(TembaTest):
         pass
 
 
+def override_brand(**kwargs):
+    brand = copy.deepcopy(settings.BRAND)
+    brand.update(kwargs)
+    return override_settings(BRAND=brand)
+
+
 def mock_uuids(method=None, *, seed=1234):
     """
     Convenience decorator to override UUID generation in a test.
@@ -902,3 +937,15 @@ def mock_uuids(method=None, *, seed=1234):
         return wrapper
 
     return actual_decorator(method) if method else actual_decorator
+
+
+def get_contact_search(*, query=None, contacts=None, groups=None):
+    if query is not None:
+        contact_search = dict(query=query, advanced=True, recipients=[])
+        return json.dumps(contact_search)
+
+    if contacts is not None or groups is not None:
+        recipients = [{"id": c.uuid, "name": c.name, "type": "contact"} for c in contacts or []]
+        recipients += [{"id": g.uuid, "name": g.name, "type": "group"} for g in groups or []]
+        contact_search = dict(recipients=recipients, advanced=False)
+        return json.dumps(contact_search)

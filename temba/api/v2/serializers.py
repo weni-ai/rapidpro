@@ -12,25 +12,25 @@ from django.conf import settings
 from django.contrib.auth.models import User
 
 from temba import mailroom
-from temba.api.models import Resthook, ResthookSubscriber, WebHookEvent
 from temba.archives.models import Archive
 from temba.campaigns.models import Campaign, CampaignEvent
 from temba.channels.models import Channel, ChannelEvent
 from temba.classifiers.models import Classifier
-from temba.contacts.models import Contact, ContactField, ContactGroup
+from temba.contacts.models import URN, Contact, ContactField, ContactGroup, ContactURN
 from temba.flows.models import Flow, FlowRun, FlowStart
 from temba.globals.models import Global
 from temba.locations.models import AdminBoundary
 from temba.mailroom import modifiers
-from temba.msgs.models import Broadcast, Label, Msg
+from temba.msgs.models import Broadcast, Label, Media, Msg
 from temba.orgs.models import Org, OrgRole
 from temba.templates.models import Template, TemplateTranslation
 from temba.tickets.models import Ticket, Ticketer, Topic
 from temba.utils import json, on_transaction_commit
 from temba.utils.fields import NameValidator
 
+from ..models import BulkActionFailure, Resthook, ResthookSubscriber, WebHookEvent
+from ..validators import UniqueForOrgValidator
 from . import fields
-from .validators import UniqueForOrgValidator
 
 INVALID_EXTRA_KEY_CHARS = regex.compile(r"[^a-zA-Z0-9_]")
 
@@ -66,7 +66,7 @@ def _normalize_extra(extra, count):
     elif isinstance(extra, dict):
         count += 1
         normalized = OrderedDict()
-        for (k, v) in extra.items():
+        for k, v in extra.items():
             (normalized[normalize_key(k)], count) = _normalize_extra(v, count)
 
             if count >= settings.FLOW_START_PARAMS_SIZE:
@@ -77,7 +77,7 @@ def _normalize_extra(extra, count):
     elif isinstance(extra, list):
         count += 1
         normalized = OrderedDict()
-        for (i, v) in enumerate(extra):
+        for i, v in enumerate(extra):
             (normalized[str(i)], count) = _normalize_extra(v, count)
 
             if count >= settings.FLOW_START_PARAMS_SIZE:
@@ -118,18 +118,6 @@ class WriteSerializer(serializers.Serializer):
             raise serializers.ValidationError(detail={"non_field_errors": [msg]})
 
         return super().run_validation(data)
-
-
-class BulkActionFailure:
-    """
-    Bulk action serializers can return a partial failure if some objects couldn't be acted on
-    """
-
-    def __init__(self, failures):
-        self.failures = failures
-
-    def as_json(self):
-        return {"failures": self.failures}
 
 
 # ============================================================
@@ -178,18 +166,26 @@ class ArchiveReadSerializer(ReadSerializer):
 
 class BroadcastReadSerializer(ReadSerializer):
     STATUSES = {
-        Broadcast.STATUS_INITIALIZING: "queued",
+        "I": "queued",  # may exist in older data
         Broadcast.STATUS_QUEUED: "queued",
         Broadcast.STATUS_SENT: "sent",
         Broadcast.STATUS_FAILED: "failed",
     }
 
-    text = fields.TranslatableField()
-    status = serializers.SerializerMethodField()
     urns = serializers.SerializerMethodField()
     contacts = fields.ContactField(many=True)
     groups = fields.ContactGroupField(many=True)
+    text = serializers.SerializerMethodField()
+    attachments = serializers.SerializerMethodField()
+    base_language = fields.LanguageField()
+    status = serializers.SerializerMethodField()
     created_on = serializers.DateTimeField(default_timezone=pytz.UTC)
+
+    def get_text(self, obj):
+        return {lang: trans.get("text") for lang, trans in obj.translations.items()}
+
+    def get_attachments(self, obj):
+        return {lang: trans.get("attachments", []) for lang, trans in obj.translations.items()}
 
     def get_status(self, obj):
         return self.STATUSES.get(obj.status, "sent")
@@ -198,23 +194,38 @@ class BroadcastReadSerializer(ReadSerializer):
         if self.context["org"].is_anon:
             return None
         else:
-            return obj.raw_urns or []
+            return obj.urns or []
 
     class Meta:
         model = Broadcast
-        fields = ("id", "urns", "contacts", "groups", "text", "status", "created_on")
+        fields = ("id", "urns", "contacts", "groups", "text", "attachments", "base_language", "status", "created_on")
 
 
 class BroadcastWriteSerializer(WriteSerializer):
-    text = fields.TranslatableField(required=True, max_length=Msg.MAX_TEXT_LEN)
-    urns = fields.URNListField(required=False)
+    urns = serializers.ListField(required=False, child=fields.URNField(), max_length=100)
     contacts = fields.ContactField(many=True, required=False)
     groups = fields.ContactGroupField(many=True, required=False)
-    ticket = fields.TicketField(required=False)
+    text = fields.TranslatedTextField(required=False, max_length=Msg.MAX_TEXT_LEN)
+    attachments = fields.TranslatedAttachmentsField(required=False)
+    base_language = fields.LanguageField(required=False)
 
     def validate(self, data):
+        text = data.get("text")
+        attachments = data.get("attachments")
+        base_language = data.get("base_language")
+
+        if not (data.get("text") or data.get("attachments")):
+            raise serializers.ValidationError("Must provide either text or attachments.")
+
         if not (data.get("urns") or data.get("contacts") or data.get("groups")):
-            raise serializers.ValidationError("Must provide either urns, contacts or groups")
+            raise serializers.ValidationError("Must provide either urns, contacts or groups.")
+
+        if base_language:
+            if base_language not in text:
+                raise serializers.ValidationError("No text translation provided in base language.")
+
+            if attachments and base_language not in attachments:
+                raise serializers.ValidationError("No attachment translations provided in base language.")
 
         return data
 
@@ -223,22 +234,17 @@ class BroadcastWriteSerializer(WriteSerializer):
         Create a new broadcast to send out
         """
 
-        text, base_language = self.validated_data["text"]
-
-        # create the broadcast
         broadcast = Broadcast.create(
             self.context["org"],
             self.context["user"],
-            text=text,
-            base_language=base_language,
+            text=self.validated_data.get("text"),
+            attachments=self.validated_data.get("attachments", {}),
+            base_language=self.validated_data.get("base_language"),
             groups=self.validated_data.get("groups", []),
             contacts=self.validated_data.get("contacts", []),
             urns=self.validated_data.get("urns", []),
-            template_state=Broadcast.TEMPLATE_STATE_UNEVALUATED,
-            ticket=self.validated_data.get("ticket"),
         )
 
-        # send it
         on_transaction_commit(lambda: broadcast.send_async())
 
         return broadcast
@@ -349,7 +355,7 @@ class CampaignEventWriteSerializer(WriteSerializer):
     unit = serializers.ChoiceField(required=True, choices=list(UNITS.keys()))
     delivery_hour = serializers.IntegerField(required=True, min_value=-1, max_value=23)
     relative_to = fields.ContactFieldField(required=True)
-    message = fields.TranslatableField(required=False, max_length=Msg.MAX_TEXT_LEN)
+    message = fields.TranslatedTextField(required=False, max_length=Msg.MAX_TEXT_LEN)
     flow = fields.FlowField(required=False)
 
     def validate_unit(self, value):
@@ -360,17 +366,18 @@ class CampaignEventWriteSerializer(WriteSerializer):
             raise serializers.ValidationError("Cannot change campaign for existing events")
         return value
 
+    def validate_message(self, value):
+        if value and not value.get(self.context["org"].flow_languages[0]):
+            raise serializers.ValidationError("Message text in default flow language is required.")
+
+        return value
+
     def validate(self, data):
         message = data.get("message")
         flow = data.get("flow")
 
-        if message and not flow:
-            translations, base_language = message
-            if not translations[base_language]:
-                raise serializers.ValidationError("Message text is required")
-
         if (message and flow) or (not message and not flow):
-            raise serializers.ValidationError("Flow UUID or a message text required.")
+            raise serializers.ValidationError("Flow or a message text required.")
 
         return data
 
@@ -378,6 +385,11 @@ class CampaignEventWriteSerializer(WriteSerializer):
         """
         Create or update our campaign event
         """
+
+        org = self.context["org"]
+        user = self.context["user"]
+        base_language = org.flow_languages[0]
+
         campaign = self.validated_data.get("campaign")
         offset = self.validated_data.get("offset")
         unit = self.validated_data.get("unit")
@@ -387,9 +399,7 @@ class CampaignEventWriteSerializer(WriteSerializer):
         flow = self.validated_data.get("flow")
 
         if self.instance:
-
-            # we dont update, we only create
-            self.instance = self.instance.recreate()
+            self.instance = self.instance.recreate()  # don't update but re-create to invalidate existing event fires
 
             # we are being set to a flow
             if flow:
@@ -399,20 +409,17 @@ class CampaignEventWriteSerializer(WriteSerializer):
 
             # we are being set to a message
             else:
-                translations, base_language = message
-                self.instance.message = translations
+                self.instance.message = message
 
                 # if we aren't currently a message event, we need to create our hidden message flow
                 if self.instance.event_type != CampaignEvent.TYPE_MESSAGE:
-                    self.instance.flow = Flow.create_single_message(
-                        self.context["org"], self.context["user"], translations, base_language
-                    )
+                    self.instance.flow = Flow.create_single_message(org, user, message, base_language)
                     self.instance.event_type = CampaignEvent.TYPE_MESSAGE
 
                 # otherwise, we can just update that flow
                 else:
                     # set our single message on our flow
-                    self.instance.flow.update_single_message_flow(self.context["user"], translations, base_language)
+                    self.instance.flow.update_single_message_flow(user, message, base_language)
 
             # update our other attributes
             self.instance.offset = offset
@@ -425,21 +432,11 @@ class CampaignEventWriteSerializer(WriteSerializer):
         else:
             if flow:
                 self.instance = CampaignEvent.create_flow_event(
-                    self.context["org"], self.context["user"], campaign, relative_to, offset, unit, flow, delivery_hour
+                    org, user, campaign, relative_to, offset, unit, flow, delivery_hour
                 )
             else:
-                translations, base_language = message
-
                 self.instance = CampaignEvent.create_message_event(
-                    self.context["org"],
-                    self.context["user"],
-                    campaign,
-                    relative_to,
-                    offset,
-                    unit,
-                    translations,
-                    delivery_hour,
-                    base_language,
+                    org, user, campaign, relative_to, offset, unit, message, delivery_hour, base_language
                 )
 
             self.instance.update_flow_name()
@@ -465,10 +462,10 @@ class ChannelReadSerializer(ReadSerializer):
 
         return {
             "name": obj.device,
-            "power_level": obj.get_last_power(),
-            "power_status": obj.get_last_power_status(),
-            "power_source": obj.get_last_power_source(),
-            "network_type": obj.get_last_network_type(),
+            "power_level": obj.last_sync.power_level if obj.last_sync else -1,
+            "power_status": obj.last_sync.power_status if obj.last_sync else None,
+            "power_source": obj.last_sync.power_source if obj.last_sync else None,
+            "network_type": obj.last_sync.network_type if obj.last_sync else None,
         }
 
     class Meta:
@@ -534,7 +531,9 @@ class ContactReadSerializer(ReadSerializer):
         if not obj.is_active:
             return []
 
-        return [urn.get_for_api() for urn in obj.get_urns()]
+        urns = obj.expanded_urns if hasattr(obj, "expanded_urns") else obj.get_urns()
+
+        return [fields.serialize_urn(self.context["org"], urn) for urn in urns]
 
     def get_groups(self, obj):
         if not obj.is_active:
@@ -581,9 +580,11 @@ class ContactReadSerializer(ReadSerializer):
 class ContactWriteSerializer(WriteSerializer):
     name = serializers.CharField(required=False, max_length=64, allow_null=True)
     language = serializers.CharField(required=False, min_length=3, max_length=3, allow_null=True)
-    urns = fields.URNListField(required=False)
+    urns = serializers.ListField(required=False, child=fields.URNField(), max_length=100)
     groups = fields.ContactGroupField(many=True, required=False, allow_dynamic=False)
-    fields = fields.LimitedDictField(required=False, child=serializers.CharField(allow_blank=True, allow_null=True))
+    fields = fields.LimitedDictField(
+        required=False, child=serializers.CharField(allow_blank=True, allow_null=True), max_length=100
+    )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -609,6 +610,9 @@ class ContactWriteSerializer(WriteSerializer):
             field_obj = fields_by_key.get(field_key)
             if not field_obj:
                 raise serializers.ValidationError(f"Invalid contact field key: {field_key}")
+
+            if field_obj.get_access(self.context["user"]) != ContactField.ACCESS_EDIT:
+                raise serializers.ValidationError(f"Editing of '{field_key}' values disallowed for current user.")
 
             values_by_field[field_obj] = field_val
 
@@ -703,10 +707,16 @@ class ContactFieldReadSerializer(ReadSerializer):
         ContactField.TYPE_DISTRICT: "district",
         ContactField.TYPE_WARD: "ward",
     }
+    ACCESS_TYPES = {
+        ContactField.ACCESS_NONE: "none",
+        ContactField.ACCESS_VIEW: "view",
+        ContactField.ACCESS_EDIT: "edit",
+    }
 
     type = serializers.SerializerMethodField()
     featured = serializers.SerializerMethodField()
     usages = serializers.SerializerMethodField()
+    agent_access = serializers.SerializerMethodField()
 
     # for backwards compatibility
     label = serializers.SerializerMethodField()
@@ -725,6 +735,9 @@ class ContactFieldReadSerializer(ReadSerializer):
             "campaign_events": getattr(obj, "campaignevent_count", 0),
         }
 
+    def get_agent_access(self, obj):
+        return self.ACCESS_TYPES[obj.agent_access]
+
     def get_label(self, obj):
         return obj.name
 
@@ -733,7 +746,7 @@ class ContactFieldReadSerializer(ReadSerializer):
 
     class Meta:
         model = ContactField
-        fields = ("key", "name", "type", "featured", "priority", "usages", "label", "value_type")
+        fields = ("key", "name", "type", "featured", "priority", "usages", "agent_access", "label", "value_type")
 
 
 class ContactFieldWriteSerializer(WriteSerializer):
@@ -820,8 +833,7 @@ class ContactGroupReadSerializer(ReadSerializer):
         return self.STATUSES[obj.status]
 
     def get_count(self, obj):
-        # count may be cached on the object
-        return obj.count if hasattr(obj, "count") else obj.get_member_count()
+        return obj.count
 
     class Meta:
         model = ContactGroup
@@ -1042,17 +1054,23 @@ class FlowStartReadSerializer(ReadSerializer):
     status = serializers.SerializerMethodField()
     groups = fields.ContactGroupField(many=True)
     contacts = fields.ContactField(many=True)
-    exclude_active = serializers.SerializerMethodField()
-    extra = serializers.JSONField(required=False)
-    params = serializers.JSONField(required=False, source="extra")
+    params = serializers.JSONField(required=False)
     created_on = serializers.DateTimeField(default_timezone=pytz.UTC)
     modified_on = serializers.DateTimeField(default_timezone=pytz.UTC)
+
+    # deprecated
+    extra = serializers.JSONField(required=False, source="params")
+    restart_participants = serializers.SerializerMethodField()
+    exclude_active = serializers.SerializerMethodField()
 
     def get_status(self, obj):
         return self.STATUSES.get(obj.status)
 
+    def get_restart_participants(self, obj):
+        return not (obj.exclusions and obj.exclusions.get(FlowStart.EXCLUSION_STARTED_PREVIOUSLY, False))
+
     def get_exclude_active(self, obj):
-        return not obj.include_active
+        return obj.exclusions and obj.exclusions.get(FlowStart.EXCLUSION_IN_A_FLOW, False)
 
     class Meta:
         model = FlowStart
@@ -1063,12 +1081,12 @@ class FlowStartReadSerializer(ReadSerializer):
             "status",
             "groups",
             "contacts",
-            "restart_participants",
-            "exclude_active",
-            "extra",
             "params",
             "created_on",
             "modified_on",
+            "extra",
+            "restart_participants",
+            "exclude_active",
         )
 
 
@@ -1076,7 +1094,7 @@ class FlowStartWriteSerializer(WriteSerializer):
     flow = fields.FlowField()
     contacts = fields.ContactField(many=True, required=False)
     groups = fields.ContactGroupField(many=True, required=False)
-    urns = fields.URNListField(required=False)
+    urns = serializers.ListField(required=False, child=fields.URNField(), max_length=100)
     restart_participants = serializers.BooleanField(required=False)
     exclude_active = serializers.BooleanField(required=False)
     extra = serializers.JSONField(required=False)
@@ -1105,25 +1123,22 @@ class FlowStartWriteSerializer(WriteSerializer):
         urns = self.validated_data.get("urns", [])
         contacts = self.validated_data.get("contacts", [])
         groups = self.validated_data.get("groups", [])
-        restart_participants = self.validated_data.get("restart_participants", True)
-        exclude_active = self.validated_data.get("exclude_active", False)
-        extra = self.validated_data.get("extra")
-
-        params = self.validated_data.get("params")
-        if params:
-            extra = params
+        exclusions = {
+            FlowStart.EXCLUSION_STARTED_PREVIOUSLY: not self.validated_data.get("restart_participants", True),
+            FlowStart.EXCLUSION_IN_A_FLOW: self.validated_data.get("exclude_active", False),
+        }
+        params = self.validated_data.get("params") or self.validated_data.get("extra")
 
         # ok, let's go create our flow start, the actual starting will happen in our view
         return FlowStart.create(
             self.validated_data["flow"],
             self.context["user"],
             start_type=FlowStart.TYPE_API_ZAPIER if self.context["is_zapier"] else FlowStart.TYPE_API,
-            restart_participants=restart_participants,
-            include_active=not exclude_active,
             contacts=contacts,
             groups=groups,
             urns=urns,
-            extra=extra,
+            exclusions=exclusions,
+            params=params,
         )
 
 
@@ -1202,10 +1217,35 @@ class LabelWriteSerializer(WriteSerializer):
             return Label.create(self.context["org"], self.context["user"], name)
 
 
+class MediaReadSerializer(ReadSerializer):
+    class Meta:
+        model = Media
+        fields = ("uuid", "content_type", "url", "filename", "size")
+
+
+class MediaWriteSerializer(WriteSerializer):
+    file = serializers.FileField()
+
+    def validate_file(self, value):
+        if not Media.is_allowed_type(value.content_type):
+            raise serializers.ValidationError("Unsupported file type.")
+
+        if value.size > Media.MAX_UPLOAD_SIZE:
+            limit_MB = Media.MAX_UPLOAD_SIZE / (1024 * 1024)
+            raise serializers.ValidationError(f"Limit for file uploads is {limit_MB} MB.")
+
+        return value
+
+    def save(self):
+        file = self.validated_data["file"]
+        return Media.from_upload(self.context["org"], self.context["user"], file)
+
+
 class MsgReadSerializer(ReadSerializer):
     STATUSES = {
         Msg.STATUS_PENDING: "queued",  # same as far as users are concerned
         Msg.STATUS_HANDLED: "handled",
+        Msg.STATUS_INITIALIZING: "queued",
         Msg.STATUS_QUEUED: "queued",
         Msg.STATUS_WIRED: "wired",
         Msg.STATUS_SENT: "sent",
@@ -1213,7 +1253,6 @@ class MsgReadSerializer(ReadSerializer):
         Msg.STATUS_ERRORED: "errored",
         Msg.STATUS_FAILED: "failed",
     }
-    TYPES = {Msg.TYPE_INBOX: "inbox", Msg.TYPE_FLOW: "flow", Msg.TYPE_IVR: "ivr"}
     VISIBILITIES = {  # deleted messages should never be exposed over API
         Msg.VISIBILITY_VISIBLE: "visible",
         Msg.VISIBILITY_ARCHIVED: "archived",
@@ -1229,7 +1268,8 @@ class MsgReadSerializer(ReadSerializer):
     status = serializers.SerializerMethodField()
     archived = serializers.SerializerMethodField()
     visibility = serializers.SerializerMethodField()
-    labels = fields.LabelField(many=True)
+    labels = serializers.SerializerMethodField()
+    flow = fields.FlowField()
     media = serializers.SerializerMethodField()  # deprecated
     created_on = serializers.DateTimeField(default_timezone=pytz.UTC)
     modified_on = serializers.DateTimeField(default_timezone=pytz.UTC)
@@ -1242,7 +1282,7 @@ class MsgReadSerializer(ReadSerializer):
         return "in" if obj.direction == Msg.DIRECTION_IN else "out"
 
     def get_type(self, obj):
-        return self.TYPES.get(obj.msg_type)
+        return "voice" if obj.msg_type == Msg.TYPE_VOICE else "text"
 
     def get_status(self, obj):
         return self.STATUSES.get(obj.status)
@@ -1259,6 +1299,13 @@ class MsgReadSerializer(ReadSerializer):
     def get_visibility(self, obj):
         return self.VISIBILITIES.get(obj.visibility)
 
+    def get_labels(self, obj):
+        # to optimize the POST case that creates an outgoing message, don't even try to look for labels
+        if obj.direction == Msg.DIRECTION_IN:
+            return [{"uuid": str(lb.uuid), "name": lb.name} for lb in obj.labels.all()]
+        else:
+            return []
+
     class Meta:
         model = Msg
         fields = (
@@ -1274,11 +1321,63 @@ class MsgReadSerializer(ReadSerializer):
             "visibility",
             "text",
             "labels",
+            "flow",
             "attachments",
             "created_on",
             "sent_on",
             "modified_on",
             "media",
+        )
+
+
+class MsgWriteSerializer(WriteSerializer):
+    contact = fields.ContactField()
+    text = serializers.CharField(required=False, max_length=Msg.MAX_TEXT_LEN)
+    attachments = fields.MediaField(required=False, many=True, max_items=Msg.MAX_ATTACHMENTS)
+    ticket = fields.TicketField(required=False)
+
+    def validate(self, data):
+        if not (data.get("text") or data.get("attachments")):
+            raise serializers.ValidationError("Must provide either text or attachments.")
+
+        return data
+
+    def save(self):
+        org = self.context["org"]
+        user = self.context["user"]
+        contact = self.validated_data["contact"]
+        text = self.validated_data.get("text")
+        attachments = [str(m) for m in self.validated_data.get("attachments", [])]
+        ticket = self.validated_data.get("ticket")
+
+        resp = mailroom.get_client().msg_send(
+            org.id, user.id, contact.id, text or "", attachments, ticket.id if ticket else None
+        )
+
+        # to avoid fetching the new msg from the database, construct transient instances to pass to the serializer
+        channel = Channel(uuid=resp["channel"]["uuid"], name=resp["channel"]["name"]) if resp.get("channel") else None
+        contact = Contact(uuid=resp["contact"]["uuid"], name=resp["contact"]["name"])
+
+        if resp.get("urn"):
+            urn_scheme, urn_path, _, urn_display = URN.to_parts(resp["urn"])
+            contact_urn = ContactURN(scheme=urn_scheme, path=urn_path, display=urn_display)
+        else:
+            contact_urn = None
+
+        return Msg(
+            id=resp["id"],
+            org=org,
+            contact=contact,
+            contact_urn=contact_urn,
+            channel=channel,
+            direction=Msg.DIRECTION_OUT,
+            msg_type=Msg.TYPE_TEXT,
+            status=resp["status"],
+            visibility=Msg.VISIBILITY_VISIBLE,
+            text=resp.get("text"),
+            attachments=resp.get("attachments"),
+            created_on=iso8601.parse_date(resp["created_on"]),
+            modified_on=iso8601.parse_date(resp["modified_on"]),
         )
 
 
@@ -1301,7 +1400,7 @@ class MsgBulkActionSerializer(WriteSerializer):
 
     def validate_messages(self, value):
         for msg in value:
-            if msg and msg.direction != "I":
+            if msg and msg.direction != Msg.DIRECTION_IN:
                 raise serializers.ValidationError("Not an incoming message: %d" % msg.id)
 
         return value
@@ -1349,14 +1448,14 @@ class MsgBulkActionSerializer(WriteSerializer):
 
             if label:
                 label.toggle_label(messages, add=False)
+        elif action == self.DELETE:
+            Msg.bulk_soft_delete(messages)
         else:
             for msg in messages:
                 if action == self.ARCHIVE and msg.visibility == Msg.VISIBILITY_VISIBLE:
                     msg.archive()
                 elif action == self.RESTORE and msg.visibility == Msg.VISIBILITY_ARCHIVED:
                     msg.restore()
-                elif action == self.DELETE and msg.visibility in (Msg.VISIBILITY_VISIBLE, Msg.VISIBILITY_ARCHIVED):
-                    msg.delete(soft=True)
 
         return BulkActionFailure(missing_message_ids) if missing_message_ids else None
 
@@ -1543,7 +1642,7 @@ class TicketBulkActionSerializer(WriteSerializer):
         topic = self.validated_data.get("topic")
 
         if action == self.ACTION_ASSIGN:
-            Ticket.bulk_assign(org, user, tickets, assignee=assignee, note=note)
+            Ticket.bulk_assign(org, user, tickets, assignee=assignee)
         elif action == self.ACTION_ADD_NOTE:
             Ticket.bulk_add_note(org, user, tickets, note=note)
         elif action == self.ACTION_CHANGE_TOPIC:
@@ -1556,14 +1655,18 @@ class TicketBulkActionSerializer(WriteSerializer):
 
 class TopicReadSerializer(ReadSerializer):
     created_on = serializers.DateTimeField(default_timezone=pytz.UTC)
+    counts = serializers.SerializerMethodField()
     system = serializers.SerializerMethodField()
+
+    def get_counts(self, obj):
+        return {"open": obj.open_count, "closed": obj.closed_count}
 
     def get_system(self, obj):
         return obj.is_default
 
     class Meta:
         model = Topic
-        fields = ("uuid", "name", "system", "created_on")
+        fields = ("uuid", "name", "counts", "system", "created_on")
 
 
 class TopicWriteSerializer(WriteSerializer):

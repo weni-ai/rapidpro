@@ -28,11 +28,10 @@ class Dialog360Type(ChannelType):
     courier_url = r"^d3/(?P<uuid>[a-z0-9\-]+)/(?P<action>receive)$"
 
     name = "360Dialog WhatsApp"
-    icon = "icon-whatsapp"
 
-    claim_blurb = _(
-        "Activate your own enterprise WhatsApp account in %(link)s to communicate with your contacts. "
-    ) % {"link": '<a href="https://www.360dialog.com/">360Dialog</a>'}
+    claim_blurb = _("Activate your own enterprise WhatsApp account in %(link)s to communicate with your contacts. ") % {
+        "link": '<a target="_blank" href="https://www.360dialog.com/">360Dialog</a>'
+    }
     claim_view = ClaimView
 
     schemes = [URN.WHATSAPP_SCHEME]
@@ -41,8 +40,8 @@ class Dialog360Type(ChannelType):
     def get_urls(self):
         return [
             self.get_claim_url(),
-            re_path(r"^(?P<uuid>[a-z0-9\-]+)/templates$", TemplatesView.as_view(), name="templates"),
-            re_path(r"^(?P<uuid>[a-z0-9\-]+)/sync_logs$", SyncLogsView.as_view(), name="sync_logs"),
+            re_path(r"^(?P<uuid>[a-z0-9\-]+)/templates$", TemplatesView.as_view(channel_type=self), name="templates"),
+            re_path(r"^(?P<uuid>[a-z0-9\-]+)/sync_logs$", SyncLogsView.as_view(channel_type=self), name="sync_logs"),
         ]
 
     def get_headers(self, channel):
@@ -93,3 +92,6 @@ class Dialog360Type(ChannelType):
             raise requests.RequestException("Could not check api status", response=response)
 
         return response
+
+    def is_available_to(self, org, user):
+        return False, False

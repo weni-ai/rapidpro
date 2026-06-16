@@ -10,24 +10,12 @@ from rest_framework.reverse import reverse
 from smartmin.views import SmartFormView, SmartTemplateView
 
 from django import forms
-from django.conf import settings
 from django.contrib.auth import authenticate, login
 from django.db.models import Count, Prefetch, Q
 from django.http import HttpResponse, JsonResponse
 from django.utils.translation import gettext_lazy as _
 from django.views.decorators.csrf import csrf_exempt
 
-from temba.api.models import APIToken, Resthook, ResthookSubscriber, WebHookEvent
-from temba.api.v2.views_base import (
-    BaseAPIView,
-    BulkWriteAPIMixin,
-    CreatedOnCursorPagination,
-    DateJoinedCursorPagination,
-    DeleteAPIMixin,
-    ListAPIMixin,
-    ModifiedOnCursorPagination,
-    WriteAPIMixin,
-)
 from temba.archives.models import Archive
 from temba.campaigns.models import Campaign, CampaignEvent
 from temba.channels.models import Channel, ChannelEvent
@@ -36,16 +24,26 @@ from temba.contacts.models import Contact, ContactField, ContactGroup, ContactGr
 from temba.flows.models import Flow, FlowRun, FlowStart
 from temba.globals.models import Global
 from temba.locations.models import AdminBoundary, BoundaryAlias
-from temba.msgs.models import Broadcast, Label, LabelCount, Msg, SystemLabel
+from temba.msgs.models import Broadcast, Label, LabelCount, Media, Msg, SystemLabel
 from temba.orgs.models import OrgMembership, OrgRole, User
 from temba.templates.models import Template, TemplateTranslation
-from temba.tickets.models import Ticket, Ticketer, Topic
+from temba.tickets.models import Ticket, TicketCount, Ticketer, Topic
 from temba.utils import splitting_getlist, str_to_bool
-from temba.utils.s3 import public_file_storage
-from temba.utils.uuid import is_uuid, uuid4
+from temba.utils.uuid import is_uuid
 
-from ..models import SSLPermission
-from ..support import InvalidQueryError
+from ..models import APIPermission, APIToken, Resthook, ResthookSubscriber, SSLPermission, WebHookEvent
+from ..support import (
+    APIBasicAuthentication,
+    APISessionAuthentication,
+    APITokenAuthentication,
+    CreatedOnCursorPagination,
+    DateJoinedCursorPagination,
+    InvalidQueryError,
+    ModifiedOnCursorPagination,
+    OrgUserRateThrottle,
+    SentOnCursorPagination,
+)
+from ..views import BaseAPIView, BulkWriteAPIMixin, DeleteAPIMixin, ListAPIMixin, WriteAPIMixin
 from .serializers import (
     AdminBoundaryReadSerializer,
     ArchiveReadSerializer,
@@ -73,8 +71,11 @@ from .serializers import (
     GlobalWriteSerializer,
     LabelReadSerializer,
     LabelWriteSerializer,
+    MediaReadSerializer,
+    MediaWriteSerializer,
     MsgBulkActionSerializer,
     MsgReadSerializer,
+    MsgWriteSerializer,
     ResthookReadSerializer,
     ResthookSubscriberReadSerializer,
     ResthookSubscriberWriteSerializer,
@@ -97,7 +98,7 @@ class RootView(views.APIView):
 
      * [/api/v2/archives](/api/v2/archives) - to list archives of messages and runs
      * [/api/v2/boundaries](/api/v2/boundaries) - to list administrative boundaries
-     * [/api/v2/broadcasts](/api/v2/broadcasts) - to list and send message broadcasts
+     * [/api/v2/broadcasts](/api/v2/broadcasts) - to list and send broadcasts
      * [/api/v2/campaigns](/api/v2/campaigns) - to list, create, or update campaigns
      * [/api/v2/campaign_events](/api/v2/campaign_events) - to list, create, update or delete campaign events
      * [/api/v2/channels](/api/v2/channels) - to list channels
@@ -112,7 +113,8 @@ class RootView(views.APIView):
      * [/api/v2/globals](/api/v2/globals) - to list globals
      * [/api/v2/groups](/api/v2/groups) - to list, create, update or delete contact groups
      * [/api/v2/labels](/api/v2/labels) - to list, create, update or delete message labels
-     * [/api/v2/messages](/api/v2/messages) - to list messages
+     * [/api/v2/media](/api/v2/media) - to upload media for messages
+     * [/api/v2/messages](/api/v2/messages) - to list and send messages
      * [/api/v2/message_actions](/api/v2/message_actions) - to perform bulk message actions
      * [/api/v2/runs](/api/v2/runs) - to list flow runs
      * [/api/v2/resthooks](/api/v2/resthooks) - to list resthooks
@@ -199,6 +201,7 @@ class RootView(views.APIView):
     Python users of the API.
     """
 
+    authentication_classes = (APISessionAuthentication, APITokenAuthentication)
     permission_classes = (SSLPermission, IsAuthenticated)
 
     def get(self, request, *args, **kwargs):
@@ -221,6 +224,7 @@ class RootView(views.APIView):
                 "globals": reverse("api.v2.globals", request=request),
                 "groups": reverse("api.v2.groups", request=request),
                 "labels": reverse("api.v2.labels", request=request),
+                "media": reverse("api.v2.media", request=request),
                 "messages": reverse("api.v2.messages", request=request),
                 "message_actions": reverse("api.v2.message_actions", request=request),
                 "resthooks": reverse("api.v2.resthooks", request=request),
@@ -244,6 +248,7 @@ class ExplorerView(SmartTemplateView):
     """
 
     template_name = "api/v2/api_explorer.html"
+    title = _("API Explorer")
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
@@ -335,7 +340,7 @@ class AuthenticateView(SmartFormView):
             tokens = []
 
             if role:
-                valid_orgs = APIToken.get_orgs_for_role(user, role)
+                valid_orgs = APIToken.get_orgs_for_role(self.request, role)
                 for org in valid_orgs:
                     token = APIToken.get_or_create(org, user, role=role)
                     serialized = {"uuid": str(org.uuid), "name": org.name, "id": org.id}  # for backward compatibility
@@ -348,12 +353,23 @@ class AuthenticateView(SmartFormView):
             return HttpResponse(status=403)
 
 
+class BaseEndpoint(BaseAPIView):
+    """
+    Base class of all our API V2 endpoints
+    """
+
+    authentication_classes = (APISessionAuthentication, APITokenAuthentication, APIBasicAuthentication)
+    permission_classes = (SSLPermission, APIPermission)
+    throttle_classes = (OrgUserRateThrottle,)
+    throttle_scope = "v2"
+
+
 # ============================================================
 # Endpoints (A-Z)
 # ============================================================
 
 
-class ArchivesEndpoint(ListAPIMixin, BaseAPIView):
+class ArchivesEndpoint(ListAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list the data archives associated with your account.
 
@@ -438,7 +454,7 @@ class ArchivesEndpoint(ListAPIMixin, BaseAPIView):
         }
 
 
-class BoundariesEndpoint(ListAPIMixin, BaseAPIView):
+class BoundariesEndpoint(ListAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list the administrative boundaries for the country associated with your account,
     along with the simplified GPS geometry for those boundaries in GEOJSON format.
@@ -527,7 +543,7 @@ class BoundariesEndpoint(ListAPIMixin, BaseAPIView):
         }
 
 
-class BroadcastsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
+class BroadcastsEndpoint(ListAPIMixin, WriteAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to send new message broadcasts and list existing broadcasts in your account.
 
@@ -539,7 +555,9 @@ class BroadcastsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
      * **urns** - the URNs that received the broadcast (array of strings)
      * **contacts** - the contacts that received the broadcast (array of objects)
      * **groups** - the groups that received the broadcast (array of objects)
-     * **text** - the message text (string or translations object)
+     * **text** - the message text translations (dict of strings)
+     * **attachments** - the attachment translations (dict of lists of strings)
+     * **base_language** - the default translation language (string)
      * **status** - the status of the message (one of "queued", "sent", "failed").
      * **created_on** - when this broadcast was either created (datetime) (filterable as `before` and `after`).
 
@@ -558,19 +576,24 @@ class BroadcastsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
                     "urns": ["tel:+250788123123", "tel:+250788123124"],
                     "contacts": [{"uuid": "09d23a05-47fe-11e4-bfe9-b8f6b119e9ab", "name": "Joe"}]
                     "groups": [],
-                    "text": "hello world",
+                    "text": {"eng", "hello world"},
+                    "attachments": {"eng", []},
+                    "base_language": "eng",
                     "created_on": "2013-03-02T17:28:12.123456Z"
                 },
                 ...
 
     ## Sending Broadcasts
 
-    A `POST` allows you to create and send new broadcasts, with the following JSON data:
+    A `POST` allows you to create and send new broadcasts. Attachments are media object UUIDs returned from POSTing
+    to the [media](/api/v2/media) endpoint.
 
-      * **text** - the text of the message to send (string, limited to 640 characters)
       * **urns** - the URNs of contacts to send to (array of up to 100 strings, optional)
       * **contacts** - the UUIDs of contacts to send to (array of up to 100 strings, optional)
       * **groups** - the UUIDs of contact groups to send to (array of up to 100 strings, optional)
+      * **text** - the message text translations (dict of strings)
+      * **attachments** - the attachment translations (dict of lists of strings)
+      * **base_language** - the default translation language (string, optional)
 
     Example:
 
@@ -578,7 +601,8 @@ class BroadcastsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
         {
             "urns": ["tel:+250788123123", "tel:+250788123124"],
             "contacts": ["09d23a05-47fe-11e4-bfe9-b8f6b119e9ab"],
-            "text": "hello @contact.name"
+            "text": {"eng": "Hello @contact.name!", "spa": "Hola @contact.name!"},
+            "base_language": "eng"
         }
 
     You will receive a response containing the message broadcast created:
@@ -588,7 +612,9 @@ class BroadcastsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
             "urns": ["tel:+250788123123", "tel:+250788123124"],
             "contacts": [{"uuid": "09d23a05-47fe-11e4-bfe9-b8f6b119e9ab", "name": "Joe"}]
             "groups": [],
-            "text": "hello world",
+            "text": {"eng": "Hello @contact.name!", "spa": "Hola @contact.name!"},
+            "attachments": {"eng", [], "spa": []},
+            "base_language": "eng",
             "created_on": "2013-03-02T17:28:12.123456Z"
         }
     """
@@ -601,8 +627,7 @@ class BroadcastsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
     throttle_scope = "v2.broadcasts"
 
     def filter_queryset(self, queryset):
-        org = self.request.org
-        queryset = queryset.filter(schedule=None)
+        queryset = queryset.filter(schedule=None, is_active=True)
 
         # filter by id (optional)
         broadcast_id = self.get_int_param("id")
@@ -613,11 +638,6 @@ class BroadcastsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
             Prefetch("contacts", queryset=Contact.objects.only("uuid", "name").order_by("id")),
             Prefetch("groups", queryset=ContactGroup.objects.only("uuid", "name").order_by("id")),
         )
-
-        if not org.is_anon:
-            queryset = queryset.prefetch_related(
-                Prefetch("urns", queryset=ContactURN.objects.only("scheme", "path", "display").order_by("id"))
-            )
 
         return self.filter_before_after(queryset, "created_on")
 
@@ -659,7 +679,7 @@ class BroadcastsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
         }
 
 
-class CampaignsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
+class CampaignsEndpoint(ListAPIMixin, WriteAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list campaigns in your account.
 
@@ -785,7 +805,7 @@ class CampaignsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
         }
 
 
-class CampaignEventsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseAPIView):
+class CampaignEventsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list campaign events in your account.
 
@@ -1000,7 +1020,7 @@ class CampaignEventsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseAP
         }
 
 
-class ChannelsEndpoint(ListAPIMixin, BaseAPIView):
+class ChannelsEndpoint(ListAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list channels in your account.
 
@@ -1090,7 +1110,7 @@ class ChannelsEndpoint(ListAPIMixin, BaseAPIView):
         }
 
 
-class ChannelEventsEndpoint(ListAPIMixin, BaseAPIView):
+class ChannelEventsEndpoint(ListAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list channel events in your account.
 
@@ -1187,7 +1207,7 @@ class ChannelEventsEndpoint(ListAPIMixin, BaseAPIView):
         }
 
 
-class ClassifiersEndpoint(ListAPIMixin, BaseAPIView):
+class ClassifiersEndpoint(ListAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list the active natural language understanding classifiers on your account.
 
@@ -1267,7 +1287,7 @@ class ClassifiersEndpoint(ListAPIMixin, BaseAPIView):
         }
 
 
-class ContactsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseAPIView):
+class ContactsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list, create, update and delete contacts in your account.
 
@@ -1448,12 +1468,18 @@ class ContactsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseAPIView)
     def prepare_for_serialization(self, object_list, using: str):
         Contact.bulk_urn_cache_initialize(object_list, using=using)
 
+        if str_to_bool(self.request.query_params.get("expand_urns")):
+            contact_info = Contact.bulk_inspect(object_list)
+
+            for contact in object_list:
+                contact.expanded_urns = contact_info[contact]["urns"]
+
     def get_serializer_context(self):
         """
         So that we only fetch active contact fields once for all contacts
         """
         context = super().get_serializer_context()
-        context["contact_fields"] = ContactField.user_fields.active_for_org(org=self.request.org)
+        context["contact_fields"] = ContactField.get_fields(org=self.request.org, viewable_by=self.request.user)
         return context
 
     def get_object(self):
@@ -1534,7 +1560,7 @@ class ContactsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseAPIView)
         }
 
 
-class ContactActionsEndpoint(BulkWriteAPIMixin, BaseAPIView):
+class ContactActionsEndpoint(BulkWriteAPIMixin, BaseEndpoint):
     """
     ## Bulk Contact Updating
 
@@ -1585,7 +1611,7 @@ class ContactActionsEndpoint(BulkWriteAPIMixin, BaseAPIView):
         }
 
 
-class DefinitionsEndpoint(BaseAPIView):
+class DefinitionsEndpoint(BaseEndpoint):
     """
     This endpoint allows you to export definitions of flows, campaigns and triggers in your account. Note that the
     schema of flow definitions may change over time.
@@ -1714,7 +1740,7 @@ class DefinitionsEndpoint(BaseAPIView):
         }
 
 
-class FieldsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
+class FieldsEndpoint(ListAPIMixin, WriteAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list custom contact fields in your account.
 
@@ -1842,7 +1868,7 @@ class FieldsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
         }
 
 
-class FlowsEndpoint(ListAPIMixin, BaseAPIView):
+class FlowsEndpoint(ListAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list flows in your account.
 
@@ -1856,7 +1882,7 @@ class FlowsEndpoint(ListAPIMixin, BaseAPIView):
      * **archived** - whether this flow is archived (boolean), filterable as `archived`
      * **labels** - the labels for this flow (array of objects)
      * **expires** - the time (in minutes) when this flow's inactive contacts will expire (integer)
-     * **runs** - the counts of completed, interrupted and expired runs (object)
+     * **runs** - the counts of active, completed, interrupted and expired runs (object)
      * **results** - the results that this flow may create (array)
      * **parent_refs** - the keys of the parent flow results referenced in this flow (array)
      * **created_on** - when this flow was created (datetime)
@@ -1960,7 +1986,7 @@ class FlowsEndpoint(ListAPIMixin, BaseAPIView):
         }
 
 
-class GlobalsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
+class GlobalsEndpoint(ListAPIMixin, WriteAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list, create, and update active globals on your account.
 
@@ -2097,7 +2123,7 @@ class GlobalsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
         }
 
 
-class GroupsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseAPIView):
+class GroupsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list, create, update and delete contact groups in your account.
 
@@ -2268,7 +2294,7 @@ class GroupsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseAPIView):
         }
 
 
-class LabelsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseAPIView):
+class LabelsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list, create, update and delete message labels in your account.
 
@@ -2415,7 +2441,35 @@ class LabelsEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseAPIView):
         }
 
 
-class MessagesEndpoint(ListAPIMixin, BaseAPIView):
+class MediaEndpoint(WriteAPIMixin, BaseEndpoint):
+    """
+    This endpoint allows you to upload new media objects for use as attachments on messages.
+
+    ## Uploading Media
+
+    A **POST** can be used to upload a new media object.
+
+    * **file** - the file data (bytes)
+
+    You will receive a media object as a response if successful:
+
+        {
+            "uuid": "fdd156ca-233a-48c1-896d-a9d594d59b95",
+            "content_type": "image/jpeg",
+            "url": "https://...test.jpg",
+            "filename": "test.jpg",
+            "size": 23452
+        }
+    """
+
+    parser_classes = (MultiPartParser, FormParser)
+    permission = "msgs.media_api"
+    model = Media
+    serializer_class = MediaReadSerializer
+    write_serializer_class = MediaWriteSerializer
+
+
+class MessagesEndpoint(ListAPIMixin, WriteAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list messages in your account.
 
@@ -2430,24 +2484,23 @@ class MessagesEndpoint(ListAPIMixin, BaseAPIView):
      * **urn** - the URN of the sender or receiver, depending on direction (string).
      * **channel** - the UUID and name of the channel that handled this message (object).
      * **direction** - the direction of the message (one of "incoming" or "outgoing").
-     * **type** - the type of the message (one of "inbox", "flow", "ivr").
+     * **type** - the type of the message (one of "text" or "voice").
      * **status** - the status of the message (one of "initializing", "queued", "wired", "sent", "delivered", "handled", "errored", "failed", "resent").
      * **visibility** - the visibility of the message (one of "visible", "archived" or "deleted")
      * **text** - the text of the message received (string). Note this is the logical view and the message may have been received as multiple physical messages.
      * **attachments** - the attachments on the message (array of objects).
      * **labels** - any labels set on this message (array of objects), filterable as `label` with label name or UUID.
+     * **flow** - the UUID and name of the flow if message was part of a flow (object, optional).
      * **created_on** - when this message was either received by the channel or created (datetime) (filterable as `before` and `after`).
      * **sent_on** - for outgoing messages, when the channel sent the message (null if not yet sent or an incoming message) (datetime).
      * **modified_on** - when the message was last modified (datetime)
 
-    You can also filter by `folder` where folder is one of `inbox`, `flows`, `archived`, `outbox`, `incoming`, `failed` or `sent`.
+    You can also filter by `folder` where folder is one of `inbox`, `flows`, `archived`, `outbox`, `sent` or `failed`.
     Note that you cannot filter by more than one of `contact`, `folder`, `label` or `broadcast` at the same time.
 
-    Without any parameters this endpoint will return all incoming and outgoing messages ordered by creation date.
+    The sort order for the `sent` folder is the sent date. All other requests are sorted by the message creation date.
 
-    The sort order for all folders save for `incoming` is the message creation date. For the `incoming` folder (which
-    includes all incoming messages, regardless of visibility or type) messages are sorted by last modified date. This
-    allows clients to poll for updates to message labels and visibility changes.
+    Without any parameters this endpoint will return all incoming and outgoing messages ordered by creation date.
 
     Example:
 
@@ -2463,38 +2516,79 @@ class MessagesEndpoint(ListAPIMixin, BaseAPIView):
                 "id": 4105426,
                 "broadcast": 2690007,
                 "contact": {"uuid": "d33e9ad5-5c35-414c-abd4-e7451c69ff1d", "name": "Bob McFlow"},
-                "urn": "twitter:textitin",
+                "urn": "tel:+1234567890",
                 "channel": {"uuid": "9a8b001e-a913-486c-80f4-1356e23f582e", "name": "Vonage"},
                 "direction": "out",
-                "type": "inbox",
+                "type": "text",
                 "status": "wired",
                 "visibility": "visible",
                 "text": "How are you?",
                 "attachments": [{"content_type": "audio/wav" "url": "http://domain.com/recording.wav"}],
                 "labels": [{"name": "Important", "uuid": "5a4eb79e-1b1f-4ae3-8700-09384cca385f"}],
+                "flow": {"uuid": "254fd2ff-4990-4621-9536-0a448d313692", "name": "Registration"},
                 "created_on": "2016-01-06T15:33:00.813162Z",
                 "sent_on": "2016-01-06T15:35:03.675716Z",
                 "modified_on": "2016-01-06T15:35:03.675716Z"
             },
             ...
         }
+
+    ## Sending a Message
+
+    A **POST** can be used to create and send a new message. Attachments are media object UUIDs returned from POSTing
+    to the [media](/api/v2/media) endpoint.
+
+     * **contact** - the UUID of the contact (string)
+     * **text** - the text of the message (string)
+     * **attachments** - the attachments of the message (list of strings, maximum 10)
+
+    Example:
+
+        POST /api/v2/messages.json
+        {
+            "contact": "d33e9ad5-5c35-414c-abd4-e7451c69ff1d",
+            "text": "Hi Bob",
+            "attachments": []
+        }
+
+    You will receive the new message object as a response if successful:
+
+        {
+            "id": 4105426,
+            "broadcast": null,
+            "contact": {"uuid": "d33e9ad5-5c35-414c-abd4-e7451c69ff1d", "name": "Bob McFlow"},
+            "urn": "tel:+1234567890",
+            "channel": {"uuid": "9a8b001e-a913-486c-80f4-1356e23f582e", "name": "Vonage"},
+            "direction": "out",
+            "type": "text",
+            "status": "queued",
+            "visibility": "visible",
+            "text": "Hi Bob",
+            "attachments": [],
+            "labels": [],
+            "flow": null,
+            "created_on": "2023-01-06T15:33:00.813162Z",
+            "sent_on": "2023-01-06T15:35:03.675716Z",
+            "modified_on": "2023-01-06T15:35:03.675716Z"
+        }
     """
 
     class Pagination(CreatedOnCursorPagination):
         """
-        Overridden paginator for Msg endpoint that switches from created_on to modified_on when looking
-        at all incoming messages.
+        Overridden paginator that switches depending on folder being requested.
         """
 
+        ordering = {"incoming": ModifiedOnCursorPagination.ordering, "sent": SentOnCursorPagination.ordering}
+
         def get_ordering(self, request, queryset, view=None):
-            if request.query_params.get("folder", "").lower() == "incoming":
-                return "-modified_on", "-id"
-            else:
-                return CreatedOnCursorPagination.ordering
+            folder = request.query_params.get("folder", "").lower()
+            return self.ordering.get(folder, CreatedOnCursorPagination.ordering)
 
     permission = "msgs.msg_api"
     model = Msg
     serializer_class = MsgReadSerializer
+    write_serializer_class = MsgWriteSerializer
+    write_with_transaction = False
     pagination_class = Pagination
     exclusive_params = ("contact", "folder", "label", "broadcast")
     throttle_scope = "v2.messages"
@@ -2517,13 +2611,13 @@ class MessagesEndpoint(ListAPIMixin, BaseAPIView):
             if sys_label:
                 return SystemLabel.get_queryset(org, sys_label)
             elif folder == "incoming":
-                return self.model.objects.filter(org=org, direction="I")
+                return self.model.objects.filter(org=org, direction=Msg.DIRECTION_IN, status=Msg.STATUS_HANDLED)
             else:
-                return self.model.objects.filter(pk=-1)
+                return self.model.objects.none()
         else:
             return self.model.objects.filter(
                 org=org, visibility__in=(Msg.VISIBILITY_VISIBLE, Msg.VISIBILITY_ARCHIVED)
-            ).exclude(msg_type=None)
+            ).exclude(status=Msg.STATUS_PENDING)
 
     def filter_queryset(self, queryset):
         params = self.request.query_params
@@ -2567,6 +2661,7 @@ class MessagesEndpoint(ListAPIMixin, BaseAPIView):
             Prefetch("contact_urn", queryset=ContactURN.objects.only("scheme", "path", "display")),
             Prefetch("channel", queryset=Channel.objects.only("uuid", "name")),
             Prefetch("labels", queryset=Label.objects.only("uuid", "name").order_by("pk")),
+            Prefetch("flow", queryset=Flow.objects.only("uuid", "name")),
         )
 
         # incoming folder gets sorted by 'modified_on'
@@ -2595,7 +2690,7 @@ class MessagesEndpoint(ListAPIMixin, BaseAPIView):
                 {
                     "name": "folder",
                     "required": False,
-                    "help": "A folder name to filter by, one of: inbox, flows, archived, outbox, sent, incoming",
+                    "help": "A folder name to filter by, one of: inbox, flows, archived, outbox, sent, failed",
                 },
                 {"name": "label", "required": False, "help": "A label name or UUID to filter by, ex: Spam"},
                 {
@@ -2609,11 +2704,11 @@ class MessagesEndpoint(ListAPIMixin, BaseAPIView):
                     "help": "Only return messages created after this date, ex: 2015-01-28T18:00:00.000",
                 },
             ],
-            "example": {"query": "folder=incoming&after=2014-01-01T00:00:00.000"},
+            "example": {"query": "folder=inbox&after=2014-01-01T00:00:00.000"},
         }
 
 
-class MessageActionsEndpoint(BulkWriteAPIMixin, BaseAPIView):
+class MessageActionsEndpoint(BulkWriteAPIMixin, BaseEndpoint):
     """
     ## Bulk Message Updating
 
@@ -2673,7 +2768,7 @@ class MessageActionsEndpoint(BulkWriteAPIMixin, BaseAPIView):
         }
 
 
-class ResthooksEndpoint(ListAPIMixin, BaseAPIView):
+class ResthooksEndpoint(ListAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list configured resthooks in your account.
 
@@ -2723,7 +2818,7 @@ class ResthooksEndpoint(ListAPIMixin, BaseAPIView):
         }
 
 
-class ResthookSubscribersEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseAPIView):
+class ResthookSubscribersEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list, add or remove subscribers to resthooks.
 
@@ -2861,7 +2956,7 @@ class ResthookSubscribersEndpoint(ListAPIMixin, WriteAPIMixin, DeleteAPIMixin, B
         )
 
 
-class ResthookEventsEndpoint(ListAPIMixin, BaseAPIView):
+class ResthookEventsEndpoint(ListAPIMixin, BaseEndpoint):
     """
     This endpoint lists recent events for the passed in Resthook.
 
@@ -2962,7 +3057,7 @@ class ResthookEventsEndpoint(ListAPIMixin, BaseAPIView):
         }
 
 
-class RunsEndpoint(ListAPIMixin, BaseAPIView):
+class RunsEndpoint(ListAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to fetch flow runs. A run represents a single contact's path through a flow and is created
     each time a contact is started in a flow.
@@ -3127,7 +3222,7 @@ class RunsEndpoint(ListAPIMixin, BaseAPIView):
         }
 
 
-class FlowStartsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
+class FlowStartsEndpoint(ListAPIMixin, WriteAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list manual flow starts in your account, and add or start contacts in a flow.
 
@@ -3166,8 +3261,6 @@ class FlowStartsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
                     "contacts": [
                          {"uuid": "f5901b62-ba76-4003-9c62-fjjajdsi15553", "name": "Wanz"}
                     ],
-                    "restart_participants": true,
-                    "exclude_active": false,
                     "status": "complete",
                     "params": {
                         "first_name": "Ryan",
@@ -3216,7 +3309,6 @@ class FlowStartsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
             "contacts": [
                  {"uuid": "f1ea776e-c923-4c1a-b3a3-0c466932b2cc", "name": "Wanz"}
             ],
-            "restart_participants": true,
             "status": "complete",
             "params": {
                 "first_name": "Ryan",
@@ -3303,7 +3395,7 @@ class FlowStartsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
         )
 
 
-class TemplatesEndpoint(ListAPIMixin, BaseAPIView):
+class TemplatesEndpoint(ListAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to fetch the WhatsApp templates that have been synced. Each template contains a
     dictionary of the languages it has been translated to along with the content of the template for that
@@ -3383,7 +3475,7 @@ class TemplatesEndpoint(ListAPIMixin, BaseAPIView):
         }
 
 
-class TicketersEndpoint(ListAPIMixin, BaseAPIView):
+class TicketersEndpoint(ListAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list the active ticketing services on your account.
 
@@ -3460,7 +3552,7 @@ class TicketersEndpoint(ListAPIMixin, BaseAPIView):
         }
 
 
-class TicketsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
+class TicketsEndpoint(ListAPIMixin, WriteAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list the tickets opened on your account.
 
@@ -3560,7 +3652,7 @@ class TicketsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
         }
 
 
-class TicketActionsEndpoint(BulkWriteAPIMixin, BaseAPIView):
+class TicketActionsEndpoint(BulkWriteAPIMixin, BaseEndpoint):
     """
     ## Bulk Ticket Updating
 
@@ -3609,7 +3701,7 @@ class TicketActionsEndpoint(BulkWriteAPIMixin, BaseAPIView):
         }
 
 
-class TopicsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
+class TopicsEndpoint(ListAPIMixin, WriteAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list the topics in your workspace.
 
@@ -3619,6 +3711,8 @@ class TopicsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
 
      * **uuid** - the UUID of the topic (string).
      * **name** - the name of the topic (string).
+     * **counts** - the counts of open and closed tickets with this topic (object).
+     * **system** - whether this is a system topic that can't be modified (bool).
      * **created_on** - when this topic was created (datetime).
 
     Example:
@@ -3634,6 +3728,8 @@ class TopicsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
             {
                 "uuid": "9a8b001e-a913-486c-80f4-1356e23f582e",
                 "name": "Support",
+                "counts": {"open": 12, "closed": 345},
+                "system": false,
                 "created_on": "2013-02-27T09:06:15.456"
             },
             ...
@@ -3644,6 +3740,13 @@ class TopicsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
     serializer_class = TopicReadSerializer
     write_serializer_class = TopicWriteSerializer
     pagination_class = CreatedOnCursorPagination
+
+    def prepare_for_serialization(self, object_list, using: str):
+        open_counts = TicketCount.get_by_topics(self.request.org, object_list, Ticket.STATUS_OPEN)
+        closed_counts = TicketCount.get_by_topics(self.request.org, object_list, Ticket.STATUS_CLOSED)
+        for topic in object_list:
+            topic.open_count = open_counts[topic]
+            topic.closed_count = closed_counts[topic]
 
     @classmethod
     def get_read_explorer(cls):
@@ -3661,7 +3764,7 @@ class TopicsEndpoint(ListAPIMixin, WriteAPIMixin, BaseAPIView):
         }
 
 
-class UsersEndpoint(ListAPIMixin, BaseAPIView):
+class UsersEndpoint(ListAPIMixin, BaseEndpoint):
     """
     This endpoint allows you to list the user logins in your workspace.
 
@@ -3735,7 +3838,7 @@ class UsersEndpoint(ListAPIMixin, BaseAPIView):
         }
 
 
-class WorkspaceEndpoint(BaseAPIView):
+class WorkspaceEndpoint(BaseEndpoint):
     """
     This endpoint allows you to view details about your workspace.
 
@@ -3774,27 +3877,3 @@ class WorkspaceEndpoint(BaseAPIView):
             "url": reverse("api.v2.workspace"),
             "slug": "workspace-read",
         }
-
-
-class SurveyorAttachmentsEndpoint(BaseAPIView):
-    """
-    Undocumented endpoint used by Surveyor to submit response attachments.
-    """
-
-    parser_classes = (MultiPartParser, FormParser)
-    permission = "msgs.msg_api"
-
-    def post(self, request, format=None, *args, **kwargs):
-        org = self.request.org
-        file = request.data.get("media_file", None)
-        extension = request.data.get("extension", None)
-
-        if file and extension:
-            uuid = uuid4()
-            path = f"{settings.STORAGE_ROOT_DIR}/{org.id}/surveyor_attachments/{str(uuid)[0:4]}/{uuid}.{extension}"
-            public_file_storage.save(path, file)
-            url = public_file_storage.url(path)
-
-            return Response({"location": url}, status=status.HTTP_201_CREATED)
-
-        return Response({}, status=status.HTTP_400_BAD_REQUEST)

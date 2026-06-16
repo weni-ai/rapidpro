@@ -1,5 +1,4 @@
 import cProfile
-import logging
 import pstats
 import traceback
 from io import StringIO
@@ -9,12 +8,8 @@ from django.http import HttpResponseRedirect
 from django.urls import reverse
 from django.utils import timezone, translation
 
-from temba.orgs.models import Org
-from temba.utils import brands
-
-from .context_processors_weni import use_weni_layout
-
-logger = logging.getLogger(__name__)
+from temba.context_processors_weni import use_weni_layout
+from temba.orgs.models import Org, User
 
 
 class ExceptionMiddleware:
@@ -39,30 +34,14 @@ class BrandingMiddleware:
 
     def __call__(self, request):
         """
-        Set branding for this request based on the current host
+        Set branding for this request
         """
-
-        host = "localhost"
-        try:
-            host = request.get_host()
-        except Exception as e:  # pragma: needs cover
-            logger.error(f"Could not get host: {host}, {str(e)}", exc_info=True)
-
-        request.branding = self.get_branding_for_host(host)
-
+        request.branding = self.get_branding_for_request(request)
         return self.get_response(request)
 
     @classmethod
-    def get_branding_for_host(cls, host: str) -> dict:
-        # ignore subdomains
-        if len(host.split(".")) > 2:  # pragma: needs cover
-            host = ".".join(host.split(".")[-2:])
-
-        # prune off the port
-        if ":" in host:
-            host = host[0 : host.rindex(":")]
-
-        return brands.get_by_host(host)
+    def get_branding_for_request(cls, request) -> dict:
+        return settings.BRAND
 
 
 class OrgMiddleware:
@@ -77,12 +56,15 @@ class OrgMiddleware:
         assert hasattr(request, "user"), "must be called after django.contrib.auth.middleware.AuthenticationMiddleware"
 
         request.org = self.determine_org(request)
+        if request.org:
+            # set our current role for this org
+            request.role = request.org.get_user_role(request.user)
 
         # continue the chain, which in the case of the API will set request.org
         response = self.get_response(request)
 
-        # set a response header to make it easier to find the current org id
         if request.org:
+            # set a response header to make it easier to find the current org id
             response["X-Temba-Org"] = request.org.id
 
         return response
@@ -96,14 +78,14 @@ class OrgMiddleware:
         # check for value in session
         org_id = request.session.get("org_id", None)
         if org_id:
-            org = Org.objects.filter(is_active=True, id=org_id).first()
+            org = Org.objects.filter(is_active=True, id=org_id).select_related("parent").first()
 
             # only use if user actually belongs to this org
             if org and (user.is_staff or org.has_user(user)):
                 return org
 
         # otherwise if user only belongs to one org, we can use that
-        user_orgs = user.get_orgs()
+        user_orgs = User.get_orgs_for_request(request)
         if user_orgs.count() == 1:
             return user_orgs[0]
 

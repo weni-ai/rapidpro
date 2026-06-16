@@ -1,15 +1,17 @@
 from datetime import timedelta
+from unittest.mock import Mock
 
-from requests import RequestException
+from requests import Request, RequestException
 
 from django.urls import reverse
 from django.utils import timezone
 
 from temba.classifiers.models import Classifier
 from temba.classifiers.types.wit import WitType
-from temba.tests import CRUDLTestMixin, TembaTest, mock_object
+from temba.tests import CRUDLTestMixin, TembaTest
 from temba.tickets.models import Ticketer
 from temba.tickets.types.mailgun import MailgunType
+from temba.utils.views import TEMBA_MENU_SELECTION
 
 from .models import HTTPLog
 from .tasks import trim_http_logs
@@ -89,13 +91,16 @@ class HTTPLogCRUDLTest(TembaTest, CRUDLTestMixin):
         log_url = reverse("request_logs.httplog_read", args=[l1.id])
 
         response = self.assertListFetch(webhooks_url, allow_viewers=False, allow_editors=True, context_objects=[l1])
-        self.assertContains(response, "Webhook Calls")
+        self.assertContains(response, "Webhooks")
         self.assertContains(response, log_url)
 
         # view the individual log item
         response = self.assertReadFetch(log_url, allow_viewers=False, allow_editors=True, context_object=l1)
         self.assertContains(response, "200")
         self.assertContains(response, "org1.bar")
+
+        response = self.assertReadFetch(log_url, allow_viewers=False, allow_editors=True, context_object=l1)
+        self.assertEqual("/flow/history/webhooks", response.headers.get(TEMBA_MENU_SELECTION))
 
     def test_classifier(self):
         c1 = Classifier.create(self.org, self.admin, WitType.slug, "Booker", {}, sync=False)
@@ -130,12 +135,17 @@ class HTTPLogCRUDLTest(TembaTest, CRUDLTestMixin):
         response = self.assertListFetch(
             list_url, allow_viewers=False, allow_editors=False, allow_org2=False, context_objects=[l1]
         )
+
+        menu_path = f"/settings/classifiers/{c1.uuid}"
+
+        self.assertEqual(menu_path, response.headers[TEMBA_MENU_SELECTION])
         self.assertContains(response, "Intents Synced")
-        self.assertContains(response, log_url)
+        self.assertContains(response, menu_path)
         self.assertNotContains(response, "Classifier Called")
 
         # view the individual log item
         response = self.assertReadFetch(log_url, allow_viewers=False, allow_editors=False, context_object=l1)
+        self.assertEqual(menu_path, response.headers[TEMBA_MENU_SELECTION])
         self.assertContains(response, "200")
         self.assertContains(response, "org1.bar")
         self.assertNotContains(response, "org2.bar")
@@ -185,8 +195,8 @@ class HTTPLogCRUDLTest(TembaTest, CRUDLTestMixin):
         channel = self.create_channel("WAC", "WhatsApp: 1234", "1234")
         exception = RequestException(
             "Network is unreachable",
-            request=mock_object(
-                "MockRequest",
+            request=Mock(
+                Request,
                 method="GET",
                 url="https://graph.facebook.com/v14.0/1234/message_templates?access_token=MISSING_WHATSAPP_ADMIN_SYSTEM_USER_TOKEN",
                 body=b"{}",

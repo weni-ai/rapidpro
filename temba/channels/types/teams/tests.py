@@ -81,7 +81,6 @@ class TeamsTypeTest(TembaTest):
         self.assertEqual(channel.address, "45612")
 
     def test_refresh_tokens(self):
-
         Channel.objects.all().delete()
 
         channel = self.create_channel(
