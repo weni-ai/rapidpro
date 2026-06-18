@@ -50,53 +50,38 @@ brand_info[
 
 brand_info["inactive_threshold"] = env.int("BRANDING_INACTIVE_THRESHOLD", default=90)
 
+_brand_domain = brand_info.get("domain")
+_brand_folder = brand_info.get("folder", brand_info.get("slug", "rapidpro"))
+_brand_features = ["signups"] if brand_info.get("allow_signups", True) else []
+
 DEFAULT_BRAND = env("DEFAULT_BRAND", default="rapidpro.io")
-BRANDING = {
-    DEFAULT_BRAND: {
-        "slug": brand_info.get("slug"),
-        "name": brand_info.get("name"),
-        "org": brand_info.get("org"),
-        "colors": env.dict("BRANDING_COLORS", default=dict(primary="#0c6596")),
-        "styles": env.list("BRANDING_STYLES", default=["brands/rapidpro/font/style.css"]),
-        "email": brand_info.get("email"),
-        "support_email": brand_info.get("email"),
-        "link": "https://{}".format(brand_info.get("domain")),
-        "api_link": "https://{}".format(brand_info.get("domain")),
-        "docs_link": brand_info.get("docs_link"),
-        "domain": brand_info.get("domain"),
-        "ticket_domain": brand_info.get("ticket_domain"),
-        "favico": "brands/{}/push.ico".format(brand_info.get("folder")),
-        "splash": "brands/{}/splash.jpg".format(brand_info.get("folder")),
-        "logo": "brands/{}/logo.png".format(brand_info.get("folder")),
-        "allow_signups": bool(brand_info.get("allow_signups")),
-        "flow_types": ["M", "V", "B", "S"],  # see Flow.FLOW_TYPES
-        "location_support": True,
-        "tiers": dict(import_flows=0, multi_user=0, multi_org=0),
-        "bundles": [],
-        "welcome_packs": [dict(size=5000, name="Demo Account"), dict(size=1000000, name="Normal Account")],
-        "title": _(brand_info.get("title")),
-        "description": _(brand_info.get("description")),
-        "credits": _(brand_info.get("credits")),
-        "inactive_threshold": brand_info.get("inactive_threshold"),
-        "redirect": brand_info.get("redirect"),
-    }
-}
-
-# Replace the hardcoded BRANDS list from settings_common (which still points to app.rapidpro.io)
-# so that Org.branding -> brands.get_by_slug(org.brand) resolves to the environment-specific
-# branding instead of the upstream default. The hosts list is also populated so that the
-# request-host lookup matches this brand on the configured domain.
-BRANDS = [
-    {
-        **BRANDING[DEFAULT_BRAND],
-        "hosts": [brand_info.get("domain")],
-    }
-]
-
-# BrandingMiddleware reads settings.BRAND, not BRANDING — sync so env vars like redirect apply.
-BRAND = BRANDS[0]
-
 HOSTNAME = DEFAULT_BRAND
+
+BRAND = {
+    "name": brand_info.get("name"),
+    "description": _(brand_info.get("description")),
+    "hosts": [_brand_domain],
+    "domain": _brand_domain,
+    "emails": {
+        "notifications": brand_info.get("email"),
+        "support": brand_info.get("email"),
+    },
+    "logos": {
+        "primary": f"brands/{_brand_folder}/logo.png",
+        "favico": f"brands/{_brand_folder}/push.ico",
+    },
+    "landing": {
+        "hero": f"brands/{_brand_folder}/splash.jpg",
+    },
+    "docs_link": brand_info.get("docs_link", "http://docs.rapidpro.io"),
+    "ticket_domain": brand_info.get("ticket_domain", f"tickets.{_brand_domain}"),
+    "features": _brand_features,
+    "credits": _(brand_info.get("credits")),
+    "colors": env.dict("BRANDING_COLORS", default={"primary": "#0c6596"}),
+    "styles": env.list("BRANDING_STYLES", default=["brands/rapidpro/font/style.css"]),
+    "redirect": brand_info.get("redirect"),
+    "inactive_threshold": brand_info.get("inactive_threshold"),
+}
 
 # VARIABLES TO API REQUISITIONS
 # ------------------------------------------------------------------------------
@@ -139,36 +124,17 @@ COMPRESS_CSS_HASHING_METHOD = "content"
 # -----------------------------------------------------------------------------------
 # Offline compression context
 # -----------------------------------------------------------------------------------
-# At runtime, `{% compress %}` blocks render with several (base_template, brand)
-# combinations:
-#   - `base_template` is set by the view layer: "base.html" (smartmin default for
-#     normal pages), "spa.html" (SpaMixin when HTTP_TEMBA_SPA header is present),
-#     "frame.html" (custom views), "smartmin/modal.html" (PJAX modal forms),
-#     "smartmin/pjax.html" (PJAX).
-#   - `brand` comes from `BrandingMiddleware.get_branding_for_host()`, which iterates
-#     BOTH `BRANDS` (list, defined in settings_common.py) and `BRANDING` (dict,
-#     defined below). Hosts that don't match any brand fall back to BRANDS[0]; hosts
-#     that match a `BRANDING` entry use that. Both can occur in the same deploy.
-#
-# The offline compress command must pre-render all of these combinations, otherwise
-# the runtime will request keys that aren't in the manifest and raise
-# OfflineGenerationError. Inspired by Nyaruka's pattern (settings_common.py iterates
-# BRANDS), extended here to also cover the BRANDING dict that Weni introduced.
-_offline_brands = [BRAND]
-for _b in BRANDING.values():
-    if id(_b) not in {id(x) for x in _offline_brands}:
-        _offline_brands.append(_b)
-
+# The offline compress command must pre-render all base template combinations used
+# at runtime, otherwise the manifest will miss keys and raise OfflineGenerationError.
 COMPRESS_OFFLINE_CONTEXT = [
     dict(
         STATIC_URL=STATIC_URL,
         base_template=_base_tpl,
-        brand=_brand,
+        branding=BRAND,
         debug=False,
         testing=False,
     )
     for _base_tpl in ("frame.html", "base.html", "spa.html", "smartmin/modal.html", "smartmin/pjax.html")
-    for _brand in _offline_brands
 ]
 
 # ------------------------------------------------------------------------------
@@ -424,7 +390,7 @@ USER_RECOVER_TIME_INTERVAL = env.int("USER_RECOVER_TIME_INTERVAL", default=12)
 USER_RECOVER_MAX_ATTEMPTS = env.int("USER_RECOVER_MAX_ATTEMPTS", default=5)
 
 # Channel that should not be displayed in the old design
-OLD_DESIGN_EXCLUDED_CHANNELS_CODES = env.list("OLD_DESIGN_EXCLUDED_CHANNELS_CODES", default=["TG", "WWC", "IG"])
+OLD_DESIGN_EXCLUDED_CHANNELS_CODES = env.list("OLD_DESIGN_EXCLUDED_CHANNELS_CODES", default=["TG", "IG"])
 
 CONNECT_BASE_URL = env("CONNECT_BASE_URL", default="https://api.dev.cloud.weni.ai")
 

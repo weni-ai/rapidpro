@@ -18,7 +18,7 @@ COMPRESS_ENABLED_NORMALIZED="$(echo "${COMPRESS_ENABLED:-true}" | tr '[:upper:]'
 case "${COMPRESS_ENABLED_NORMALIZED}" in
     true|1|yes|on)
         echo "Running offline compression..."
-        python manage.py compress --extension=.haml,.html --force
+        python manage.py compress --extension=.html --force
         ;;
     *)
         echo "Skipping offline compression (COMPRESS_ENABLED=${COMPRESS_ENABLED})"

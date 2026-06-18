@@ -71,7 +71,6 @@ class URN:
     VK_SCHEME = "vk"
     WEBCHAT_SCHEME = "webchat"
     WECHAT_SCHEME = "wechat"
-    WENIWEBCHAT_SCHEME = "weniwebchat"
     WHATSAPP_SCHEME = "whatsapp"
 
     SCHEME_CHOICES = (
@@ -95,7 +94,6 @@ class URN:
         (VK_SCHEME, _("VK Identifier")),
         (WECHAT_SCHEME, _("WeChat Identifier")),
         (WEBCHAT_SCHEME, _("Webchat Identifier")),
-        (WENIWEBCHAT_SCHEME, _("WeniWebChat Identifier")),
         (WHATSAPP_SCHEME, _("WhatsApp Identifier")),
     )
 
