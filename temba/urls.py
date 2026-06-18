@@ -13,7 +13,12 @@ from .views import WeniRedirect
 # javascript translation packages
 js_info_dict = {"packages": ()}  # this is empty due to the fact that all translation are in one folder
 
-urlpatterns = [
+urlpatterns = []
+# import any additional urls
+for app in settings.APP_URLS:  # pragma: needs cover
+    urlpatterns.append(re_path(r"^", include(app)))
+
+urlpatterns += [
     re_path(r"^", include("temba.airtime.urls")),
     re_path(r"^", include("temba.api.urls")),
     re_path(r"^", include("temba.apks.urls")),
@@ -31,7 +36,6 @@ urlpatterns = [
     re_path(r"^", include("temba.notifications.urls")),
     re_path(r"^", include("temba.public.urls")),
     re_path(r"^", include("temba.request_logs.urls")),
-    re_path(r"^", include("temba.schedules.urls")),
     re_path(r"^", include("temba.tickets.urls")),
     re_path(r"^", include("temba.triggers.urls")),
     re_path(r"^", include("temba.orgs.urls")),
