@@ -5,7 +5,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("request_logs", "0015_squashed"),
+        ("request_logs", "0016_alter_httplog_log_type"),
     ]
 
     operations = [
@@ -30,6 +30,7 @@ class Migration(migrations.Migration):
                     ("whatsapp_tokens_synced", "WhatsApp Tokens Synced"),
                     ("whatsapp_contacts_refreshed", "WhatsApp Contacts Refreshed"),
                     ("whataspp_check_health", "WhatsApp Health Check"),
+                    ("teams_tokens_synced", "Teams Tokens Synced"),
                 ],
                 max_length=32,
             ),
