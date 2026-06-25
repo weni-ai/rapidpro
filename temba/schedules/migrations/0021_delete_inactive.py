@@ -19,7 +19,10 @@ def delete_inactive_schedules(apps, schema_editor):  # pragma: no cover
             break
 
         Broadcast.objects.filter(schedule_id__in=id_batch).update(schedule=None)
-        Trigger.objects.filter(schedule_id__in=id_batch).update(schedule=None)
+
+        num_triggers, _ = Trigger.objects.filter(schedule_id__in=id_batch).delete()
+        if num_triggers:
+            print(f"Deleted {num_triggers} triggers tied to inactive schedules")
 
         del_count, _ = Schedule.objects.filter(id__in=id_batch).delete()
         num_deleted += del_count

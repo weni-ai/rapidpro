@@ -3,7 +3,7 @@
 from django.db import migrations
 
 
-def fix_deleted_schedules(apps, schema_editor):
+def fix_deleted_schedules(apps, schema_editor):  # pragma: no cover
     Schedule = apps.get_model("schedules", "Schedule")
 
     num_deleted = 0
@@ -24,11 +24,14 @@ def fix_deleted_schedules(apps, schema_editor):
         print(f"Deleted {num_deleted} schedules with deleted triggers")
 
 
-def reverse(apps, schema_editor):
+def reverse(apps, schema_editor):  # pragma: no cover
     pass
 
 
 class Migration(migrations.Migration):
-    dependencies = [("schedules", "0025_pause_archived_triggers")]
+    dependencies = [
+        ("schedules", "0025_pause_archived_triggers"),
+        ("triggers", "0039_remove_trigger_triggers_scheduled_trigger_has_schedule_and_more"),
+    ]
 
     operations = [migrations.RunPython(fix_deleted_schedules, reverse)]
