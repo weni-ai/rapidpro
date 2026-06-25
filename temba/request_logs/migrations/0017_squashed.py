@@ -44,6 +44,7 @@ class Migration(migrations.Migration):
                                 "WhatsApp Contacts Refreshed",
                             ),
                             ("whataspp_check_health", "WhatsApp Health Check"),
+                            ("teams_tokens_synced", "Teams Tokens Synced"),
                         ],
                         max_length=32,
                     ),
