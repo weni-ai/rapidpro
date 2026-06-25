@@ -1806,7 +1806,7 @@ version = "2023.10.3"
 description = "Alternative regular expression module, to replace re."
 optional = false
 python-versions = ">=3.7"
-groups = ["dev"]
+groups = ["main", "dev"]
 files = [
     {file = "regex-2023.10.3-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:4c34d4f73ea738223a094d8e0ffd6d2c1a1b4c175da34d6b0de3d8d69bee6bcc"},
     {file = "regex-2023.10.3-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:a8f4e49fc3ce020f65411432183e6775f24e02dff617281094ba6ab079ef0915"},
@@ -2487,4 +2487,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.10"
-content-hash = "01e284cb64ed77620c9a2fc2469ab8356ede8a37b1d1cf44422bb31ea6e0a690"
+content-hash = "e019f5163262bd69e2f22d6f2f3cb83f4c41d9c47c6bbd7da27f43f9fd8f48e0"
