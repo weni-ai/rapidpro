@@ -95,6 +95,10 @@ class TurnTypeTest(CRUDLTestMixin, TembaTest):
 
     @patch("requests.get")
     def test_get_api_templates(self, mock_get):
+        TemplateTranslation.objects.all().delete()
+        Channel.objects.all().delete()
+        HTTPLog.objects.all().delete()
+
         channel = self.create_channel(
             "TRN",
             "Turn: 1234",
@@ -122,22 +126,18 @@ class TurnTypeTest(CRUDLTestMixin, TembaTest):
             MockResponse(200, '{"data": ["bar"], "paging": {"next": null} }'),
         ]
 
-        templates_data, valid = TurnType().get_api_templates(channel)
+        templates_data, no_error = TurnType().get_api_templates(channel)
+        self.assertEqual(1, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED).count())
+        self.assertFalse(no_error)
         self.assertEqual([], templates_data)
-        self.assertFalse(valid)
-        self.assertEqual(1, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, is_error=True).count())
 
-        templates_data, valid = TurnType().get_api_templates(channel)
+        templates_data, no_error = TurnType().get_api_templates(channel)
+        self.assertFalse(no_error)
         self.assertEqual([], templates_data)
-        self.assertFalse(valid)
-        self.assertEqual(2, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, is_error=True).count())
 
-        templates_data, valid = TurnType().get_api_templates(channel)
+        templates_data, no_error = TurnType().get_api_templates(channel)
+        self.assertTrue(no_error)
         self.assertEqual(["foo", "bar"], templates_data)
-        self.assertTrue(valid)
-
-        self.assertEqual(2, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, is_error=True).count())
-        self.assertEqual(1, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, is_error=False).count())
 
         for log in HTTPLog.objects.all():
             self.assertNotIn("token123", json.dumps(log.get_display()))
@@ -147,9 +147,9 @@ class TurnTypeTest(CRUDLTestMixin, TembaTest):
             params={"access_token": "token123", "limit": 255},
         )
 
-        templates_data, valid = TurnType().get_api_templates(channel)
+        templates_data, no_error = TurnType().get_api_templates(channel)
+        self.assertTrue(no_error)
         self.assertEqual(["foo", "bar"], templates_data)
-        self.assertTrue(valid)
 
         mock_get.assert_has_calls(
             [
@@ -167,6 +167,7 @@ class TurnTypeTest(CRUDLTestMixin, TembaTest):
     def test_refresh_tokens(self):
         TemplateTranslation.objects.all().delete()
         Channel.objects.all().delete()
+        HTTPLog.objects.all().delete()
 
         channel = self.create_channel(
             "TRN",
@@ -200,61 +201,24 @@ class TurnTypeTest(CRUDLTestMixin, TembaTest):
             },
         )
 
-        with patch("requests.post") as mock_post:
-            mock_post.return_value = MockResponse(
-                200,
-                '{"users": [{"token": "abc345"}]}',
-                headers={
-                    "Authorization": "Basic dGVtYmE6dGVtYmFwYXNzd2Q=",
-                    "WA-user": "temba",
-                    "WA-pass": "tembapasswd",
-                },
-            )
+        with patch("temba.channels.types.turn.tasks.requests.post") as mock_post:
+            mock_post.return_value = MockResponse(200, '{"users": [{"token": "abc345"}]}')
             self.assertFalse(channel.http_logs.filter(log_type=HTTPLog.WHATSAPP_TOKENS_SYNCED, is_error=False))
             refresh_turn_whatsapp_tokens()
             self.assertTrue(channel.http_logs.filter(log_type=HTTPLog.WHATSAPP_TOKENS_SYNCED, is_error=False))
             channel.refresh_from_db()
             self.assertEqual("abc345", channel.config[Channel.CONFIG_AUTH_TOKEN])
 
-        with patch("requests.post") as mock_post:
-            mock_post.side_effect = [
-                MockResponse(
-                    400,
-                    '{ "error": true }',
-                    headers={
-                        "Authorization": "Basic dGVtYmE6dGVtYmFwYXNzd2Q=",
-                        "WA-user": "temba",
-                        "WA-pass": "tembapasswd",
-                    },
-                )
-            ]
+        with patch("temba.channels.types.turn.tasks.requests.post") as mock_post:
+            mock_post.side_effect = [MockResponse(400, '{ "error": true }')]
             self.assertFalse(channel.http_logs.filter(log_type=HTTPLog.WHATSAPP_TOKENS_SYNCED, is_error=True))
             refresh_turn_whatsapp_tokens()
             self.assertTrue(channel.http_logs.filter(log_type=HTTPLog.WHATSAPP_TOKENS_SYNCED, is_error=True))
             channel.refresh_from_db()
             self.assertEqual("abc345", channel.config[Channel.CONFIG_AUTH_TOKEN])
 
-        with patch("requests.post") as mock_post:
-            mock_post.side_effect = [
-                MockResponse(
-                    200,
-                    "",
-                    headers={
-                        "Authorization": "Basic dGVtYmE6dGVtYmFwYXNzd2Q=",
-                        "WA-user": "temba",
-                        "WA-pass": "tembapasswd",
-                    },
-                ),
-                MockResponse(
-                    200,
-                    '{"users": [{"token": "abc098"}]}',
-                    headers={
-                        "Authorization": "Basic dGVtYmE6dGVtYmFwYXNzd2Q=",
-                        "WA-user": "temba",
-                        "WA-pass": "tembapasswd",
-                    },
-                ),
-            ]
+        with patch("temba.channels.types.turn.tasks.requests.post") as mock_post:
+            mock_post.side_effect = [MockResponse(200, ""), MockResponse(200, '{"users": [{"token": "abc098"}]}')]
             refresh_turn_whatsapp_tokens()
 
             channel.refresh_from_db()

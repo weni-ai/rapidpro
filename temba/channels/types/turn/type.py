@@ -70,14 +70,13 @@ class TurnType(ChannelType):
         if CONFIG_FB_BUSINESS_ID not in channel.config or CONFIG_FB_ACCESS_TOKEN not in channel.config:
             return [], False
 
-        facebook_template_domain = channel.config.get(CONFIG_FB_TEMPLATE_LIST_DOMAIN, "graph.facebook.com")
-        facebook_business_id = channel.config.get(CONFIG_FB_BUSINESS_ID)
-        facebook_template_api_version = channel.config.get(CONFIG_FB_TEMPLATE_API_VERSION, "v14.0")
-        url = TEMPLATE_LIST_URL % (facebook_template_domain, facebook_template_api_version, facebook_business_id)
-        template_data = []
-
         start = timezone.now()
         try:
+            facebook_template_domain = channel.config.get(CONFIG_FB_TEMPLATE_LIST_DOMAIN, "graph.facebook.com")
+            facebook_business_id = channel.config.get(CONFIG_FB_BUSINESS_ID)
+            facebook_template_api_version = channel.config.get(CONFIG_FB_TEMPLATE_API_VERSION, "v14.0")
+            url = TEMPLATE_LIST_URL % (facebook_template_domain, facebook_template_api_version, facebook_business_id)
+            template_data = []
             while url:
                 response = requests.get(
                     url, params={"access_token": channel.config[CONFIG_FB_ACCESS_TOKEN], "limit": 255}
@@ -85,7 +84,9 @@ class TurnType(ChannelType):
                 HTTPLog.from_response(
                     HTTPLog.WHATSAPP_TEMPLATES_SYNCED, response, start, timezone.now(), channel=channel
                 )
-                response.raise_for_status()
+
+                if response.status_code != 200:
+                    return [], False
 
                 template_data.extend(response.json()["data"])
                 url = response.json().get("paging", {}).get("next", None)
