@@ -2,11 +2,10 @@ import logging
 
 import requests
 
-from django.urls import re_path, reverse
+from django.urls import re_path
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from temba.channels.models import Channel
 from temba.channels.types.turn.views import ClaimView
 from temba.contacts.models import URN
 from temba.request_logs.models import HTTPLog
