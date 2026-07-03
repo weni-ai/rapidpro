@@ -1,3 +1,7 @@
+1.8.8-rapidpro-26.0.0
+----------
+* Make Turn.io available for all org
+
 1.8.5-rapidpro-10.2.4
 ----------
 * Add Microsoft SSO
