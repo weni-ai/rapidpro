@@ -53,8 +53,3 @@ if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 else:
     urlpatterns.append(re_path(r"^sitestatic/(?P<path>.*)$", serve, {"document_root": settings.STATIC_ROOT}))
-
-
-# import any additional urls
-for app in settings.APP_URLS:  # pragma: needs cover
-    urlpatterns.append(re_path(r"^", include(app)))

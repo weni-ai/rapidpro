@@ -2,7 +2,6 @@
 django
 django-compressor
 django-countries
-django-hamlpy
 django-mptt
 django-redis
 django-storages
