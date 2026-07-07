@@ -1,3 +1,7 @@
+1.8.6-rapidpro-8.2.0
+----------
+* Add turn io channel type
+
 1.8.4-rapidpro-7.4.2
 ----------
 * Add business_management permission
