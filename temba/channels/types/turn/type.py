@@ -12,7 +12,7 @@ from temba.request_logs.models import HTTPLog
 from temba.templates.models import TemplateTranslation
 from temba.utils.whatsapp.views import SyncLogsView, TemplatesView
 
-from ...models import ChannelType
+from ...models import ChannelType, ConfigUI
 
 CONFIG_FB_BUSINESS_ID = "fb_business_id"
 CONFIG_FB_ACCESS_TOKEN = "fb_access_token"
@@ -45,15 +45,15 @@ class TurnType(ChannelType):
     )
     claim_view = ClaimView
 
-    configuration_blurb = _(
-        "To finish configuring this channel, you'll need Turn.io to use the following callback URL."
-    )
-    configuration_urls = (
-        dict(
-            label=_("Receive URL"),
-            url="https://{{ channel.callback_domain }}{% url 'courier.trn' channel.uuid 'receive' %}",
-            description=_("This URL should be called by Turn.io when new messages are received."),
-        ),
+    config_ui = ConfigUI(
+        blurb=_("To finish configuring this channel, you'll need Turn.io to use the following callback URL."),
+        endpoints=[
+            ConfigUI.Endpoint(
+                courier="receive",
+                label=_("Receive URL"),
+                help=_("This URL should be called by Turn.io when new messages are received."),
+            ),
+        ],
     )
 
     def get_urls(self):
