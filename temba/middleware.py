@@ -1,11 +1,11 @@
 import cProfile
+import json
 import pstats
 import traceback
 from io import StringIO
 
 from django.conf import settings
-from django.http import HttpResponseRedirect
-from django.urls import reverse
+from django.contrib import messages
 from django.utils import timezone, translation
 
 from temba.context_processors_weni import use_weni_layout
@@ -31,6 +31,10 @@ class OrgMiddleware:
     Determines the org for this request and sets it on the request. Also sets request.branding for convenience.
     """
 
+    session_key = "org_id"
+    header_name = "X-Temba-Org"
+    select_related = ("parent",)
+
     def __init__(self, get_response=None):
         self.get_response = get_response
 
@@ -49,7 +53,7 @@ class OrgMiddleware:
 
         if request.org:
             # set a response header to make it easier to find the current org id
-            response["X-Temba-Org"] = request.org.id
+            response[self.header_name] = request.org.id
 
         return response
 
@@ -60,9 +64,9 @@ class OrgMiddleware:
             return None
 
         # check for value in session
-        org_id = request.session.get("org_id", None)
+        org_id = request.session.get(self.session_key, None)
         if org_id:
-            org = Org.objects.filter(is_active=True, id=org_id).select_related("parent").first()
+            org = Org.objects.filter(is_active=True, id=org_id).select_related(*self.select_related).first()
 
             # only use if user actually belongs to this org
             if org and (user.is_staff or org.has_user(user)):
@@ -116,6 +120,32 @@ class LanguageMiddleware:
 
         response = self.get_response(request)
         response.headers.setdefault("Content-Language", translation.get_language())
+        return response
+
+
+class ToastMiddleware:
+    """
+    Converts django messages into a response header for toasts
+    """
+
+    def __init__(self, get_response=None):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+
+        # only work on spa requests and exclude redirects
+        if response.status_code == 200:
+            storage = messages.get_messages(request)
+            toasts = []
+            for message in storage:
+                toasts.append(
+                    {"level": "error" if message.level == messages.ERROR else "info", "text": str(message.message)}
+                )
+                message.used = False
+
+            if toasts:
+                response["X-Temba-Toasts"] = json.dumps(toasts)
         return response
 
 

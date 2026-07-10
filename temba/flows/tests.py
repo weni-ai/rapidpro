@@ -1,7 +1,7 @@
 import decimal
 import io
 import os
-from datetime import datetime, timedelta, timezone as tzone
+from datetime import date, datetime, timedelta, timezone as tzone
 from unittest.mock import patch
 
 from django_redis import get_redis_connection
@@ -20,10 +20,10 @@ from temba.campaigns.models import Campaign, CampaignEvent
 from temba.classifiers.models import Classifier
 from temba.contacts.models import URN, Contact, ContactField, ContactGroup, ContactURN
 from temba.globals.models import Global
-from temba.mailroom import FlowValidationException
 from temba.orgs.integrations.dtone import DTOneType
-from temba.templates.models import Template, TemplateTranslation
-from temba.tests import CRUDLTestMixin, MockResponse, TembaTest, matchers, mock_mailroom, override_brand
+from temba.orgs.models import Export
+from temba.templates.models import TemplateTranslation
+from temba.tests import CRUDLTestMixin, MockJsonResponse, TembaTest, matchers, mock_mailroom, override_brand
 from temba.tests.base import get_contact_search
 from temba.tests.engine import MockSessionWriter
 from temba.tests.s3 import MockS3Client, jsonlgz_encode
@@ -34,7 +34,6 @@ from temba.utils.views import TEMBA_MENU_SELECTION
 
 from .checks import mailroom_url
 from .models import (
-    ExportFlowResultsTask,
     Flow,
     FlowCategoryCount,
     FlowLabel,
@@ -48,6 +47,7 @@ from .models import (
     FlowStartCount,
     FlowUserConflictException,
     FlowVersionConflictException,
+    ResultsExport,
 )
 from .tasks import (
     interrupt_flow_sessions,
@@ -156,7 +156,7 @@ class FlowTest(TembaTest, CRUDLTestMixin):
     def test_ensure_current_version(self):
         # importing migrates to latest spec version
         flow = self.get_flow("favorites_v13")
-        self.assertEqual("13.2.0", flow.version_number)
+        self.assertEqual("13.5.0", flow.version_number)
         self.assertEqual(1, flow.revisions.count())
 
         # rewind one spec version..
@@ -173,7 +173,7 @@ class FlowTest(TembaTest, CRUDLTestMixin):
         flow.ensure_current_version()
 
         # check we migrate to current spec version
-        self.assertEqual("13.2.0", flow.version_number)
+        self.assertEqual("13.5.0", flow.version_number)
         self.assertEqual(2, flow.revisions.count())
         self.assertEqual("system", flow.revisions.order_by("id").last().created_by.username)
 
@@ -1385,7 +1385,7 @@ class FlowTest(TembaTest, CRUDLTestMixin):
             flow = field_spec.get("flow", parent)
 
             # make sure our field exists after import
-            field = ContactField.user_fields.filter(key=key, name=name).first()
+            field = self.org.fields.filter(key=key, name=name, is_system=False, is_proxy=False).first()
             self.assertIsNotNone(field, "Couldn't find field %s (%s)" % (key, name))
 
             # and our flow is dependent on us
@@ -1477,23 +1477,30 @@ class FlowTest(TembaTest, CRUDLTestMixin):
 class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
     def test_menu(self):
         menu_url = reverse("flows.flow_menu")
+
         FlowLabel.create(self.org, self.admin, "Important")
 
-        response = self.assertListFetch(menu_url, allow_viewers=True, allow_editors=True, allow_agents=False)
-        menu = response.json()["results"]
-        self.assertEqual(
-            ["Active", "Archived", "divider", "Globals", "History", "Labels"],
-            [m.get("name") or m.get("type") for m in menu],
+        self.assertRequestDisallowed(menu_url, [None, self.agent])
+        self.assertPageMenu(
+            menu_url,
+            self.admin,
+            [
+                "Active",
+                "Archived",
+                "Globals",
+                ("History", ["Webhooks", "Flow Starts"]),
+                ("Labels", ["Important (0)"]),
+            ],
         )
 
     def test_create(self):
         create_url = reverse("flows.flow_create")
         self.create_flow("Registration")
 
+        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
         response = self.assertCreateFetch(
             create_url,
-            allow_viewers=False,
-            allow_editors=True,
+            [self.editor, self.admin],
             form_fields=["name", "keyword_triggers", "flow_type", "base_language"],
         )
 
@@ -1503,17 +1510,15 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
                 (Flow.TYPE_MESSAGE, "Messaging"),
                 (Flow.TYPE_VOICE, "Phone Call"),
                 (Flow.TYPE_BACKGROUND, "Background"),
-                (Flow.TYPE_SURVEY, "Surveyor"),
             ],
             response.context["form"].fields["flow_type"].choices,
         )
 
-        # if surveyor feature is disabled, that is no longer a flow type option
-        with self.settings(FEATURES={}):
+        # if surveyor feature is enabled, that becomes a flow type option
+        with self.settings(FEATURES={"surveyor"}):
             response = self.assertCreateFetch(
                 create_url,
-                allow_viewers=False,
-                allow_editors=True,
+                [self.admin],
                 form_fields=["name", "keyword_triggers", "flow_type", "base_language"],
             )
             self.assertEqual(
@@ -1521,6 +1526,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
                     (Flow.TYPE_MESSAGE, "Messaging"),
                     (Flow.TYPE_VOICE, "Phone Call"),
                     (Flow.TYPE_BACKGROUND, "Background"),
+                    (Flow.TYPE_SURVEY, "Surveyor"),
                 ],
                 response.context["form"].fields["flow_type"].choices,
             )
@@ -1528,6 +1534,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         # try to submit without name or language
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"flow_type": "M"},
             form_errors={"name": "This field is required.", "base_language": "This field is required."},
         )
@@ -1535,6 +1542,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         # try to submit with a name that contains disallowed characters
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"name": '"Registration"', "flow_type": "M", "base_language": "eng"},
             form_errors={"name": 'Cannot contain the character: "'},
         )
@@ -1542,6 +1550,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         # try to submit with a name that is too long
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"name": "X" * 65, "flow_type": "M", "base_language": "eng"},
             form_errors={"name": "Ensure this value has at most 64 characters (it has 65)."},
         )
@@ -1549,12 +1558,14 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         # try to submit with a name that is already used
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"name": "Registration", "flow_type": "M", "base_language": "eng"},
             form_errors={"name": "Already used by another flow."},
         )
 
         response = self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"name": "Flow 1", "flow_type": "M", "base_language": "eng"},
             new_obj_query=Flow.objects.filter(org=self.org, flow_type="M", name="Flow 1"),
         )
@@ -1570,6 +1581,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         # try creating a flow with invalid keywords
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {
                 "name": "Flow #1",
                 "base_language": "eng",
@@ -1584,6 +1596,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         # submit with valid keywords
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {
                 "name": "Flow 1",
                 "base_language": "eng",
@@ -1601,6 +1614,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         # try to create another flow with one of the same keywords
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {
                 "name": "Flow 2",
                 "base_language": "eng",
@@ -1617,6 +1631,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         # and now it's no longer a conflict
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {
                 "name": "Flow 2",
                 "base_language": "eng",
@@ -1630,6 +1645,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         flow2 = Flow.objects.get(name="Flow 2")
         self.assertEqual([["test"]], list(flow2.triggers.order_by("id").values_list("keywords", flat=True)))
 
+    @override_settings(FEATURES={"surveyor"})
     def test_views(self):
         create_url = reverse("flows.flow_create")
 
@@ -1742,8 +1758,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
             },
         )
         self.assertFormError(
-            response,
-            "form",
+            response.context["form"],
             "keyword_triggers",
             "Must be single words, less than 16 characters, containing only letters and numbers.",
         )
@@ -1752,7 +1767,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         response = self.client.post(
             create_url, {"name": "Flow With Existing Keyword Triggers", "keyword_triggers": ["this", "is", "unique"]}
         )
-        self.assertFormError(response, "form", "keyword_triggers", '"unique" is already used for another flow.')
+        self.assertFormError(response.context["form"], "keyword_triggers", '"unique" is already used for another flow.')
 
         # create another trigger so there are two in the way
         trigger = Trigger.create(
@@ -1768,7 +1783,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
             create_url, {"name": "Flow With Existing Keyword Triggers", "keyword_triggers": ["this", "is", "unique"]}
         )
         self.assertFormError(
-            response, "form", "keyword_triggers", '"this", "unique" are already used for another flow.'
+            response.context["form"], "keyword_triggers", '"this", "unique" are already used for another flow.'
         )
         trigger.delete()
 
@@ -1857,10 +1872,10 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
             actual = list(flow.triggers.filter(trigger_type="K", is_active=True).values("keywords", "is_archived"))
             self.assertCountEqual(actual, expected)
 
+        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
         self.assertUpdateFetch(
             update_url,
-            allow_viewers=False,
-            allow_editors=True,
+            [self.editor, self.admin],
             form_fields={
                 "name": "Colors",
                 "keyword_triggers": [],
@@ -1872,6 +1887,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         # try to update with empty name
         self.assertUpdateSubmit(
             update_url,
+            self.admin,
             {"name": "", "expires_after_minutes": 10, "ignore_triggers": True},
             form_errors={"name": "This field is required."},
             object_unchanged=flow,
@@ -1880,6 +1896,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         # update all fields
         self.assertUpdateSubmit(
             update_url,
+            self.admin,
             {
                 "name": "New Name",
                 "keyword_triggers": ["test", "help"],
@@ -1898,6 +1915,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         # remove one keyword and add another
         self.assertUpdateSubmit(
             update_url,
+            self.admin,
             {
                 "name": "New Name",
                 "keyword_triggers": ["help", "support"],
@@ -1916,6 +1934,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         # put "test" keyword back and remove "support"
         self.assertUpdateSubmit(
             update_url,
+            self.admin,
             {
                 "name": "New Name",
                 "keyword_triggers": ["test", "help"],
@@ -1939,6 +1958,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         # re-adding "support" will now restore that trigger
         self.assertUpdateSubmit(
             update_url,
+            self.admin,
             {
                 "name": "New Name",
                 "keyword_triggers": ["test", "help", "support"],
@@ -1958,17 +1978,17 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         flow = self.get_flow("ivr")
         update_url = reverse("flows.flow_update", args=[flow.id])
 
-        # check fields
+        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
         self.assertUpdateFetch(
             update_url,
-            allow_viewers=False,
-            allow_editors=True,
+            [self.editor, self.admin],
             form_fields=["name", "keyword_triggers", "expires_after_minutes", "ignore_triggers", "ivr_retry"],
         )
 
         # try to update with an expires value which is only for messaging flows and an invalid retry value
         self.assertUpdateSubmit(
             update_url,
+            self.admin,
             {"name": "New Name", "expires_after_minutes": 720, "ignore_triggers": True, "ivr_retry": 1234},
             form_errors={
                 "expires_after_minutes": "Select a valid choice. 720 is not one of the available choices.",
@@ -1980,6 +2000,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         # update name and contact creation option to be per login
         self.assertUpdateSubmit(
             update_url,
+            self.admin,
             {
                 "name": "New Name",
                 "keyword_triggers": ["test", "help"],
@@ -2006,12 +2027,11 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         update_url = reverse("flows.flow_update", args=[flow.id])
 
         # we should only see name and contact creation option on form
-        self.assertUpdateFetch(
-            update_url, allow_viewers=False, allow_editors=True, form_fields=["name", "contact_creation"]
-        )
+        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
+        self.assertUpdateFetch(update_url, [self.editor, self.admin], form_fields=["name", "contact_creation"])
 
         # update name and contact creation option to be per login
-        self.assertUpdateSubmit(update_url, {"name": "New Name", "contact_creation": "login"})
+        self.assertUpdateSubmit(update_url, self.admin, {"name": "New Name", "contact_creation": "login"})
 
         flow.refresh_from_db()
         self.assertEqual("New Name", flow.name)
@@ -2022,10 +2042,11 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         update_url = reverse("flows.flow_update", args=[flow.id])
 
         # we should only see name on form
-        self.assertUpdateFetch(update_url, allow_viewers=False, allow_editors=True, form_fields=["name"])
+        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
+        self.assertUpdateFetch(update_url, [self.editor, self.admin], form_fields=["name"])
 
         # update name and contact creation option to be per login
-        self.assertUpdateSubmit(update_url, {"name": "New Name"})
+        self.assertUpdateSubmit(update_url, self.admin, {"name": "New Name"})
 
         flow.refresh_from_db()
         self.assertEqual("New Name", flow.name)
@@ -2060,7 +2081,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual(1, response.context["folders"][0]["count"])
         self.assertEqual(2, response.context["folders"][1]["count"])
 
-        self.assertEqual(("archive", "label", "download-results"), response.context["actions"])
+        self.assertEqual(("archive", "label", "export-results"), response.context["actions"])
 
         # but does appear in archived list
         response = self.client.get(reverse("flows.flow_archived"))
@@ -2147,13 +2168,13 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         response = self.client.get(reverse("flows.flow_filter", args=[label1.uuid]))
         self.assertEqual([flow2, flow1], list(response.context["object_list"]))
         self.assertEqual(2, len(response.context["labels"]))
-        self.assertEqual(("label", "download-results"), response.context["actions"])
+        self.assertEqual(("label", "export-results"), response.context["actions"])
 
         response = self.client.get(reverse("flows.flow_filter", args=[label2.uuid]))
         self.assertEqual([flow2], list(response.context["object_list"]))
 
         response = self.client.get(reverse("flows.flow_filter", args=[label2.uuid]))
-        self.assertEquals(f"/flow/labels/{label2.uuid}", response.headers.get(TEMBA_MENU_SELECTION))
+        self.assertEqual(f"/flow/labels/{label2.uuid}", response.headers.get(TEMBA_MENU_SELECTION))
 
     def test_get_definition(self):
         flow = self.get_flow("color_v13")
@@ -2365,7 +2386,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
             )
 
             # try with a bad query
-            mr_mocks.error("mismatched input at (((", code="unexpected_token", extra={"token": "((("})
+            mr_mocks.exception(mailroom.QueryValidationException("mismatched input at (((", "syntax"))
 
             response = self.client.post(
                 preview_url,
@@ -2376,7 +2397,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
                 content_type="application/json",
             )
             self.assertEqual(400, response.status_code)
-            self.assertEqual({"query": "", "total": 0, "error": "Invalid query syntax at '((('"}, response.json())
+            self.assertEqual({"query": "", "total": 0, "error": "Invalid query syntax."}, response.json())
 
             # suspended orgs should block
             self.org.is_suspended = True
@@ -2463,7 +2484,10 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
             self.assertEqual(
                 response.json()["warnings"][0],
-                "You've selected a lot of contacts! Depending on your channel it could take days to reach everybody and could reduce response rates. Click on <b>Skip inactive contacts</b> below to limit your selection to contacts who are more likely to respond.",
+                "You've selected a lot of contacts! Depending on your channel "
+                "it could take days to reach everybody and could reduce response rates. "
+                "Filter for contacts that have sent a message recently "
+                "to limit your selection to contacts who are more likely to respond.",
             )
 
             # if we release our send channel we also can't start a regular messaging flow
@@ -2483,56 +2507,6 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
                 response.json()["blockers"][0],
                 'To start this flow you need to <a href="/channels/channel/claim/">add a channel</a> to your workspace which will allow you to send messages to your contacts.',
             )
-
-    @mock_mailroom
-    def test_facebook_warnings(self, mr_mocks):
-        no_topic = self.get_flow("pick_a_number")
-        with_topic = self.get_flow("with_message_topic")
-
-        self.login(self.admin)
-
-        mr_mocks.flow_start_preview(query="age > 30", total=2)
-        response = self.client.post(
-            reverse("flows.flow_preview_start", args=[no_topic.id]),
-            {
-                "query": "age > 30",
-            },
-            content_type="application/json",
-        )
-
-        # no warning, we don't have a facebook channel
-        self.assertEqual(response.json()["warnings"], [])
-
-        # change our channel to use a facebook scheme
-        self.channel.schemes = [URN.FACEBOOK_SCHEME]
-        self.channel.save()
-
-        # should see a warning for no topic now
-        mr_mocks.flow_start_preview(query="age > 30", total=2)
-        response = self.client.post(
-            reverse("flows.flow_preview_start", args=[no_topic.id]),
-            {
-                "query": "age > 30",
-            },
-            content_type="application/json",
-        )
-
-        self.assertEqual(
-            response.json()["warnings"][0],
-            "This flow does not specify a Facebook topic. You may still start this flow but Facebook contacts who have not sent an incoming message in the last 24 hours may not receive it.",
-        )
-
-        # warning shouldn't be present for flow with a topic
-        mr_mocks.flow_start_preview(query="age > 30", total=2)
-        response = self.client.post(
-            reverse("flows.flow_preview_start", args=[with_topic.id]),
-            {
-                "query": "age > 30",
-            },
-            content_type="application/json",
-        )
-
-        self.assertEqual(response.json()["warnings"], [])
 
     @mock_mailroom
     def test_template_warnings(self, mr_mocks):
@@ -2609,13 +2583,13 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
             content_type="application/json",
         )
 
-        self.assertEquals(
+        self.assertEqual(
             response.json()["warnings"],
             ["The message template affirmation does not exist on your account and cannot be sent."],
         )
 
         # create the template, but no translations
-        Template.objects.create(org=self.org, name="affirmation", uuid="f712e05c-bbed-40f1-b3d9-671bb9b60775")
+        template = self.create_template("affirmation", [], uuid="f712e05c-bbed-40f1-b3d9-671bb9b60775")
 
         # will be warned again
         mr_mocks.flow_start_preview(query="age > 30", total=2)
@@ -2627,28 +2601,21 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
             content_type="application/json",
         )
 
-        self.assertEquals(
+        self.assertEqual(
             response.json()["warnings"], ["Your message template affirmation is not approved and cannot be sent."]
         )
 
         # create a translation, but not approved
-        TemplateTranslation.get_or_create(
-            self.channel,
-            "affirmation",
+        TemplateTranslation.objects.create(
+            template=template,
+            channel=self.channel,
             locale="eng-US",
-            content="good boy",
-            variable_count=0,
             status=TemplateTranslation.STATUS_REJECTED,
             external_id="id1",
             external_locale="en_US",
             namespace="foo_namespace",
-            components=[
-                {
-                    "type": "BODY",
-                    "text": "good boy",
-                }
-            ],
-            params={},
+            components=[{"name": "body", "type": "body/text", "content": "Hello", "variables": {}, "params": []}],
+            variables=[],
         )
 
         # will be warned again
@@ -2661,7 +2628,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
             content_type="application/json",
         )
 
-        self.assertEquals(
+        self.assertEqual(
             response.json()["warnings"], ["Your message template affirmation is not approved and cannot be sent."]
         )
 
@@ -2678,26 +2645,22 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
             content_type="application/json",
         )
 
-        self.assertEquals(response.json()["warnings"], [])
+        self.assertEqual(response.json()["warnings"], [])
 
     @mock_mailroom
-    def test_broadcast(self, mr_mocks):
+    def test_start(self, mr_mocks):
         contact = self.create_contact("Bob", phone="+593979099111")
         flow = self.create_flow("Test")
         start_url = f"{reverse('flows.flow_start', args=[])}?flow={flow.id}"
 
-        self.assertUpdateFetch(
-            start_url,
-            allow_viewers=False,
-            allow_editors=True,
-            allow_org2=True,
-            form_fields=["flow", "contact_search"],
-        )
+        self.assertRequestDisallowed(start_url, [None, self.user, self.agent])
+        self.assertUpdateFetch(start_url, [self.editor, self.admin], form_fields=["flow", "contact_search"])
 
         # create flow start with a query
-        mr_mocks.parse_query("frank", cleaned='name ~ "frank"')
+        mr_mocks.contact_parse_query("frank", cleaned='name ~ "frank"')
         self.assertUpdateSubmit(
             start_url,
+            self.admin,
             {"flow": flow.id, "contact_search": get_contact_search(query="frank")},
         )
 
@@ -2713,17 +2676,19 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         FlowStart.objects.all().delete()
 
         # create flow start with a bogus query
-        mr_mocks.error("query contains an error")
+        mr_mocks.exception(mailroom.QueryValidationException("query contains an error", "syntax"))
         self.assertUpdateSubmit(
             start_url,
+            self.admin,
             {"flow": flow.id, "contact_search": get_contact_search(query='name = "frank')},
-            form_errors={"contact_search": "query contains an error"},
+            form_errors={"contact_search": "Invalid query syntax."},
             object_unchanged=flow,
         )
 
         # try missing contacts
         self.assertUpdateSubmit(
             start_url,
+            self.admin,
             {"flow": flow.id, "contact_search": get_contact_search(contacts=[])},
             form_errors={"contact_search": "Contacts or groups are required."},
             object_unchanged=flow,
@@ -2732,17 +2697,19 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         # try to create with an empty query
         self.assertUpdateSubmit(
             start_url,
+            self.admin,
             {"flow": flow.id, "contact_search": get_contact_search(query="")},
             form_errors={"contact_search": "A contact query is required."},
             object_unchanged=flow,
         )
 
         query = f"uuid='{contact.uuid}'"
-        mr_mocks.parse_query(query, cleaned=query)
+        mr_mocks.contact_parse_query(query, cleaned=query)
 
         # create flow start with exclude_in_other and exclude_reruns both left unchecked
         self.assertUpdateSubmit(
             start_url,
+            self.admin,
             {"flow": flow.id, "contact_search": get_contact_search(query=query)},
         )
 
@@ -2764,10 +2731,12 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         flow = self.create_flow("Background", flow_type=Flow.TYPE_BACKGROUND)
 
         # create flow start with a query
-        mr_mocks.parse_query("frank", cleaned='name ~ "frank"')
+        mr_mocks.contact_parse_query("frank", cleaned='name ~ "frank"')
 
         start_url = f"{reverse('flows.flow_start', args=[])}?flow={flow.id}"
-        self.assertUpdateSubmit(start_url, {"flow": flow.id, "contact_search": get_contact_search(query="frank")})
+        self.assertUpdateSubmit(
+            start_url, self.admin, {"flow": flow.id, "contact_search": get_contact_search(query="frank")}
+        )
 
         start = FlowStart.objects.get()
         self.assertEqual(flow, start.flow)
@@ -2796,7 +2765,8 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         seg1_url = reverse("flows.flow_recent_contacts", args=[flow.uuid, node1_exit1_uuid, node2_uuid])
 
         # nothing set in redis just means empty list
-        response = self.assertReadFetch(seg1_url, allow_viewers=True, allow_editors=True)
+        self.assertRequestDisallowed(seg1_url, [None, self.agent, self.admin2])
+        response = self.assertReadFetch(seg1_url, [self.user, self.editor, self.admin])
         self.assertEqual([], response.json())
 
         def add_recent_contact(exit_uuid: str, dest_uuid: str, contact, text: str, ts: float):
@@ -2808,7 +2778,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         add_recent_contact(node1_exit1_uuid, node2_uuid, contact2, "|x|", 1639338555.234567)
         add_recent_contact(node1_exit1_uuid, node2_uuid, contact1, "Sounds good", 1639338561.345678)
 
-        response = self.assertReadFetch(seg1_url, allow_viewers=True, allow_editors=True)
+        response = self.assertReadFetch(seg1_url, [self.user, self.editor, self.admin])
         self.assertEqual(
             [
                 {
@@ -3053,10 +3023,10 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         mode0_uuid = flow_json["nodes"][0]["uuid"]
         flow_json["nodes"][1]["uuid"] = mode0_uuid
 
-        with self.assertRaises(FlowValidationException) as cm:
+        with self.assertRaises(mailroom.FlowValidationException) as cm:
             flow.save_revision(self.admin, flow_json)
 
-        self.assertEqual(f"unable to read flow: node UUID {mode0_uuid} isn't unique", str(cm.exception))
+        self.assertEqual(f"node UUID {mode0_uuid} isn't unique", str(cm.exception))
 
         # check view converts exception to error response
         response = self.client.post(
@@ -3068,7 +3038,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
             {
                 "status": "failure",
                 "description": "Your flow failed validation. Please refresh your browser.",
-                "detail": f"unable to read flow: node UUID {mode0_uuid} isn't unique",
+                "detail": f"node UUID {mode0_uuid} isn't unique",
             },
             response.json(),
         )
@@ -3081,18 +3051,112 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         change_url = reverse("flows.flow_change_language", args=[flow.id])
 
         self.assertUpdateSubmit(
-            change_url, {"language": ""}, form_errors={"language": "This field is required."}, object_unchanged=flow
+            change_url,
+            self.admin,
+            {"language": ""},
+            form_errors={"language": "This field is required."},
+            object_unchanged=flow,
         )
 
         self.assertUpdateSubmit(
-            change_url, {"language": "fra"}, form_errors={"language": "Not a valid language."}, object_unchanged=flow
+            change_url,
+            self.admin,
+            {"language": "fra"},
+            form_errors={"language": "Not a valid language."},
+            object_unchanged=flow,
         )
 
-        self.assertUpdateSubmit(change_url, {"language": "spa"}, success_status=302)
+        self.assertUpdateSubmit(change_url, self.admin, {"language": "spa"}, success_status=302)
 
         flow_def = flow.get_definition()
         self.assertIn("eng", flow_def["localization"])
         self.assertEqual("¿Cuál es tu color favorito?", flow_def["nodes"][0]["actions"][0]["text"])
+
+    def test_export_results(self):
+        export_url = reverse("flows.flow_export_results")
+
+        flow1 = self.create_flow("Test 1")
+        flow2 = self.create_flow("Test 2")
+        testers = self.create_group("Testers", contacts=[])
+        gender = self.create_field("gender", "Gender")
+
+        self.assertRequestDisallowed(export_url, [None, self.agent])
+        response = self.assertUpdateFetch(
+            export_url + f"?ids={flow1.id},{flow2.id}",
+            [self.user, self.editor, self.admin],
+            form_fields=(
+                "start_date",
+                "end_date",
+                "with_fields",
+                "with_groups",
+                "flows",
+                "extra_urns",
+                "responded_only",
+            ),
+        )
+        self.assertNotContains(response, "already an export in progress")
+
+        # anon orgs don't see urns option
+        with self.anonymous(self.org):
+            response = self.client.get(export_url)
+            self.assertEqual(
+                ["start_date", "end_date", "with_fields", "with_groups", "flows", "responded_only", "loc"],
+                list(response.context["form"].fields.keys()),
+            )
+
+        # create a dummy export task so that we won't be able to export
+        blocking_export = ResultsExport.create(
+            self.org, self.admin, start_date=date.today() - timedelta(days=7), end_date=date.today()
+        )
+
+        response = self.client.get(export_url)
+        self.assertContains(response, "already an export in progress")
+
+        # check we can't submit in case a user opens the form and whilst another user is starting an export
+        response = self.client.post(
+            export_url, {"start_date": "2022-06-28", "end_date": "2022-09-28", "flows": [flow1.id]}
+        )
+        self.assertContains(response, "already an export in progress")
+        self.assertEqual(1, Export.objects.count())
+
+        # mark that one as finished so it's no longer a blocker
+        blocking_export.status = Export.STATUS_COMPLETE
+        blocking_export.save(update_fields=("status",))
+
+        # try to submit with no values
+        response = self.client.post(export_url, {})
+        self.assertFormError(response.context["form"], "start_date", "This field is required.")
+        self.assertFormError(response.context["form"], "end_date", "This field is required.")
+        self.assertFormError(response.context["form"], "flows", "This field is required.")
+
+        response = self.client.post(
+            export_url,
+            {
+                "start_date": "2022-06-28",
+                "end_date": "2022-09-28",
+                "flows": [flow1.id],
+                "with_groups": [testers.id],
+                "with_fields": [gender.id],
+            },
+        )
+        self.assertEqual(200, response.status_code)
+
+        export = Export.objects.exclude(id=blocking_export.id).get()
+        self.assertEqual("results", export.export_type)
+        self.assertEqual(date(2022, 6, 28), export.start_date)
+        self.assertEqual(date(2022, 9, 28), export.end_date)
+        self.assertEqual(
+            {
+                "flow_ids": [flow1.id],
+                "with_groups": [testers.id],
+                "with_fields": [gender.id],
+                "extra_urns": [],
+                "responded_only": False,
+            },
+            export.config,
+        )
+
+        self.clear_storage()
 
     def test_export_and_download_translation(self):
         self.org.set_flow_languages(self.admin, ["spa"])
@@ -3100,29 +3164,31 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         flow = self.get_flow("favorites")
         export_url = reverse("flows.flow_export_translation", args=[flow.id])
 
-        self.assertUpdateFetch(export_url, allow_viewers=False, allow_editors=True, form_fields=["language"])
+        self.assertRequestDisallowed(export_url, [None, self.agent, self.admin2])
+        self.assertUpdateFetch(export_url, [self.user, self.editor, self.admin], form_fields=["language"])
 
         # submit with no language
-        response = self.assertUpdateSubmit(export_url, {})
+        response = self.assertUpdateSubmit(export_url, self.admin, {})
 
         self.assertEqual(f"/flow/download_translation/?flow={flow.id}&language=", response.url)
 
         # check fetching the PO from the download link
-        with patch("temba.mailroom.client.MailroomClient.po_export") as mock_po_export:
+        with patch("temba.mailroom.client.client.MailroomClient.po_export") as mock_po_export:
             mock_po_export.return_value = b'msgid "Red"\nmsgstr "Roja"\n\n'
-            response = self.assertReadFetch(response.url, allow_viewers=False, allow_editors=True)
+            self.assertRequestDisallowed(response.url, [None, self.agent, self.admin2])
+            response = self.assertReadFetch(response.url, [self.user, self.editor, self.admin])
 
             self.assertEqual(b'msgid "Red"\nmsgstr "Roja"\n\n', response.content)
             self.assertEqual('attachment; filename="favorites.po"', response["Content-Disposition"])
             self.assertEqual("text/x-gettext-translation", response["Content-Type"])
 
         # submit with a language
-        response = self.requestView(export_url, self.admin, post_data={"language": "spa"})
+        response = self.assertUpdateSubmit(export_url, self.admin, {"language": "spa"})
 
         self.assertEqual(f"/flow/download_translation/?flow={flow.id}&language=spa", response.url)
 
         # check fetching the PO from the download link
-        with patch("temba.mailroom.client.MailroomClient.po_export") as mock_po_export:
+        with patch("temba.mailroom.client.client.MailroomClient.po_export") as mock_po_export:
             mock_po_export.return_value = b'msgid "Red"\nmsgstr "Roja"\n\n'
             response = self.requestView(response.url, self.admin)
 
@@ -3140,20 +3206,21 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         step1_url = reverse("flows.flow_import_translation", args=[flow.id])
 
         # check step 1 is just a file upload
-        self.assertUpdateFetch(step1_url, allow_viewers=False, allow_editors=True, form_fields=["po_file"])
+        self.assertRequestDisallowed(step1_url, [None, self.user, self.agent, self.admin2])
+        self.assertUpdateFetch(step1_url, [self.editor, self.admin], form_fields=["po_file"])
 
         # submit with no file
         self.assertUpdateSubmit(
-            step1_url, {}, form_errors={"po_file": "This field is required."}, object_unchanged=flow
+            step1_url, self.admin, {}, form_errors={"po_file": "This field is required."}, object_unchanged=flow
         )
 
         # submit with something that's empty
         response = self.requestView(step1_url, self.admin, post_data={"po_file": io.BytesIO(b"")})
-        self.assertFormError(response, "form", "po_file", "The submitted file is empty.")
+        self.assertFormError(response.context["form"], "po_file", "The submitted file is empty.")
 
         # submit with something that's not a valid PO file
         response = self.requestView(step1_url, self.admin, post_data={"po_file": io.BytesIO(b"msgid")})
-        self.assertFormError(response, "form", "po_file", "File doesn't appear to be a valid PO file.")
+        self.assertFormError(response.context["form"], "po_file", "File doesn't appear to be a valid PO file.")
 
         # submit with something that's in the base language of the flow
         po_file = io.BytesIO(
@@ -3171,7 +3238,9 @@ msgstr "Bluuu"
         )
         response = self.requestView(step1_url, self.admin, post_data={"po_file": po_file})
         self.assertFormError(
-            response, "form", "po_file", "Contains translations in English which is the base language of this flow."
+            response.context["form"],
+            "po_file",
+            "Contains translations in English which is the base language of this flow.",
         )
 
         # submit with something that's in the base language of the flow
@@ -3190,8 +3259,7 @@ msgstr "Bleu"
         )
         response = self.requestView(step1_url, self.admin, post_data={"po_file": po_file})
         self.assertFormError(
-            response,
-            "form",
+            response.context["form"],
             "po_file",
             "Contains translations in French which is not a supported translation language.",
         )
@@ -3208,9 +3276,7 @@ msgstr "Azul"
         self.assertEqual(302, response.status_code)
         self.assertIn(f"/flow/import_translation/{flow.id}/?po=", response.url)
 
-        response = self.assertUpdateFetch(
-            response.url, allow_viewers=False, allow_editors=True, form_fields=["language"]
-        )
+        response = self.assertUpdateFetch(response.url, [self.admin], form_fields=["language"])
         self.assertContains(response, "Unknown")
 
         # submit a different PO that does have language set
@@ -3238,12 +3304,12 @@ msgstr "Azul"
 
         step2_url = response.url
 
-        response = self.assertUpdateFetch(step2_url, allow_viewers=False, allow_editors=True, form_fields=["language"])
+        response = self.assertUpdateFetch(step2_url, [self.admin], form_fields=["language"])
         self.assertContains(response, "Spanish (spa)")
         self.assertEqual({"language": "spa"}, response.context["form"].initial)
 
         # confirm the import
-        with patch("temba.mailroom.client.MailroomClient.po_import") as mock_po_import:
+        with patch("temba.mailroom.client.client.MailroomClient.po_import") as mock_po_import:
             mock_po_import.return_value = {"flows": [flow.get_definition()]}
 
             response = self.requestView(step2_url, self.admin, post_data={"language": "spa"})
@@ -3401,7 +3467,6 @@ class FlowRunTest(TembaTest):
                     "modified_on",
                     "exited_on",
                     "exit_type",
-                    "submitted_by",
                 ]
             ),
         )
@@ -3439,7 +3504,6 @@ class FlowRunTest(TembaTest):
         self.assertEqual(run.modified_on.isoformat(), run_json["modified_on"])
         self.assertIsNone(run_json["exit_type"])
         self.assertIsNone(run_json["exited_on"])
-        self.assertIsNone(run_json["submitted_by"])
 
     def _check_deletion(self, by_archiver: bool, expected: dict, session_completed=True):
         """
@@ -3671,7 +3735,7 @@ class FlowRunCRUDLTest(TembaTest, CRUDLTestMixin):
 
         delete_url = reverse("flows.flowrun_delete", args=[run1.id])
 
-        self.assertDeleteSubmit(delete_url, object_deleted=run1, success_status=200)
+        self.assertDeleteSubmit(delete_url, self.admin, object_deleted=run1, success_status=200)
 
         self.assertFalse(FlowRun.objects.filter(id=run1.id).exists())
         self.assertTrue(FlowRun.objects.filter(id=run2.id).exists())  # unchanged
@@ -3695,9 +3759,9 @@ class FlowSessionTest(TembaTest):
                 wait_resume_on_expire=False,
             )
 
-        create_session(self.org, timezone.now() - timedelta(days=89))
-        session2 = create_session(self.org, timezone.now() - timedelta(days=91))
-        session3 = create_session(self.org, timezone.now() - timedelta(days=92))
+        create_session(self.org, timezone.now() - timedelta(days=88))
+        session2 = create_session(self.org, timezone.now() - timedelta(days=90))
+        session3 = create_session(self.org, timezone.now() - timedelta(days=91))
         session4 = create_session(self.org2, timezone.now() - timedelta(days=92))
 
         interrupt_flow_sessions()
@@ -3810,7 +3874,7 @@ class FlowSessionTest(TembaTest):
         self.assertEqual(FlowSession.objects.count(), 2)
 
 
-class ExportFlowResultsTest(TembaTest):
+class ResultsExportTest(TembaTest):
     def setUp(self):
         super().setUp()
 
@@ -3824,7 +3888,7 @@ class ExportFlowResultsTest(TembaTest):
         start_date,
         end_date,
         responded_only=False,
-        with_fields=None,
+        with_fields=(),
         with_groups=(),
         extra_urns=(),
         has_results=True,
@@ -3832,38 +3896,32 @@ class ExportFlowResultsTest(TembaTest):
         """
         Exports results for the given flow and returns the generated workbook
         """
-        self.login(self.admin)
-
-        form = {
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-            "flows": [flow.id],
-            "responded_only": responded_only,
-            "extra_urns": extra_urns,
-        }
-        if with_fields:
-            form["with_fields"] = [c.id for c in with_fields]
-        if with_groups:
-            form["with_groups"] = [g.id for g in with_groups]
 
         readonly_models = {FlowRun}
         if has_results:
             readonly_models.add(Contact)
             readonly_models.add(ContactURN)
 
+        export = ResultsExport.create(
+            self.org,
+            self.admin,
+            start_date,
+            end_date,
+            flows=[flow],
+            with_fields=with_fields,
+            with_groups=with_groups,
+            responded_only=responded_only,
+            extra_urns=extra_urns,
+        )
+
         with self.mockReadOnly(assert_models=readonly_models):
-            response = self.client.post(reverse("flows.flow_export_results"), form)
-            self.assertModalResponse(response, redirect="/flow/")
+            export.perform()
 
-        task = ExportFlowResultsTask.objects.order_by("-id").first()
-        self.assertIsNotNone(task)
-
-        filename = "%s/test_orgs/%d/results_exports/%s.xlsx" % (settings.MEDIA_ROOT, self.org.pk, task.uuid)
+        filename = f"{settings.MEDIA_ROOT}/test_orgs/{self.org.id}/results_exports/{export.uuid}.xlsx"
         return load_workbook(filename=os.path.join(settings.MEDIA_ROOT, filename))
 
     @mock_mailroom
-    def test_export_results(self, mr_mocks):
-        export_url = reverse("flows.flow_export_results")
+    def test_export(self, mr_mocks):
         today = timezone.now().astimezone(self.org.timezone).date()
 
         flow = self.get_flow("color_v13")
@@ -3969,45 +4027,10 @@ class ExportFlowResultsTest(TembaTest):
             .save()
         ).session.runs.get()
 
-        # check can't export anonymously
-        response = self.client.get(export_url + "?ids=%d" % flow.id)
-        self.assertLoginRedirect(response)
-
-        self.login(self.admin)
-
-        # create a dummy export task so that we won't be able to export
-        blocking_export = ExportFlowResultsTask.objects.create(
-            org=self.org, created_by=self.admin, modified_by=self.admin
-        )
-        response = self.client.post(
-            reverse("flows.flow_export_results"),
-            {"start_date": "2022-09-01", "end_date": "2022-09-28", "flows": [flow.id], "with_groups": [devs.id]},
-        )
-        self.assertModalResponse(response, redirect="/flow/")
-
-        response = self.client.get("/flow/")
-        self.assertContains(response, "already an export in progress")
-
-        # ok, mark that one as finished and try again
-        blocking_export.update_status(ExportFlowResultsTask.STATUS_COMPLETE)
-
         for run in (contact1_run1, contact2_run1, contact3_run1, contact1_run2, contact2_run2):
             run.refresh_from_db()
 
-        # try to submit without specifying dates (UI doesn't actually allow this)
-        response = self.client.post(export_url, {})
-        self.assertFormError(response, "form", "start_date", "This field is required.")
-        self.assertFormError(response, "form", "end_date", "This field is required.")
-
-        # try to submit with start date in future
-        response = self.client.post(export_url, {"start_date": "2200-01-01", "end_date": "2022-09-28"})
-        self.assertFormError(response, "form", None, "Start date can't be in the future.")
-
-        # try to submit with start date > end date
-        response = self.client.post(export_url, {"start_date": "2022-09-01", "end_date": "2022-03-01"})
-        self.assertFormError(response, "form", None, "End date can't be before start date.")
-
-        with self.assertNumQueries(44):
+        with self.assertNumQueries(23):
             workbook = self._export(
                 flow,
                 start_date=today - timedelta(days=7),
@@ -4016,10 +4039,8 @@ class ExportFlowResultsTest(TembaTest):
             )
 
         # check that notifications were created
-        export = ExportFlowResultsTask.objects.order_by("id").last()
-        self.assertEqual(
-            1, self.admin.notifications.filter(notification_type="export:finished", results_export=export).count()
-        )
+        export = Export.objects.filter(export_type=ResultsExport.slug).order_by("id").last()
+        self.assertEqual(1, self.admin.notifications.filter(notification_type="export:finished", export=export).count())
 
         tz = self.org.timezone
 
@@ -4149,7 +4170,7 @@ class ExportFlowResultsTest(TembaTest):
         )
 
         # test without unresponded
-        with self.assertNumQueries(44):
+        with self.assertNumQueries(21):
             workbook = self._export(
                 flow,
                 start_date=today - timedelta(days=7),
@@ -4224,7 +4245,7 @@ class ExportFlowResultsTest(TembaTest):
         )
 
         # test export with a contact field
-        with self.assertNumQueries(46):
+        with self.assertNumQueries(25):
             workbook = self._export(
                 flow,
                 start_date=today - timedelta(days=7),
@@ -4288,9 +4309,9 @@ class ExportFlowResultsTest(TembaTest):
         )
 
         # test that we don't exceed the limit on rows per sheet
-        with patch("temba.flows.models.ExportFlowResultsTask.MAX_EXCEL_ROWS", 4):
+        with patch("temba.utils.export.MultiSheetExporter.MAX_EXCEL_ROWS", 4):
             workbook = self._export(flow, start_date=today - timedelta(days=7), end_date=today)
-            expected_sheets = [("Runs", 4), ("Runs (2)", 3)]
+            expected_sheets = [("Runs 1", 4), ("Runs 2", 3)]
 
             for s, sheet in enumerate(workbook.worksheets):
                 self.assertEqual((sheet.title, len(list(sheet.rows))), expected_sheets[s])
@@ -4308,7 +4329,6 @@ class ExportFlowResultsTest(TembaTest):
         self.assertEqual(11, len(list(sheet_runs.columns)))
 
     def test_anon_org(self):
-        export_url = reverse("flows.flow_export_results")
         today = timezone.now().astimezone(self.org.timezone).date()
 
         with self.anonymous(self.org):
@@ -4331,14 +4351,6 @@ class ExportFlowResultsTest(TembaTest):
                 .complete()
                 .save()
             ).session.runs.get()
-
-            # we don't show URNs field
-            self.login(self.admin)
-            response = self.client.get(export_url)
-            self.assertEqual(
-                ["start_date", "end_date", "with_fields", "with_groups", "flows", "responded_only", "loc"],
-                list(response.context["form"].fields.keys()),
-            )
 
             workbook = self._export(flow, start_date=today - timedelta(days=7), end_date=today)
             self.assertEqual(1, len(workbook.worksheets))
@@ -4407,7 +4419,7 @@ class ExportFlowResultsTest(TembaTest):
 
         contact1_run1, contact2_run1, contact3_run1, contact1_run2, contact2_run2 = FlowRun.objects.order_by("id")
 
-        with self.assertNumQueries(56):
+        with self.assertNumQueries(17):
             workbook = self._export(flow, start_date=today - timedelta(days=7), end_date=today)
 
         tz = self.org.timezone
@@ -4501,7 +4513,7 @@ class ExportFlowResultsTest(TembaTest):
         )
 
         # test without unresponded
-        with self.assertNumQueries(35):
+        with self.assertNumQueries(10):
             workbook = self._export(
                 flow,
                 start_date=today - timedelta(days=7),
@@ -5008,91 +5020,6 @@ class ExportFlowResultsTest(TembaTest):
             tz,
         )
 
-    def test_surveyor_msgs(self):
-        today = timezone.now().astimezone(self.org.timezone).date()
-
-        flow = self.get_flow("color_v13")
-        flow.flow_type = Flow.TYPE_SURVEY
-        flow.save()
-
-        flow_nodes = flow.get_definition()["nodes"]
-        color_prompt = flow_nodes[0]
-        color_split = flow_nodes[4]
-
-        # no urn or channel
-        in1 = self.create_incoming_msg(self.contact, "blue", surveyor=True)
-
-        run = (
-            MockSessionWriter(self.contact, flow)
-            .visit(color_prompt)
-            .send_msg("What is your favorite color?", self.channel)
-            .visit(color_split)
-            .wait()
-            .resume(msg=in1)
-            .set_result("Color", "blue", "Blue", "blue")
-            .send_msg("That is a funny color. Try again.", self.channel)
-            .complete()
-            .save()
-        ).session.runs.get()
-
-        workbook = self._export(flow, start_date=today - timedelta(days=7), end_date=today)
-        tz = self.org.timezone
-
-        (sheet_runs,) = workbook.worksheets
-
-        run.refresh_from_db()
-
-        # no submitter for our run
-        self.assertExcelRow(
-            sheet_runs,
-            1,
-            [
-                "",
-                run.contact.uuid,
-                "Eric",
-                "tel",
-                "+250788382382",
-                run.created_on,
-                run.modified_on,
-                run.exited_on,
-                run.uuid,
-                "Blue",
-                "blue",
-                "blue",
-            ],
-            tz,
-        )
-
-        # now try setting a submitted by on our run
-        run.submitted_by = self.admin
-        run.save(update_fields=("submitted_by",))
-
-        workbook = self._export(flow, start_date=today - timedelta(days=7), end_date=today)
-        tz = self.org.timezone
-
-        (sheet_runs,) = workbook.worksheets
-
-        # now the Administrator should show up
-        self.assertExcelRow(
-            sheet_runs,
-            1,
-            [
-                "admin@nyaruka.com",
-                run.contact.uuid,
-                "Eric",
-                "tel",
-                "+250788382382",
-                run.created_on,
-                run.modified_on,
-                run.exited_on,
-                run.uuid,
-                "Blue",
-                "blue",
-                "blue",
-            ],
-            tz,
-        )
-
     def test_no_responses(self):
         today = timezone.now().astimezone(self.org.timezone).date()
         flow = self.get_flow("color_v13")
@@ -5135,22 +5062,26 @@ class FlowLabelCRUDLTest(TembaTest, CRUDLTestMixin):
     def test_create(self):
         create_url = reverse("flows.flowlabel_create")
 
-        self.assertCreateFetch(create_url, allow_viewers=False, allow_editors=True, form_fields=("name", "flows"))
+        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
+        self.assertCreateFetch(create_url, [self.editor, self.admin], form_fields=("name", "flows"))
 
         # try to submit without a name
-        self.assertCreateSubmit(create_url, {}, form_errors={"name": "This field is required."})
+        self.assertCreateSubmit(create_url, self.admin, {}, form_errors={"name": "This field is required."})
 
         # try to submit with an invalid name
         self.assertCreateSubmit(
-            create_url, {"name": '"Cool"\\'}, form_errors={"name": 'Cannot contain the character: "'}
+            create_url, self.admin, {"name": '"Cool"\\'}, form_errors={"name": 'Cannot contain the character: "'}
         )
 
         self.assertCreateSubmit(
-            create_url, {"name": "Cool Flows"}, new_obj_query=FlowLabel.objects.filter(org=self.org, name="Cool Flows")
+            create_url,
+            self.admin,
+            {"name": "Cool Flows"},
+            new_obj_query=FlowLabel.objects.filter(org=self.org, name="Cool Flows"),
         )
 
         # try to create with a name that's already used
-        self.assertCreateSubmit(create_url, {"name": "Cool Flows"}, form_errors={"name": "Must be unique."})
+        self.assertCreateSubmit(create_url, self.admin, {"name": "Cool Flows"}, form_errors={"name": "Must be unique."})
 
     def test_update(self):
         label = FlowLabel.create(self.org, self.admin, "Cool Flows")
@@ -5158,11 +5089,13 @@ class FlowLabelCRUDLTest(TembaTest, CRUDLTestMixin):
 
         update_url = reverse("flows.flowlabel_update", args=[label.id])
 
-        self.assertUpdateFetch(update_url, allow_viewers=False, allow_editors=True, form_fields=("name", "flows"))
+        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
+        self.assertUpdateFetch(update_url, [self.editor, self.admin], form_fields=("name", "flows"))
 
         # try to update to an invalid name
         self.assertUpdateSubmit(
             update_url,
+            self.admin,
             {"name": '"Cool"\\'},
             form_errors={"name": 'Cannot contain the character: "'},
             object_unchanged=label,
@@ -5170,10 +5103,14 @@ class FlowLabelCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # try to update to a non-unique name
         self.assertUpdateSubmit(
-            update_url, {"name": "Crazy Flows"}, form_errors={"name": "Must be unique."}, object_unchanged=label
+            update_url,
+            self.admin,
+            {"name": "Crazy Flows"},
+            form_errors={"name": "Must be unique."},
+            object_unchanged=label,
         )
 
-        self.assertUpdateSubmit(update_url, {"name": "Super Cool Flows"})
+        self.assertUpdateSubmit(update_url, self.admin, {"name": "Super Cool Flows"})
 
         label.refresh_from_db()
         self.assertEqual("Super Cool Flows", label.name)
@@ -5183,8 +5120,10 @@ class FlowLabelCRUDLTest(TembaTest, CRUDLTestMixin):
 
         delete_url = reverse("flows.flowlabel_delete", args=[label.id])
 
-        self.assertDeleteFetch(delete_url, allow_editors=True)
-        self.assertDeleteSubmit(delete_url, object_deleted=label, success_status=200)
+        self.assertRequestDisallowed(delete_url, [None, self.user, self.agent, self.admin2])
+
+        self.assertDeleteFetch(delete_url, [self.editor, self.admin])
+        self.assertDeleteSubmit(delete_url, self.admin, object_deleted=label, success_status=200)
 
 
 class SimulationTest(TembaTest):
@@ -5220,7 +5159,7 @@ class SimulationTest(TembaTest):
 
         with override_settings(MAILROOM_AUTH_TOKEN="sesame", MAILROOM_URL="https://mailroom.temba.io"):
             with patch("requests.post") as mock_post:
-                mock_post.return_value = MockResponse(200, '{"session": {}}')
+                mock_post.return_value = MockJsonResponse(200, {"session": {}})
                 response = self.client.post(url, payload, content_type="application/json")
 
                 self.assertEqual(response.status_code, 200)
@@ -5258,13 +5197,13 @@ class SimulationTest(TembaTest):
 
         with override_settings(MAILROOM_AUTH_TOKEN="sesame", MAILROOM_URL="https://mailroom.temba.io"):
             with patch("requests.post") as mock_post:
-                mock_post.return_value = MockResponse(400, '{"session": {}}')
+                mock_post.return_value = MockJsonResponse(400, {"session": {}})
                 response = self.client.post(url, json.dumps(payload), content_type="application/json")
                 self.assertEqual(500, response.status_code)
 
             # start a flow
             with patch("requests.post") as mock_post:
-                mock_post.return_value = MockResponse(200, '{"session": {}}')
+                mock_post.return_value = MockJsonResponse(200, {"session": {}})
                 response = self.client.post(url, json.dumps(payload), content_type="application/json")
                 self.assertEqual(200, response.status_code)
                 self.assertEqual({}, response.json()["session"])
@@ -5290,12 +5229,12 @@ class SimulationTest(TembaTest):
             }
 
             with patch("requests.post") as mock_post:
-                mock_post.return_value = MockResponse(400, '{"session": {}}')
+                mock_post.return_value = MockJsonResponse(400, {"session": {}})
                 response = self.client.post(url, json.dumps(payload), content_type="application/json")
                 self.assertEqual(500, response.status_code)
 
             with patch("requests.post") as mock_post:
-                mock_post.return_value = MockResponse(200, '{"session": {}}')
+                mock_post.return_value = MockJsonResponse(200, {"session": {}})
                 response = self.client.post(url, json.dumps(payload), content_type="application/json")
                 self.assertEqual(200, response.status_code)
                 self.assertEqual({}, response.json()["session"])
@@ -5380,14 +5319,18 @@ class FlowStartCRUDLTest(TembaTest, CRUDLTestMixin):
     def test_list(self):
         list_url = reverse("flows.flowstart_list")
 
-        flow = self.get_flow("color_v13")
+        flow1 = self.create_flow("Test Flow 1")
+        flow2 = self.create_flow("Test 2")
+
         contact = self.create_contact("Bob", phone="+1234567890")
         group = self.create_group("Testers", contacts=[contact])
-        start1 = FlowStart.create(flow, self.admin, contacts=[contact])
+        start1 = FlowStart.create(flow1, self.admin, contacts=[contact])
         start2 = FlowStart.create(
-            flow, self.admin, query="name ~ Bob", start_type="A", exclusions={"started_previously": True}
+            flow1, self.admin, query="name ~ Bob", start_type="A", exclusions={"started_previously": True}
         )
-        start3 = FlowStart.create(flow, self.admin, groups=[group], start_type="Z", exclusions={"in_a_flow": True})
+        start3 = FlowStart.create(flow2, self.admin, groups=[group], start_type="Z", exclusions={"in_a_flow": True})
+
+        flow2.release(self.admin)
 
         FlowStartCount.objects.create(start=start3, count=1000)
         FlowStartCount.objects.create(start=start3, count=234)
@@ -5395,47 +5338,26 @@ class FlowStartCRUDLTest(TembaTest, CRUDLTestMixin):
         other_org_flow = self.create_flow("Test", org=self.org2)
         FlowStart.create(other_org_flow, self.admin2)
 
+        self.assertRequestDisallowed(list_url, [None, self.agent])
         response = self.assertListFetch(
-            list_url, allow_viewers=True, allow_editors=True, context_objects=[start3, start2, start1]
+            list_url, [self.user, self.editor, self.admin], context_objects=[start3, start2, start1]
         )
 
+        self.assertContains(response, "Test Flow 1")
+        self.assertNotContains(response, "Test Flow 2")
+        self.assertContains(response, "A deleted flow")
         self.assertContains(response, "was started by admin@nyaruka.com")
         self.assertContains(response, "was started by an API call")
         self.assertContains(response, "was started by Zapier")
-        self.assertContains(response, "Skip contacts currently in a flow")
+        self.assertContains(response, "Not in a flow")
         self.assertContains(response, "<b>1,234</b> runs")
 
-        response = self.assertListFetch(
-            list_url + "?type=manual", allow_viewers=True, allow_editors=True, context_objects=[start1]
-        )
+        response = self.assertListFetch(list_url + "?type=manual", [self.admin], context_objects=[start1])
         self.assertTrue(response.context["filtered"])
         self.assertEqual(response.context["url_params"], "?type=manual&")
 
 
 class AssetServerTest(TembaTest):
-    def test_environment(self):
-        self.login(self.admin)
-
-        date_formats = {"D": "DD-MM-YYYY", "M": "MM-DD-YYYY", "Y": "YYYY-MM-DD"}
-
-        for org_date_format, date_format in date_formats.items():
-            self.org.date_format = org_date_format
-            self.org.save()
-
-            response = self.client.get("/flow/assets/%d/1234/environment/" % self.org.id)
-            self.assertEqual(
-                response.json(),
-                {
-                    "date_format": date_format,
-                    "time_format": "tt:mm",
-                    "timezone": "Africa/Kigali",
-                    "allowed_languages": ["eng", "kin"],
-                    "default_country": "RW",
-                    "redaction_policy": "none",
-                    "input_collation": "default",
-                },
-            )
-
     def test_languages(self):
         self.login(self.admin)
         response = self.client.get("/flow/assets/%d/1234/language/" % self.org.id)

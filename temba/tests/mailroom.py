@@ -1,28 +1,28 @@
 import functools
 import re
 from collections import defaultdict
+from dataclasses import asdict
 from datetime import timedelta
 from decimal import Decimal
 from functools import wraps
 from unittest.mock import call, patch
 
 from django.conf import settings
-from django.contrib.auth.models import User
 from django.db import connection
 from django.utils import timezone
 
 from temba import mailroom
 from temba.campaigns.models import CampaignEvent, EventFire
-from temba.channels.models import Channel
+from temba.channels.models import ChannelEvent
 from temba.contacts.models import URN, Contact, ContactField, ContactGroup, ContactURN
 from temba.flows.models import FlowRun, FlowSession
 from temba.locations.models import AdminBoundary
-from temba.mailroom.client import ContactSpec, MailroomClient, MailroomException
+from temba.mailroom.client.client import MailroomClient
 from temba.mailroom.modifiers import Modifier
-from temba.msgs.models import Msg
-from temba.orgs.models import Org
+from temba.msgs.models import Broadcast, Msg
+from temba.schedules.models import Schedule
 from temba.tests.dates import parse_datetime
-from temba.tickets.models import Ticket, TicketEvent, Topic
+from temba.tickets.models import Ticket, TicketEvent
 from temba.utils import get_anonymous_user, json
 
 event_units = {
@@ -54,23 +54,26 @@ def mock_inspect_query(org, query: str, fields=None) -> mailroom.QueryMetadata:
 class Mocks:
     def __init__(self):
         self.calls = defaultdict(list)
-        self._parse_query = {}
+        self._contact_export = []
+        self._contact_export_preview = []
+        self._contact_parse_query = {}
         self._contact_search = {}
+        self._contact_urns = []
+        self._flow_inspect = []
         self._flow_start_preview = []
         self._msg_broadcast_preview = []
-        self._errors = []
+        self._exceptions = []
 
         self.queued_batch_tasks = []
 
-    def parse_query(self, query, *, cleaned=None, elastic_query=None, fields=None):
+    def contact_parse_query(self, query, *, cleaned=None, fields=None):
         def mock(org):
             return mailroom.ParsedQuery(
                 query=cleaned or query,
-                elastic_query=elastic_query or {"term": {"is_active": True}},
                 metadata=mock_inspect_query(org, cleaned or query, fields),
             )
 
-        self._parse_query[query] = mock
+        self._contact_parse_query[query] = mock
 
     def contact_search(self, query, *, cleaned=None, contacts=(), total=0, fields=()):
         def mock(org, offset, sort):
@@ -83,40 +86,55 @@ class Mocks:
 
         self._contact_search[query] = mock
 
+    def contact_export(self, contact_ids: list[int]):
+        self._contact_export.append(contact_ids)
+
+    def contact_export_preview(self, total: int):
+        self._contact_export_preview.append(total)
+
+    def contact_urns(self, urns: dict):
+        self._contact_urns.append(urns)
+
+    def flow_inspect(self, *, dependencies=(), issues=(), results=(), waiting_exits=(), parent_refs=()):
+        self._flow_inspect.append(
+            {
+                "dependencies": dependencies,
+                "issues": issues,
+                "results": results,
+                "waiting_exits": waiting_exits,
+                "parent_refs": parent_refs,
+            }
+        )
+
     def flow_start_preview(self, query, total):
         def mock(org):
-            return mailroom.StartPreview(query=query, total=total)
+            return mailroom.RecipientsPreview(query=query, total=total)
 
         self._flow_start_preview.append(mock)
 
     def msg_broadcast_preview(self, query, total):
         def mock(org):
-            return mailroom.BroadcastPreview(query=query, total=total)
+            return mailroom.RecipientsPreview(query=query, total=total)
 
         self._msg_broadcast_preview.append(mock)
 
-    def error(self, msg: str, code: str = None, extra: dict = None):
+    def exception(self, exp: Exception):
         """
-        Queues an error which will become a mailroom exception at the next client call
+        Queues an enception to be raised on the next client call
         """
-        err = {"error": msg}
-        if code:
-            err["code"] = code
-        if extra:
-            err["extra"] = extra
 
-        self._errors.append(err)
+        self._exceptions.append(exp)
 
-    def _check_error(self, endpoint: str):
-        if self._errors:
-            raise MailroomException(endpoint, None, self._errors.pop(0))
+    def _check_exception(self):
+        if self._exceptions:
+            raise self._exceptions.pop(0)
 
 
 def _client_method(func):
     @functools.wraps(func)
     def wrap(self, *args, **kwargs):
         self.mocks.calls[func.__name__].append(call(*args, **kwargs))
-        self.mocks._check_error(func.__name__)
+        self.mocks._check_exception()
 
         return func(self, *args, **kwargs)
 
@@ -129,55 +147,82 @@ class TestClient(MailroomClient):
 
         super().__init__(settings.MAILROOM_URL, settings.MAILROOM_AUTH_TOKEN)
 
-    @_client_method
-    def contact_create(self, org_id: int, user_id: int, contact: ContactSpec):
-        org = Org.objects.get(id=org_id)
-        user = User.objects.get(id=user_id)
+    def android_event(self, org, channel, phone: str, event_type: str, extra: dict, occurred_on):
+        contact, contact_urn = contact_resolve(org, phone)
 
-        obj = create_contact_locally(
-            org, user, contact.name, contact.language, contact.urns, contact.fields, contact.groups
+        event = ChannelEvent.objects.create(
+            org=channel.org,
+            channel=channel,
+            contact=contact,
+            contact_urn=contact_urn,
+            occurred_on=occurred_on,
+            event_type=event_type,
+            extra=extra,
+        )
+        return {"id": event.id}
+
+    def android_message(self, org, channel, phone: str, text: str, received_on):
+        contact, contact_urn = contact_resolve(org, phone)
+        text = text[: Msg.MAX_TEXT_LEN]
+
+        now = timezone.now()
+
+        # don't create duplicate messages
+        existing = Msg.objects.filter(text=text, sent_on=received_on, contact=contact, direction="I").first()
+        if existing:
+            return {"id": existing.id, "duplicate": True}
+
+        msg = Msg.objects.create(
+            org=org,
+            channel=channel,
+            contact=contact,
+            contact_urn=contact_urn,
+            text=text,
+            sent_on=received_on,
+            created_on=now,
+            modified_on=now,
+            direction=Msg.DIRECTION_IN,
+            status=Msg.STATUS_PENDING,
+            msg_type=Msg.TYPE_TEXT,
+        )
+        return {"id": msg.id, "duplicate": False}
+
+    @_client_method
+    def contact_create(self, org, user, contact: mailroom.ContactSpec):
+        status = {v: k for k, v in Contact.ENGINE_STATUSES.items()}[contact.status]
+        return create_contact_locally(
+            org,
+            user,
+            name=contact.name,
+            language=contact.language,
+            status=status,
+            urns=contact.urns,
+            fields=contact.fields,
+            group_uuids=contact.groups,
         )
 
-        return {"contact": {"id": obj.id, "uuid": str(obj.uuid), "name": obj.name}}
+    @_client_method
+    def contact_export(self, org, group, query: str) -> list[int]:
+        if self.mocks._contact_export:
+            return self.mocks._contact_export.pop(0)
+
+        return list(group.contacts.order_by("id").values_list("id", flat=True))
 
     @_client_method
-    def contact_modify(self, org_id, user_id, contact_ids, modifiers: list[Modifier]):
-        org = Org.objects.get(id=org_id)
-        user = User.objects.get(id=user_id)
-        contacts = org.contacts.filter(id__in=contact_ids)
+    def contact_export_preview(self, org, group, query: str) -> int:
+        if self.mocks._contact_export_preview:
+            return self.mocks._contact_export_preview.pop(0)
 
+        return group.get_member_count()
+
+    @_client_method
+    def contact_modify(self, org, user, contacts, modifiers: list[Modifier]):
         apply_modifiers(org, user, contacts, modifiers)
 
         return {str(c.id): {"contact": {}, "events": []} for c in contacts}
 
     @_client_method
-    def contact_resolve(self, org_id: int, channel_id: int, urn: str):
-        org = Org.objects.get(id=org_id)
-        user = get_anonymous_user()
-
-        try:
-            urn = URN.normalize(urn, org.default_country_code)
-            if not URN.validate(urn, org.default_country_code):
-                raise ValueError()
-        except ValueError:
-            raise MailroomException("contact/resolve", None, {"error": "invalid URN"})
-
-        contact_urn = ContactURN.lookup(org, urn)
-        if contact_urn:
-            contact = contact_urn.contact
-        else:
-            contact = create_contact_locally(org, user, name="", language="", urns=[urn], fields={}, group_uuids=[])
-            contact_urn = ContactURN.lookup(org, urn)
-
-        return {
-            "contact": {"id": contact.id, "uuid": str(contact.uuid), "name": contact.name},
-            "urn": {"id": contact_urn.id, "identity": contact_urn.identity},
-        }
-
-    @_client_method
-    def contact_inspect(self, org_id: int, contact_ids: list[int]):
-        org = Org.objects.get(id=org_id)
-        contacts = org.contacts.filter(id__in=contact_ids)
+    def contact_inspect(self, org, contacts) -> dict:
 
         def inspect(c) -> dict:
             sendable = []
@@ -200,65 +245,114 @@ class TestClient(MailroomClient):
 
             return {"urns": sendable + unsendable}
 
-        return {str(c.id): inspect(c) for c in contacts}
+        return {c: inspect(c) for c in contacts}
 
     @_client_method
-    def contact_interrupt(self, org_id: int, user_id: int, contact_id: int):
-        contact = Contact.objects.get(id=contact_id)
-
+    def contact_interrupt(self, org, user, contact) -> int:
         # get the waiting session IDs
         session_ids = list(contact.sessions.filter(status=FlowSession.STATUS_WAITING).values_list("id", flat=True))
 
         exit_sessions(session_ids, FlowSession.STATUS_INTERRUPTED)
 
-        return {"sessions": len(session_ids)}
+        return len(session_ids)
 
     @_client_method
-    def parse_query(self, org_id: int, query: str, parse_only: bool = False, group_uuid: str = ""):
-        org = Org.objects.get(id=org_id)
-
-        # if there's a mock for this query we use that
-        mock = self.mocks._parse_query.get(query)
+    def contact_parse_query(self, org, query: str, parse_only: bool = False):
+        mock = self.mocks._contact_parse_query.get(query)
         if mock:
             return mock(org)
 
-        return mailroom.ParsedQuery(
-            query=query,
-            elastic_query={"term": {"is_active": True}},
-            metadata=mock_inspect_query(org, query),
-        )
+        return mailroom.ParsedQuery(query=query, metadata=mock_inspect_query(org, query))
 
     @_client_method
-    def contact_search(self, org_id, group_id, query, sort, offset=0, exclude_ids=()):
+    def contact_search(self, org, group, query, sort, offset=0, exclude_ids=()):
         mock = self.mocks._contact_search.get(query or "")
 
         assert mock, f"missing contact_search mock for query '{query}'"
 
-        org = Org.objects.get(id=org_id)
         return mock(org, offset, sort)
 
     @_client_method
-    def flow_start_preview(self, org_id: int, flow_id: int, include, exclude):
+    def contact_urns(self, org, urns: list[str]):
+        results = [mailroom.URNResult(normalized=urn) for urn in urns]
+
+        if self.mocks._contact_urns:
+            urn_by_id_or_err = self.mocks._contact_urns.pop(0)
+            for i, urn in enumerate(urns):
+                id_or_err = urn_by_id_or_err.get(urn)
+                if isinstance(id_or_err, int):
+                    results[i].contact_id = id_or_err
+                elif isinstance(id_or_err, str):
+                    results[i].error = id_or_err
+
+        return results
+
+    @_client_method
+    def flow_inspect(self, org, definition: dict):
+        if self.mocks._flow_inspect:
+            return self.mocks._flow_inspect.pop(0)
+
+        # fall back to the real client - note that this why mailroom has to be running during tests
+        # and is something we might want to change in the future
+        return super().flow_inspect(org, definition)
+
+    @_client_method
+    def flow_start_preview(self, org, flow, include, exclude):
         assert self.mocks._flow_start_preview, "missing flow_start_preview mock"
 
         mock = self.mocks._flow_start_preview.pop(0)
-        org = Org.objects.get(id=org_id)
 
         return mock(org)
 
     @_client_method
-    def msg_broadcast_preview(self, org_id: int, include, exclude):
+    def msg_broadcast(
+        self,
+        org,
+        user,
+        translations: dict,
+        base_language: str,
+        groups,
+        contacts,
+        urns: list,
+        query: str,
+        node_uuid: str,
+        exclude: mailroom.Exclusions,
+        optin,
+        template,
+        template_variables: list,
+        schedule: mailroom.ScheduleSpec,
+    ):
+        return create_broadcast(
+            org,
+            user,
+            translations=translations,
+            base_language=base_language,
+            groups=groups,
+            contacts=contacts,
+            urns=urns,
+            query=query,
+            node_uuid=node_uuid,
+            exclude=exclude,
+            optin=optin,
+            template=template,
+            template_variables=template_variables,
+            schedule=schedule,
+        )
+
+    @_client_method
+    def msg_broadcast_preview(self, org, include, exclude):
         assert self.mocks._msg_broadcast_preview, "missing msg_broadcast_preview mock"
 
         mock = self.mocks._msg_broadcast_preview.pop(0)
-        org = Org.objects.get(id=org_id)
 
         return mock(org)
 
     @_client_method
-    def msg_send(self, org_id: int, user_id: int, contact_id: int, text: str, attachments: list[str], ticket_id: int):
-        org = Org.objects.get(id=org_id)
-        contact = Contact.objects.get(org=org, id=contact_id)
+    def msg_resend(self, org, msgs):
+        return {"msg_ids": [m.id for m in msgs]}
+
+    @_client_method
+    def msg_send(self, org, user, contact, text: str, attachments: list[str], ticket):
         msg = send_to_contact(org, contact, text, attachments)
 
         return {
@@ -274,81 +368,73 @@ class TestClient(MailroomClient):
         }
 
     @_client_method
-    def ticket_assign(self, org_id, user_id, ticket_ids, assignee_id):
+    def ticket_assign(self, org, user, tickets, assignee):
         now = timezone.now()
-        tickets = Ticket.objects.filter(org_id=org_id, id__in=ticket_ids).exclude(assignee_id=assignee_id)
+        tickets = Ticket.objects.filter(org=org, id__in=[t.id for t in tickets]).exclude(assignee=assignee)
+        tickets.update(assignee=assignee, modified_on=now, last_activity_on=now)
 
         for ticket in tickets:
             ticket.events.create(
-                org_id=org_id,
+                org=org,
                 contact=ticket.contact,
                 event_type=TicketEvent.TYPE_ASSIGNED,
-                assignee_id=assignee_id,
-                created_by_id=user_id,
+                assignee=assignee,
+                created_by=user,
             )
-
-        tickets.update(assignee_id=assignee_id, modified_on=now, last_activity_on=now)
 
         return {"changed_ids": [t.id for t in tickets]}
 
     @_client_method
-    def ticket_add_note(self, org_id, user_id, ticket_ids, note):
+    def ticket_add_note(self, org, user, tickets, note: str):
         now = timezone.now()
-        tickets = Ticket.objects.filter(org_id=org_id, id__in=ticket_ids)
+        tickets = Ticket.objects.filter(org=org, id__in=[t.id for t in tickets])
         tickets.update(modified_on=now, last_activity_on=now)
 
         for ticket in tickets:
             ticket.events.create(
-                org_id=org_id,
+                org=org,
                 contact=ticket.contact,
                 event_type=TicketEvent.TYPE_NOTE_ADDED,
                 note=note,
-                created_by_id=user_id,
+                created_by=user,
             )
 
         return {"changed_ids": [t.id for t in tickets]}
 
     @_client_method
-    def ticket_change_topic(self, org_id, user_id, ticket_ids, topic_id):
+    def ticket_change_topic(self, org, user, tickets, topic):
         now = timezone.now()
-        topic = Topic.objects.get(id=topic_id)
-        tickets = Ticket.objects.filter(org_id=org_id, id__in=ticket_ids)
+        tickets = Ticket.objects.filter(org=org, id__in=[t.id for t in tickets]).exclude(topic=topic)
         tickets.update(topic=topic, modified_on=now, last_activity_on=now)
 
         for ticket in tickets:
             ticket.events.create(
-                org_id=org_id,
+                org=org,
                 contact=ticket.contact,
                 event_type=TicketEvent.TYPE_TOPIC_CHANGED,
                 topic=topic,
-                created_by_id=user_id,
+                created_by=user,
             )
 
         return {"changed_ids": [t.id for t in tickets]}
 
     @_client_method
-    def ticket_close(self, org_id: int, user_id: int, ticket_ids: list, force: bool):
-        tickets = Ticket.objects.filter(org_id=org_id, status=Ticket.STATUS_OPEN, id__in=ticket_ids)
-
-        for ticket in tickets:
-            ticket.events.create(
-                org_id=org_id, contact=ticket.contact, event_type=TicketEvent.TYPE_CLOSED, created_by_id=user_id
-            )
-
+    def ticket_close(self, org, user, tickets, force: bool):
+        tickets = Ticket.objects.filter(org=org, id__in=[t.id for t in tickets], status=Ticket.STATUS_OPEN)
         tickets.update(status=Ticket.STATUS_CLOSED, closed_on=timezone.now())
 
+        for ticket in tickets:
+            ticket.events.create(org=org, contact=ticket.contact, event_type=TicketEvent.TYPE_CLOSED, created_by=user)
+
         return {"changed_ids": [t.id for t in tickets]}
 
     @_client_method
-    def ticket_reopen(self, org_id, user_id, ticket_ids):
-        tickets = Ticket.objects.filter(org_id=org_id, status=Ticket.STATUS_CLOSED, id__in=ticket_ids)
+    def ticket_reopen(self, org, user, tickets):
+        tickets = Ticket.objects.filter(org=org, id__in=[t.id for t in tickets], status=Ticket.STATUS_CLOSED)
+        tickets.update(status=Ticket.STATUS_OPEN, closed_on=None)
 
         for ticket in tickets:
-            ticket.events.create(
-                org_id=org_id, contact=ticket.contact, event_type=TicketEvent.TYPE_REOPENED, created_by_id=user_id
-            )
-
-        tickets.update(status=Ticket.STATUS_OPEN, closed_on=None)
+            ticket.events.create(org=org, contact=ticket.contact, event_type=TicketEvent.TYPE_REOPENED, created_by=user)
 
         return {"changed_ids": [t.id for t in tickets]}
 
@@ -454,11 +540,38 @@ def apply_modifiers(org, user, contacts, modifiers: list):
 
             update_urns_locally(contacts[0], mod.urns)
 
-        contacts.update(modified_by=user, modified_on=timezone.now(), **fields)
+        Contact.objects.filter(id__in=[c.id for c in contacts]).update(
+            modified_by=user, modified_on=timezone.now(), **fields
+        )
         if clear_groups:
             for c in contacts:
                 for g in c.get_groups():
                     g.contacts.remove(c)
+
+
+PHONE_REGEX = re.compile(r"^\+?[A-Za-z0-9]{1,64}$")
+
+
+def contact_urn_lookup(org, urn: str):
+    return ContactURN.objects.filter(org=org, identity=URN.identity(urn)).first()
+
+
+def contact_resolve(org, phone: str) -> tuple:
+    user = get_anonymous_user()
+
+    if not PHONE_REGEX.match(phone):
+        raise mailroom.URNValidationException("not a number", "invalid", 0)
+
+    urn = f"tel:{phone}"
+
+    contact_urn = contact_urn_lookup(org, urn)
+    if contact_urn:
+        contact = contact_urn.contact
+    else:
+        contact = create_contact_locally(org, user, name="", language="", urns=[urn], fields={}, group_uuids=[])
+        contact_urn = contact_urn_lookup(org, urn)
+
+    return contact, contact_urn
 
 
 def create_contact_locally(
@@ -466,11 +579,11 @@ def create_contact_locally(
 ):
     orphaned_urns = {}
 
-    for urn in urns:
-        existing = ContactURN.lookup(org, urn)
+    for i, urn in enumerate(urns):
+        existing = contact_urn_lookup(org, urn)
         if existing:
             if existing.contact_id:
-                raise MailroomException("contact/create", None, {"error": "URNs in use by other contacts"})
+                raise mailroom.URNValidationException(f"URN {i} in use by other contact", "taken", i)
             else:
                 orphaned_urns[urn] = existing
 
@@ -547,10 +660,19 @@ def update_urns_locally(contact, urns: list[str]):
 
     for urn_as_string in urns:
         normalized = URN.normalize(urn_as_string, country)
-        urn = ContactURN.lookup(contact.org, normalized)
+        scheme, path, query, display = URN.to_parts(normalized)
+        urn = contact_urn_lookup(contact.org, normalized)
 
         if not urn:
-            urn = ContactURN.create(contact.org, contact, normalized, priority=priority)
+            urn = ContactURN.objects.create(
+                org=contact.org,
+                contact=contact,
+                identity=URN.identity(normalized),
+                scheme=scheme,
+                path=path,
+                display=display,
+                priority=priority,
+            )
             urns_created.append(urn)
 
         # unassigned URN or different contact
@@ -728,9 +850,22 @@ def exit_sessions(session_ids: list, status: str):
         session.contact.save(update_fields=("current_flow", "modified_on"))
 
 
+def resolve_destination(org, contact, channel=None) -> tuple:
+    for urn in contact.urns.order_by("priority"):
+        if channel:
+            return channel, urn
+        if urn.channel:
+            return urn.channel, urn
+
+        channel = org.channels.filter(is_active=True, schemes__contains=[urn.scheme]).first()
+        if channel:
+            return channel, urn
+
+    return None, None
+
+
 def send_to_contact(org, contact, text, attachments) -> Msg:
-    contact_urn = contact.get_urn()
-    channel = Channel.objects.filter(org=org).first()
+    channel, contact_urn = resolve_destination(org, contact)
 
     if contact_urn and channel:
         status = "Q"
@@ -746,6 +881,7 @@ def send_to_contact(org, contact, text, attachments) -> Msg:
         channel=channel,
         contact=contact,
         contact_urn=contact_urn,
+        direction=Msg.DIRECTION_OUT,
         status=status,
         failed_reason=failed_reason,
         text=text or "",
@@ -754,3 +890,52 @@ def send_to_contact(org, contact, text, attachments) -> Msg:
         created_on=timezone.now(),
         modified_on=timezone.now(),
     )
+
+
+def create_broadcast(
+    org,
+    user,
+    *,
+    translations: dict,
+    base_language: str,
+    groups,
+    contacts,
+    urns: list,
+    query: str,
+    node_uuid: str,
+    exclude: mailroom.Exclusions,
+    optin,
+    template,
+    template_variables: list,
+    schedule,
+) -> Broadcast:
+
+    if schedule and isinstance(schedule, mailroom.ScheduleSpec):
+        schedule = Schedule.objects.create(
+            org=org,
+            repeat_period=schedule.repeat_period,
+            repeat_days_of_week=schedule.repeat_days_of_week,
+            next_fire=schedule.start,
+        )
+
+    bcast = Broadcast.objects.create(
+        org=org,
+        translations=translations,
+        base_language=base_language,
+        urns=urns,
+        query=query,
+        node_uuid=node_uuid,
+        exclusions=asdict(exclude) if exclude else None,
+        optin=optin,
+        template=template,
+        template_variables=template_variables,
+        schedule=schedule,
+        created_by=user,
+        modified_by=user,
+    )
+    if groups:
+        bcast.groups.add(*groups)
+    if contacts:
+        bcast.contacts.add(*contacts)
+
+    return bcast

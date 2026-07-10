@@ -2,13 +2,13 @@
 
 <div class="paging flex flex-row items-center h-10">
   {% if actions|length and paginator.count %}
-    <div style="padding-left: 0.55em" class="check">
+    <div style="padding-left: 1em;margin-bottom:-0.4em" class="check">
       <temba-checkbox onclick="handleSelectAll(this)" class="select-all">
       </temba-checkbox>
     </div>
   {% endif %}
   <div class="action-buttons flex-grow">
-    <div class="list-buttons-container">
+    <div class="list-buttons-container hide">
       <div class="list-buttons flex items-center h-full -mx-1">
         {% if 'label' in actions %}
           <temba-dropdown offsety="8" offsetx="-8" class="ml-4">
@@ -51,6 +51,24 @@
             </temba-tip>
           </div>
         {% endif %}
+        {% if 'send' in actions %}
+          {% if org_perms.msgs.broadcast_create and not reply_disabled %}
+            <div onclick="handleSendMessageClicked()" class="linked ml-4">
+              <temba-tip position="top" text="{{ _("New Broadcast") |escapejs }}">
+                <temba-icon name="send" clickable="true">
+                </temba-icon>
+              </temba-tip>
+            </div>
+          {% endif %}
+        {% endif %}
+        {% if 'start-flow' in actions and org_perms.flows.flow_start %}
+          <div onclick="handleStartFlowClicked(event)" class="linked ml-4">
+            <temba-tip position="top" text="{{ _("Start Flow") |escapejs }}">
+              <temba-icon name="flow" clickable="true" class="show-loading">
+              </temba-icon>
+            </temba-tip>
+          </div>
+        {% endif %}
         {% if 'archive' in actions %}
           <div onclick="runActionOnObjectRows('archive', refreshMenu)" class="linked ml-4">
             <temba-tip position="top" text="{{ _("Archive") |escapejs }}">
@@ -59,28 +77,10 @@
             </temba-tip>
           </div>
         {% endif %}
-        {% if 'send' in actions %}
-          {% if org_perms.msgs.broadcast_create and not reply_disabled %}
-            <div onclick="handleSendMessageClicked()" class="linked ml-4">
-              <temba-tip position="top" text="{{ _("New Broadcast") |escapejs }}">
-                <temba-icon name="message" clickable="true">
-                </temba-icon>
-              </temba-tip>
-            </div>
-          {% endif %}
-        {% endif %}
         {% if 'delete' in actions %}
           <div onclick="onDeleteClicked()" class="linked ml-4">
             <temba-tip position="top" text="{{ _("Delete") |escapejs }}">
               <temba-icon name="delete" clickable="true">
-              </temba-icon>
-            </temba-tip>
-          </div>
-        {% endif %}
-        {% if 'unlabel' in actions %}
-          <div onclick="unlabelObjectRows({{ current_group.pk }}, refreshMenu);" class="linked ml-4">
-            <temba-tip position="top" text="{{ _("Remove from group") |escapejs }}">
-              <temba-icon name="delete_small" clickable="true" class="show-loading">
               </temba-icon>
             </temba-tip>
           </div>
@@ -93,17 +93,17 @@
             </temba-tip>
           </div>
         {% endif %}
-        {% if 'start-flow' in actions and org_perms.flows.flow_start %}
-          <div onclick="handleStartFlowClicked(event)" class="linked ml-4">
-            <temba-tip position="top" text="{{ _("Start Flow") |escapejs }}">
-              <temba-icon name="flow" clickable="true" class="show-loading">
+        {% if 'unlabel' in actions %}
+          <div onclick="unlabelObjectRows({{ current_group.pk }}, refreshMenu);" class="linked ml-4">
+            <temba-tip position="top" text="{{ _("Remove from group") |escapejs }}">
+              <temba-icon name="group_exclude" clickable="true" class="show-loading">
               </temba-icon>
             </temba-tip>
           </div>
         {% endif %}
-        {% if 'download-results' in actions %}
-          <div onclick="handleDownloadFlowResults(event)" class="linked ml-4">
-            <temba-tip position="top" text="{{ _("Download Results") |escapejs }}">
+        {% if 'export-results' in actions %}
+          <div onclick="handleExportFlowResults(event)" class="linked ml-4">
+            <temba-tip position="top" text="{{ _("Export Results") |escapejs }}">
               <temba-icon name="download" clickable="true" class="show-loading">
               </temba-icon>
             </temba-tip>

@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 @cron_task(lock_timeout=300)
 def sync_classifier_intents(id=None):
-    classifiers = Classifier.objects.filter(is_active=True)
+    classifiers = Classifier.objects.filter(is_active=True, org__is_active=True, org__is_suspended=False)
     if id:
         classifiers = classifiers.filter(id=id)
 
@@ -18,4 +18,4 @@ def sync_classifier_intents(id=None):
         try:
             classifier.sync()
         except Exception as e:
-            logger.error("error getting intents for classifier", e)
+            logger.error(f"Error getting intents for classifier: {str(e)}", exc_info=True)

@@ -7,15 +7,6 @@ function getCheckedIds() {
   return checkedIds.sort(numericComparator);
 }
 
-function getCheckedUuids() {
-  var checkedUuids = Array();
-  var checks = document.querySelectorAll('.object-row.checked');
-  for (var i = 0; i < checks.length; i++) {
-    checkedUuids.push(checks[i].getAttribute('data-uuid'));
-  }
-  return checkedUuids.sort();
-}
-
 function getLabeledIds(labelId) {
   var objectRowsIds = Array();
   var labeled = document.querySelectorAll(
@@ -36,65 +27,38 @@ function getObjectRowLabels(objectId) {
   );
   var labels = row.querySelectorAll('.lbl, temba-label');
   for (var i = 0; i < labels.length; i++) {
-    labelIds.push(parseInt($(labels[i]).data('id')));
+    labelIds.push(parseInt(labels[i].dataset.id));
   }
   return labelIds.sort(numericComparator);
 }
 
-function runActionOnObjectRows(action, onSuccess) {
+function runActionOnObjectRows(action, options = {}) {
   var objectIds = getCheckedIds();
-  jQuery.ajaxSettings.traditional = true;
-  fetchPJAXContent(document.location.href, '#pjax', {
-    postData: { objects: objectIds, action: action, pjax: 'true' },
-    onSuccess: onSuccess,
+  const formData = new FormData();
+  if (options.label) {
+    formData.append('label', options.label);
+  }
+
+  if (!options.add) {
+    formData.append('add', "false")
+  }
+
+  for (var i = 0; i < objectIds.length; i++) {
+    formData.append('objects', objectIds[i]);
+  }
+
+  formData.append('action', action);
+  formData.append('pjax', 'true');
+  return spaPost(document.location.href, {
+    postData: formData,
   });
 }
 
-function unlabelObjectRows(labelId, onSuccess) {
-  var objectsIds = getCheckedIds();
-  var addLabel = false;
-
-  jQuery.ajaxSettings.traditional = true;
-  fetchPJAXContent(document.location.href, '#pjax', {
-    postData: {
-      objects: objectsIds,
-      label: labelId,
-      add: addLabel,
-      action: 'unlabel',
-      pjax: 'true',
-    },
-    onSuccess: onSuccess,
-  });
+function unlabelObjectRows(labelId) {
+  runActionOnObjectRows('unlabel', { label: labelId, add: false });
 }
 
-function postLabelChanges(
-  smsIds,
-  labelId,
-  addLabel,
-  number,
-  onError,
-  onSuccess
-) {
-  fetchPJAXContent(document.location.href, '#pjax', {
-    postData: {
-      objects: smsIds,
-      label: labelId,
-      add: addLabel,
-      action: 'label',
-      pjax: 'true',
-      number: number,
-    },
-    onSuccess: function (data, textStatus) {
-      recheckIds();
-      if (onSuccess) {
-        onSuccess();
-      }
-    },
-    onError: onError,
-  });
-}
-
-function labelObjectRows(labelId, forceRemove, onSuccess) {
+function labelObjectRows(labelId, forceRemove) {
   var objectRowsIds = getCheckedIds();
   var labeledIds = getLabeledIds(labelId);
 
@@ -125,7 +89,6 @@ function labelObjectRows(labelId, forceRemove, onSuccess) {
     addLabel = false;
   }
 
-  jQuery.ajaxSettings.traditional = true;
   window.lastChecked = getCheckedIds();
 
   if (objectRowsIds.length == 0) {
@@ -136,7 +99,9 @@ function labelObjectRows(labelId, forceRemove, onSuccess) {
     return;
   }
 
-  postLabelChanges(objectRowsIds, labelId, addLabel, null, null, onSuccess);
+  runActionOnObjectRows('label', { label: labelId, add: addLabel }).then(
+    recheckIds
+  );
 }
 
 /**
@@ -153,7 +118,7 @@ function recheckIds() {
       row.classList.add('checked');
     }
     var listButtons = document.querySelector('.list-buttons-container');
-    listButtons.classList.add('visible');
+    listButtons.classList.remove('hide');
     updateLabelMenu();
   }
 }
@@ -216,9 +181,9 @@ function handleRowSelection(checkbox) {
   }
 
   if (document.querySelector('tr.checked')) {
-    listButtons.add('visible');
+    listButtons.remove('hide');
   } else {
-    listButtons.remove('visible');
+    listButtons.add('hide');
   }
   updateLabelMenu();
 
@@ -249,4 +214,14 @@ function handleSelectAll(ele) {
       }
     }
   });
+}
+
+// Used for start flow and send message actions
+function getCheckedUuids() {
+  var checkedUuids = Array();
+  var checks = document.querySelectorAll('.object-row.checked');
+  for (var i = 0; i < checks.length; i++) {
+    checkedUuids.push(checks[i].getAttribute('data-uuid'));
+  }
+  return checkedUuids.sort();
 }

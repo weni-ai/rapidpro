@@ -1,0 +1,6 @@
+{% extends "notifications/email/base.txt" %}
+{% load i18n %}
+
+{% block notification-body %}
+{% blocktrans with url=target_url %}Your export is ready! Download it here: {{ url }}{% endblocktrans %}
+{% endblock notification-body %}

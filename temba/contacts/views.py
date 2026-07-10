@@ -7,7 +7,6 @@ import iso8601
 from smartmin.views import (
     SmartCreateView,
     SmartCRUDL,
-    SmartFormView,
     SmartListView,
     SmartReadView,
     SmartTemplateView,
@@ -22,21 +21,21 @@ from django.core.exceptions import ValidationError
 from django.core.validators import FileExtensionValidator
 from django.db import transaction
 from django.db.models.functions import Upper
-from django.forms import Form
 from django.http import Http404, HttpResponse, HttpResponseNotFound, HttpResponseRedirect, JsonResponse
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.functional import cached_property
-from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils.translation import gettext_lazy as _
 from django.views import View
 
+from temba import mailroom
 from temba.archives.models import Archive
 from temba.channels.models import Channel
 from temba.mailroom.events import Event
 from temba.notifications.views import NotificationTargetMixin
 from temba.orgs.models import User
 from temba.orgs.views import (
+    BaseExportView,
     DependencyDeleteModal,
     DependencyUsagesModal,
     MenuMixin,
@@ -45,33 +44,16 @@ from temba.orgs.views import (
     OrgPermsMixin,
 )
 from temba.tickets.models import Ticket, Topic
-from temba.utils import analytics, json, languages, on_transaction_commit
+from temba.utils import json, on_transaction_commit
 from temba.utils.dates import datetime_to_timestamp, timestamp_to_datetime
-from temba.utils.fields import (
-    CheckboxWidget,
-    InputWidget,
-    SelectMultipleWidget,
-    SelectWidget,
-    TembaChoiceField,
-    TembaMultipleChoiceField,
-)
+from temba.utils.fields import CheckboxWidget, InputWidget, SelectWidget, TembaChoiceField
 from temba.utils.models import patch_queryset_count
 from temba.utils.models.es import IDSliceQuerySet
 from temba.utils.views import BulkActionMixin, ComponentFormMixin, ContentMenuMixin, NonAtomicMixin, SpaMixin
 
-from .models import (
-    URN,
-    Contact,
-    ContactField,
-    ContactGroup,
-    ContactGroupCount,
-    ContactImport,
-    ContactURN,
-    ExportContactsTask,
-)
-from .search import SearchException, parse_query, search_contacts
+from .forms import ContactGroupForm, UpdateContactForm
+from .models import URN, Contact, ContactExport, ContactField, ContactGroup, ContactGroupCount, ContactImport
 from .search.omnibox import omnibox_query, omnibox_results_to_dict
-from .tasks import export_contacts_task
 
 logger = logging.getLogger(__name__)
 
@@ -82,67 +64,7 @@ HISTORY_INCLUDE_EVENTS = {
     Event.TYPE_CONTACT_GROUPS_CHANGED,
     Event.TYPE_CONTACT_NAME_CHANGED,
     Event.TYPE_CONTACT_URNS_CHANGED,
-    Event.TYPE_EMAIL_SENT,
-    Event.TYPE_ERROR,
-    Event.TYPE_FAILURE,
-    Event.TYPE_INPUT_LABELS_ADDED,
-    Event.TYPE_RUN_RESULT_CHANGED,
-    Event.TYPE_WEBHOOK_CALLED,
 }
-
-
-class ContactGroupForm(forms.ModelForm):
-    preselected_contacts = forms.CharField(required=False, widget=forms.HiddenInput)
-    group_query = forms.CharField(required=False, widget=forms.HiddenInput)
-
-    def __init__(self, org, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        self.org = org
-
-    def clean_name(self):
-        name = self.cleaned_data["name"]
-
-        # make sure the name isn't already taken
-        existing = self.org.groups.filter(is_active=True, name__iexact=name).first()
-        if existing and self.instance != existing:
-            raise forms.ValidationError(_("Already used by another group."))
-
-        count, limit = ContactGroup.get_org_limit_progress(self.org)
-        if limit is not None and count >= limit:
-            raise forms.ValidationError(
-                _(
-                    "This workspace has reached its limit of %(limit)d groups. "
-                    "You must delete existing ones before you can create new ones."
-                ),
-                params={"limit": limit},
-            )
-
-        return name
-
-    def clean_query(self):
-        try:
-            parsed = parse_query(self.org, self.cleaned_data["query"])
-            if not parsed.metadata.allow_as_group:
-                raise forms.ValidationError(_('You cannot create a smart group based on "id" or "group".'))
-
-            if (
-                self.instance
-                and self.instance.status != ContactGroup.STATUS_READY
-                and parsed.query != self.instance.query
-            ):
-                raise forms.ValidationError(_("You cannot update the query of a group that is evaluating."))
-
-            return parsed.query
-
-        except SearchException as e:
-            raise forms.ValidationError(str(e))
-
-    class Meta:
-        model = ContactGroup
-        fields = ("name", "query")
-        labels = {"name": _("Name"), "query": _("Query")}
-        help_texts = {"query": _("Only contacts matching this query will belong to this group.")}
 
 
 class ContactListView(SpaMixin, OrgPermsMixin, BulkActionMixin, SmartListView):
@@ -181,8 +103,7 @@ class ContactListView(SpaMixin, OrgPermsMixin, BulkActionMixin, SmartListView):
 
     def derive_export_url(self):
         search = quote_plus(self.request.GET.get("search", ""))
-        redirect = quote_plus(self.request.get_full_path())
-        return f"{reverse('contacts.contact_export')}?g={self.group.uuid}&s={search}&redirect={redirect}"
+        return f"{reverse('contacts.contact_export')}?g={self.group.uuid}&s={search}"
 
     def derive_refresh(self):
         # smart groups that are reevaluating should refresh every 2 seconds
@@ -190,59 +111,6 @@ class ContactListView(SpaMixin, OrgPermsMixin, BulkActionMixin, SmartListView):
             return 200000
 
         return None
-
-    @staticmethod
-    def prepare_sort_field_struct(sort_on):
-        if not sort_on:
-            return None, None, None
-
-        if sort_on[0] == "-":
-            sort_direction = "desc"
-            sort_field = sort_on[1:]
-        else:
-            sort_direction = "asc"
-            sort_field = sort_on
-
-        if sort_field == "created_on":
-            return (
-                sort_field,
-                sort_direction,
-                {"field_type": "attribute", "sort_direction": sort_direction, "field_name": "created_on"},
-            )
-        if sort_field == "last_seen_on":
-            return (
-                sort_field,
-                sort_direction,
-                {"field_type": "attribute", "sort_direction": sort_direction, "field_name": "last_seen_on"},
-            )
-        else:
-            try:
-                contact_sort_field = ContactField.user_fields.values("value_type", "uuid").get(uuid=sort_field)
-            except ValidationError:
-                return None, None, None
-            except ContactField.DoesNotExist:
-                return None, None, None
-
-            mapping = {
-                "T": "text",
-                "N": "number",
-                "D": "datetime",
-                "S": "state_keyword",
-                "I": "district_keyword",
-                "W": "ward_keyword",
-            }
-            field_leaf = mapping[contact_sort_field["value_type"]]
-
-            return (
-                sort_field,
-                sort_direction,
-                {
-                    "field_type": "field",
-                    "sort_direction": sort_direction,
-                    "field_path": "fields.{}".format(field_leaf),
-                    "field_uuid": str(contact_sort_field["uuid"]),
-                },
-            )
 
     def get_queryset(self, **kwargs):
         org = self.request.org
@@ -269,14 +137,14 @@ class ContactListView(SpaMixin, OrgPermsMixin, BulkActionMixin, SmartListView):
                 exclude_ids = []
 
             try:
-                results = search_contacts(
-                    org, search_query, group=self.group, sort=sort_on, offset=offset, exclude_ids=exclude_ids
+                results = mailroom.get_client().contact_search(
+                    org, self.group, search_query, sort=sort_on, offset=offset, exclude_ids=exclude_ids
                 )
                 self.parsed_query = results.query if len(results.query) > 0 else None
                 self.save_dynamic_search = results.metadata.allow_as_group
 
                 return IDSliceQuerySet(Contact, results.contact_ids, offset=offset, total=results.total)
-            except SearchException as e:
+            except mailroom.QueryValidationException as e:
                 self.search_error = str(e)
 
                 # this should be an empty resultset
@@ -312,162 +180,6 @@ class ContactListView(SpaMixin, OrgPermsMixin, BulkActionMixin, SmartListView):
             context["save_dynamic_search"] = self.save_dynamic_search
 
         return context
-
-
-class ContactForm(forms.ModelForm):
-    def __init__(self, org, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        self.org = org
-
-        # add all URN scheme fields if org is not anon
-        extra_fields = []
-        if not self.org.is_anon:
-            if not self.instance.id:
-                urns = []
-            else:
-                urns = self.instance.get_urns()
-
-            idx = 0
-
-            last_urn = None
-
-            if not urns:
-                urn = ContactURN()
-                urn.scheme = "tel"
-                urns = [urn]
-
-            for urn in urns:
-                first_urn = last_urn is None or urn.scheme != last_urn.scheme
-
-                urn_choice = None
-                for choice in URN.SCHEME_CHOICES:
-                    if choice[0] == urn.scheme:
-                        urn_choice = choice
-
-                scheme = urn.scheme
-                label = urn.scheme
-
-                if urn_choice:
-                    label = urn_choice[1]
-
-                help_text = _(f"{label} for this contact")
-                if first_urn:
-                    help_text = _(f"{label} for this contact") + f" (@urns.{scheme})"
-
-                # get all the urns for this scheme
-                ctrl = forms.CharField(
-                    required=False, label=label, initial=urn.path, help_text=help_text, widget=InputWidget()
-                )
-                extra_fields.append(("urn__%s__%d" % (scheme, idx), ctrl))
-                idx += 1
-
-                last_urn = urn
-
-        self.fields = OrderedDict(list(self.fields.items()) + extra_fields)
-
-    def clean(self):
-        country = self.org.default_country_code
-
-        def validate_urn(key, scheme, path):
-            try:
-                normalized = URN.normalize(URN.from_parts(scheme, path), country)
-                existing_urn = ContactURN.lookup(self.org, normalized, normalize=False)
-
-                if existing_urn and existing_urn.contact and existing_urn.contact != self.instance:
-                    self._errors[key] = self.error_class([_("Used by another contact")])
-                    return False
-                # validate but not with country as users are allowed to enter numbers before adding a channel
-                elif not URN.validate(normalized):
-                    if scheme == URN.TEL_SCHEME:  # pragma: needs cover
-                        self._errors[key] = self.error_class(
-                            [_("Invalid number. Ensure number includes country code, e.g. +1-541-754-3010")]
-                        )
-                    else:
-                        self._errors[key] = self.error_class([_("Invalid format")])
-                    return False
-                return True
-            except ValueError:
-                self._errors[key] = self.error_class([_("Invalid input")])
-                return False
-
-        # validate URN fields
-        for field_key, value in self.data.items():
-            if field_key.startswith("urn__") and value:
-                scheme = field_key.split("__")[1]
-                validate_urn(field_key, scheme, value)
-
-        # validate new URN if provided
-        if self.data.get("new_path", None):
-            if validate_urn("new_path", self.data["new_scheme"], self.data["new_path"]):
-                self.cleaned_data["new_scheme"] = self.data["new_scheme"]
-                self.cleaned_data["new_path"] = self.data["new_path"]
-
-        return self.cleaned_data
-
-    class Meta:
-        model = Contact
-        fields = ("name",)
-        widgets = {"name": InputWidget(attrs={"widget_only": False})}
-
-
-class UpdateContactForm(ContactForm):
-    groups = TembaMultipleChoiceField(
-        queryset=ContactGroup.objects.none(),
-        required=False,
-        label=_("Groups"),
-        widget=SelectMultipleWidget(attrs={"placeholder": _("Select groups for this contact"), "searchable": True}),
-    )
-
-    def __init__(self, org, *args, **kwargs):
-        super().__init__(org, *args, **kwargs)
-
-        choices = [("", "No Preference")]
-
-        flow_langs = self.instance.org.flow_languages
-
-        # if they had a preference that has since been removed, make sure we show it
-        if self.instance.language and self.instance.language not in flow_langs:
-            lang_name = languages.get_name(self.instance.language)
-            choices += [(self.instance.language, _(f"{lang_name} (Missing)"))]
-
-        choices += list(languages.choices(codes=flow_langs))
-
-        self.fields["language"] = forms.ChoiceField(
-            required=False, label=_("Language"), initial=self.instance.language, choices=choices, widget=SelectWidget()
-        )
-
-        self.fields["groups"].initial = self.instance.get_groups(manual_only=True)
-        self.fields["groups"].queryset = ContactGroup.get_groups(self.org, manual_only=True).order_by(Upper("name"))
-
-    class Meta:
-        model = Contact
-        fields = ("name", "status", "language", "groups")
-        widgets = {
-            "name": InputWidget(),
-        }
-
-
-class ExportForm(Form):
-    group_memberships = forms.ModelMultipleChoiceField(
-        queryset=ContactGroup.objects.none(),
-        required=False,
-        label=_("Group Memberships for"),
-        widget=SelectMultipleWidget(
-            attrs={"widget_only": True, "placeholder": _("Optional: Choose groups to show in your export")}
-        ),
-    )
-
-    def __init__(self, org, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        self.fields["group_memberships"].queryset = ContactGroup.get_groups(org, ready_only=True).order_by(
-            Upper("name")
-        )
-
-        self.fields["group_memberships"].help_text = _(
-            "Include group membership only for these groups. " "(Leave blank to ignore group memberships)."
-        )
 
 
 class ContactCRUDL(SmartCRUDL):
@@ -574,91 +286,35 @@ class ContactCRUDL(SmartCRUDL):
 
             return JsonResponse({"results": menu})
 
-    class Export(ModalMixin, OrgPermsMixin, SmartFormView):
-        form_class = ExportForm
-        submit_button_name = _("Export")
+    class Export(BaseExportView):
+        export_type = ContactExport
         success_url = "@contacts.contact_list"
+        size_limit = 1_000_000
 
-        def derive_params(self):
-            group_uuid = self.request.GET.get("g")
-            search = self.request.GET.get("s")
-            redirect = self.request.GET.get("redirect")
-            if redirect and not url_has_allowed_host_and_scheme(redirect, self.request.get_host()):
-                redirect = None
+        def derive_fields(self):
+            return ("with_groups",)
 
-            return group_uuid, search, redirect
+        def get_blocker(self) -> str:
+            if blocker := super().get_blocker():
+                return blocker
 
-        def get_form_kwargs(self):
-            kwargs = super().get_form_kwargs()
-            kwargs["org"] = self.request.org
-            return kwargs
+            query = self.request.GET.get("s")
+            total = mailroom.get_client().contact_export_preview(self.request.org, self.group, query)
+            if total > self.size_limit:
+                return "too-big"
 
-        def form_invalid(self, form):  # pragma: needs cover
-            if "_format" in self.request.GET and self.request.GET["_format"] == "json":
-                return HttpResponse(
-                    json.dumps(dict(status="error", errors=form.errors)), content_type="application/json", status=400
-                )
-            else:
-                return super().form_invalid(form)
+            return ""
 
-        def form_valid(self, form):
-            user = self.request.user
+        @cached_property
+        def group(self):
             org = self.request.org
-            group_uuid, search, redirect = self.derive_params()
+            group_uuid = self.request.GET.get("g")
+            return org.groups.filter(uuid=group_uuid).first() if group_uuid else org.active_contacts_group
 
-            # is there already an export taking place?
-            existing = ExportContactsTask.get_recent_unfinished(org)
-            if existing:
-                messages.info(
-                    self.request,
-                    _(
-                        "There is already an export in progress, started by %s. You must wait "
-                        "for that export to complete before starting another." % existing.created_by.username
-                    ),
-                )
-            else:
-                group_memberships = form.cleaned_data["group_memberships"]
-
-                group = org.groups.filter(uuid=group_uuid).first() if group_uuid else None
-
-                previous_export = (
-                    ExportContactsTask.objects.filter(org=org, created_by=user).order_by("-modified_on").first()
-                )
-                if previous_export and previous_export.created_on < timezone.now() - timedelta(
-                    hours=24
-                ):  # pragma: needs cover
-                    analytics.track(self.request.user, "temba.contact_exported")
-
-                export = ExportContactsTask.create(org, user, group, search, group_memberships)
-
-                # schedule the export job
-                on_transaction_commit(lambda: export_contacts_task.delay(export.pk))
-
-                if not getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False):  # pragma: no cover
-                    messages.info(
-                        self.request,
-                        _("We are preparing your export. We will e-mail you at %s when it is ready.")
-                        % self.request.user.username,
-                    )
-
-                else:
-                    dl_url = reverse("assets.download", kwargs=dict(type="contact_export", pk=export.pk))
-                    messages.info(
-                        self.request,
-                        _("Export complete, you can find it here: %s (production users will get an email)") % dl_url,
-                    )
-            if "HTTP_X_PJAX" not in self.request.META:
-                return HttpResponseRedirect(redirect or reverse("contacts.contact_list"))
-            else:  # pragma: no cover
-                response = self.render_to_response(
-                    self.get_context_data(
-                        form=form,
-                        success_url=self.get_success_url(),
-                        success_script=getattr(self, "success_script", None),
-                    )
-                )
-                response["Temba-Success"] = self.get_success_url()
-                return response
+        def create_export(self, org, user, form):
+            search = self.request.GET.get("s")
+            with_groups = form.cleaned_data["with_groups"]
+            return ContactExport.create(org, user, group=self.group, search=search, with_groups=with_groups)
 
     class Omnibox(OrgPermsMixin, SmartListView):
         paginate_by = 75
@@ -696,6 +352,16 @@ class ContactCRUDL(SmartCRUDL):
         def build_content_menu(self, menu):
             obj = self.get_object()
 
+            if self.has_org_perm("contacts.contact_update"):
+                menu.add_modax(
+                    _("Edit"),
+                    "edit-contact",
+                    f"{reverse('contacts.contact_update', args=[obj.id])}",
+                    title=_("Edit Contact"),
+                    on_submit="contactUpdated()",
+                    as_button=True,
+                )
+
             if obj.status == Contact.STATUS_ACTIVE:
                 if self.has_org_perm("flows.flow_start"):
                     menu.add_modax(
@@ -709,20 +375,8 @@ class ContactCRUDL(SmartCRUDL):
                     menu.add_modax(
                         _("Open Ticket"), "open-ticket", reverse("contacts.contact_open_ticket", args=[obj.id])
                     )
-
-                menu.new_group()
-
                 if self.has_org_perm("contacts.contact_interrupt") and obj.current_flow:
                     menu.add_url_post(_("Interrupt"), reverse("contacts.contact_interrupt", args=(obj.id,)))
-
-            if self.has_org_perm("contacts.contact_update"):
-                menu.add_modax(
-                    _("Edit"),
-                    "edit-contact",
-                    f"{reverse('contacts.contact_update', args=[obj.id])}",
-                    title=_("Edit Contact"),
-                    on_submit="contactUpdated()",
-                )
 
     class Scheduled(OrgObjPermsMixin, SmartReadView):
         """
@@ -827,14 +481,16 @@ class ContactCRUDL(SmartCRUDL):
                 return JsonResponse({"total": 0, "sample": [], "fields": {}})
 
             try:
-                results = search_contacts(org, query, group=org.active_contacts_group, sort="-created_on")
+                results = mailroom.get_client().contact_search(
+                    org, org.active_contacts_group, query, sort="-created_on"
+                )
                 summary = {
                     "total": results.total,
                     "query": results.query,
                     "fields": results.metadata.fields,
                     "sample": IDSliceQuerySet(Contact, results.contact_ids, offset=0, total=results.total)[0:samples],
                 }
-            except SearchException as e:
+            except mailroom.QueryValidationException as e:
                 return JsonResponse({"total": 0, "sample": [], "query": "", "error": str(e)})
 
             # serialize our contact sample
@@ -861,12 +517,12 @@ class ContactCRUDL(SmartCRUDL):
             field_keys = [f["key"] for f in summary["fields"]]
             summary["fields"] = {
                 str(f.uuid): {"label": f.name}
-                for f in ContactField.user_fields.filter(org=org, key__in=field_keys, is_active=True)
+                for f in org.fields.filter(key__in=field_keys, is_active=True, is_proxy=False)
             }
             return JsonResponse(summary)
 
     class List(ContentMenuMixin, ContactListView):
-        title = _("Active Contacts")
+        title = _("Active")
         system_group = ContactGroup.TYPE_DB_ACTIVE
         menu_path = "/contact/active"
 
@@ -887,7 +543,7 @@ class ContactCRUDL(SmartCRUDL):
 
             if has_contactgroup_create_perm and valid_search_condition:
                 try:
-                    parsed = parse_query(self.request.org, search)
+                    parsed = mailroom.get_client().contact_parse_query(self.request.org, search)
                     if parsed.metadata.allow_as_group:
                         menu.add_modax(
                             _("Create Smart Group"),
@@ -895,7 +551,7 @@ class ContactCRUDL(SmartCRUDL):
                             f"{reverse('contacts.contactgroup_create')}?search={quote_plus(search)}",
                             as_button=True,
                         )
-                except SearchException:  # pragma: no cover
+                except mailroom.QueryValidationException:  # pragma: no cover
                     pass
 
             if self.has_org_perm("contacts.contact_create"):
@@ -919,7 +575,7 @@ class ContactCRUDL(SmartCRUDL):
             return context
 
     class Blocked(ContentMenuMixin, ContactListView):
-        title = _("Blocked Contacts")
+        title = _("Blocked")
         system_group = ContactGroup.TYPE_DB_BLOCKED
 
         def get_bulk_actions(self):
@@ -935,7 +591,7 @@ class ContactCRUDL(SmartCRUDL):
             return context
 
     class Stopped(ContentMenuMixin, ContactListView):
-        title = _("Stopped Contacts")
+        title = _("Stopped")
         template_name = "contacts/contact_stopped.html"
         system_group = ContactGroup.TYPE_DB_STOPPED
 
@@ -952,7 +608,7 @@ class ContactCRUDL(SmartCRUDL):
             return context
 
     class Archived(ContentMenuMixin, ContactListView):
-        title = _("Archived Contacts")
+        title = _("Archived")
         template_name = "contacts/contact_archived.html"
         system_group = ContactGroup.TYPE_DB_ARCHIVED
         bulk_action_permissions = {"delete": "contacts.contact_delete"}
@@ -1033,37 +689,43 @@ class ContactCRUDL(SmartCRUDL):
                 raise Http404("Group not found")
 
     class Create(NonAtomicMixin, ModalMixin, OrgPermsMixin, SmartCreateView):
-        form_class = ContactForm
-        success_message = ""
+        class Form(forms.ModelForm):
+            phone = forms.CharField(required=False, max_length=255, label=_("Phone Number"), widget=InputWidget())
+
+            class Meta:
+                model = Contact
+                fields = ("name", "phone")
+                widgets = {"name": InputWidget(attrs={"widget_only": False})}
+
+        form_class = Form
         submit_button_name = _("Create")
 
-        def get_form_kwargs(self, *args, **kwargs):
-            form_kwargs = super().get_form_kwargs(*args, **kwargs)
-            form_kwargs["org"] = self.request.org
-            return form_kwargs
+        def form_valid(self, form):
+            name = self.form.cleaned_data.get("name")
+            phone = self.form.cleaned_data.get("phone")
+            urns = ["tel:" + phone] if phone else []
 
-        def get_form(self):
-            return super().get_form()
+            try:
+                Contact.create(
+                    self.request.org,
+                    self.request.user,
+                    name=name,
+                    language="",
+                    status=Contact.STATUS_ACTIVE,
+                    urns=urns,
+                    fields={},
+                    groups=[],
+                )
+            except mailroom.URNValidationException as e:
+                error = _("In use by another contact.") if e.code == "taken" else _("Not a valid phone number.")
+                self.form.add_error("phone", error)
+                return self.form_invalid(form)
 
-        def pre_save(self, obj):
-            obj = super().pre_save(obj)
-            obj.org = self.request.org
-            return obj
-
-        def save(self, obj):
-            urns = []
-            for field_key, value in self.form.cleaned_data.items():
-                if field_key.startswith("urn__") and value:
-                    scheme = field_key.split("__")[1]
-                    urns.append(URN.from_parts(scheme, value))
-
-            Contact.create(obj.org, self.request.user, obj.name, language="", urns=urns, fields={}, groups=[])
+            return self.render_modal_response(form)
 
     class Update(SpaMixin, ComponentFormMixin, NonAtomicMixin, ModalMixin, OrgObjPermsMixin, SmartUpdateView):
         form_class = UpdateContactForm
         success_url = "hide"
-        success_message = ""
-        submit_button_name = _("Save Changes")
 
         def derive_exclude(self):
             obj = self.get_object()
@@ -1167,7 +829,6 @@ class ContactCRUDL(SmartCRUDL):
 
         form_class = Form
         submit_button_name = _("Open")
-        success_message = ""
 
         def get_form_kwargs(self):
             kwargs = super().get_form_kwargs()
@@ -1191,7 +852,6 @@ class ContactCRUDL(SmartCRUDL):
         """
 
         fields = ()
-        success_message = ""
 
         def save(self, obj):
             obj.interrupt(self.request.user)
@@ -1204,7 +864,6 @@ class ContactCRUDL(SmartCRUDL):
 
         fields = ()
         success_url = "@contacts.contact_list"
-        success_message = ""
         submit_button_name = _("Delete")
 
         def save(self, obj):
@@ -1241,7 +900,6 @@ class ContactGroupCRUDL(SmartCRUDL):
         form_class = ContactGroupForm
         fields = ("name", "preselected_contacts", "group_query")
         success_url = "uuid@contacts.contact_filter"
-        success_message = ""
         submit_button_name = _("Create")
 
         def save(self, obj):
@@ -1276,7 +934,6 @@ class ContactGroupCRUDL(SmartCRUDL):
         form_class = ContactGroupForm
         fields = ("name",)
         success_url = "uuid@contacts.contact_filter"
-        success_message = ""
 
         def get_queryset(self):
             return super().get_queryset().filter(is_system=False)
@@ -1307,7 +964,6 @@ class ContactGroupCRUDL(SmartCRUDL):
     class Delete(DependencyDeleteModal):
         cancel_url = "uuid@contacts.contact_filter"
         success_url = "@contacts.contact_list"
-        success_message = ""
 
 
 class ContactFieldForm(forms.ModelForm):
@@ -1412,7 +1068,6 @@ class ContactFieldCRUDL(SmartCRUDL):
 
         queryset = ContactField.user_fields
         form_class = Form
-        success_message = ""
         success_url = "hide"
         submit_button_name = _("Create")
 
@@ -1440,9 +1095,8 @@ class ContactFieldCRUDL(SmartCRUDL):
             return self.render_modal_response(form)
 
     class Update(FieldLookupMixin, ModalMixin, OrgObjPermsMixin, SmartUpdateView):
-        queryset = ContactField.user_fields
+        queryset = ContactField.objects.filter(is_system=False)
         form_class = ContactFieldForm
-        success_message = ""
         submit_button_name = _("Update")
         success_url = "hide"
 
@@ -1466,7 +1120,6 @@ class ContactFieldCRUDL(SmartCRUDL):
     class Delete(FieldLookupMixin, DependencyDeleteModal):
         cancel_url = "@contacts.contactfield_list"
         success_url = "hide"
-        success_message = ""
 
     class UpdatePriority(OrgPermsMixin, SmartView, View):
         def post(self, request, *args, **kwargs):
@@ -1535,7 +1188,6 @@ class ContactImportCRUDL(SmartCRUDL):
                 fields = ("file",)
 
         form_class = Form
-        success_message = ""
         success_url = "id@contacts.contactimport_preview"
         menu_path = "/contact/import"
 
@@ -1713,7 +1365,6 @@ class ContactImportCRUDL(SmartCRUDL):
 
         form_class = Form
         success_url = "id@contacts.contactimport_read"
-        success_message = ""
 
         def get_form_kwargs(self):
             kwargs = super().get_form_kwargs()

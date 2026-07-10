@@ -24,26 +24,19 @@ from .models import Trigger
 
 
 class Folder(Enum):
-    MESSAGES = (
-        _("Messages"),
-        _("Message Triggers"),
-        (Trigger.TYPE_KEYWORD, Trigger.TYPE_CATCH_ALL),
-        ("keywords__0", "-priority"),
-    )
-    SCHEDULE = (_("Scheduled"), _("Scheduled Triggers"), (Trigger.TYPE_SCHEDULE,), ())
-    CALLS = (_("Calls"), _("Call Triggers"), (Trigger.TYPE_INBOUND_CALL, Trigger.TYPE_MISSED_CALL), ("-priority",))
+    MESSAGES = (_("Messages"), (Trigger.TYPE_KEYWORD, Trigger.TYPE_CATCH_ALL), ("keywords__0", "-priority"))
+    SCHEDULE = (_("Scheduled"), (Trigger.TYPE_SCHEDULE,), ())
+    CALLS = (_("Calls"), (Trigger.TYPE_INBOUND_CALL, Trigger.TYPE_MISSED_CALL), ("-priority",))
     NEW_CONVERSATION = (
         _("New Conversation"),
-        _("New Conversation Triggers"),
         (Trigger.TYPE_NEW_CONVERSATION,),
         ("-priority",),
     )
-    REFERRAL = (_("Referral"), _("Referral Triggers"), (Trigger.TYPE_REFERRAL,), ("-priority",))
-    TICKETS = (_("Tickets"), _("Ticket Triggers"), (Trigger.TYPE_CLOSED_TICKET,), ("-priority",))
-    OPTINS = (_("Opt-Ins"), _("Opt-In Triggers"), (Trigger.TYPE_OPT_IN, Trigger.TYPE_OPT_OUT), ("-priority",))
+    REFERRAL = (_("Referral"), (Trigger.TYPE_REFERRAL,), ("-priority",))
+    TICKETS = (_("Tickets"), (Trigger.TYPE_CLOSED_TICKET,), ("-priority",))
+    OPTINS = (_("Opt-Ins"), (Trigger.TYPE_OPT_IN, Trigger.TYPE_OPT_OUT), ("-priority",))
 
-    def __init__(self, display, title, types, ordering):
-        self.display = display
+    def __init__(self, title, types, ordering):
         self.title = title
         self.types = types
         self.ordering = ordering
@@ -241,7 +234,7 @@ class TriggerCRUDL(SmartCRUDL):
                 if count:
                     menu.append(
                         self.create_menu_item(
-                            name=folder.display,
+                            name=folder.title,
                             count=count,
                             href=reverse("triggers.trigger_folder", kwargs={"folder": folder.slug}),
                         )
@@ -285,7 +278,6 @@ class TriggerCRUDL(SmartCRUDL):
         trigger_type = None
         permission = "triggers.trigger_create"
         success_url = "@triggers.trigger_list"
-        success_message = ""
 
         @property
         def type(self):
@@ -379,8 +371,6 @@ class TriggerCRUDL(SmartCRUDL):
         trigger_type = Trigger.TYPE_OPT_OUT
 
     class Update(ModalMixin, ComponentFormMixin, OrgObjPermsMixin, SmartUpdateView):
-        success_message = ""
-
         def get_form_class(self):
             return self.object.type.form
 
@@ -460,7 +450,7 @@ class TriggerCRUDL(SmartCRUDL):
         """
 
         bulk_actions = ("archive",)
-        title = _("Active Triggers")
+        title = _("Active")
         menu_path = "/trigger/active"
 
         def pre_process(self, request, *args, **kwargs):
@@ -479,7 +469,7 @@ class TriggerCRUDL(SmartCRUDL):
         """
 
         bulk_actions = ("restore", "delete")
-        title = _("Archived Triggers")
+        title = _("Archived")
         menu_path = "/trigger/archived"
 
         def build_content_menu(self, menu):

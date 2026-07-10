@@ -3,7 +3,7 @@ from collections import defaultdict
 
 import regex
 
-from temba.contacts.models import ContactField, ContactGroup
+from temba.contacts.models import ContactGroup
 from temba.flows.models import Flow
 from temba.msgs.models import Label
 from temba.utils import json
@@ -53,7 +53,7 @@ def migrate_to_version_11_12(json_flow, flow=None):
                     continue
                 else:
                     action["channel"] = channel.uuid
-                    action["name"] = "%s: %s" % (channel.get_channel_type_display(), channel.get_address_display())
+                    action["name"] = "%s: %s" % (channel.type.name, channel.get_address_display())
 
             # the action is valid append it
             valid_actions.append(action)
@@ -112,7 +112,7 @@ def migrate_to_version_11_11(json_flow, flow=None):
 
     def remap_label(label):
         # labels can be single string expressions
-        if type(label) is dict:
+        if isinstance(label, dict):
             # we haven't been mapped yet (also, non-uuid labels can't be mapped)
             if ("uuid" not in label or label["uuid"] not in uuid_map) and Label.is_valid_name(label["name"]):
                 label_instance, _ = Label.import_def(flow.org, flow.created_by, {"name": label["name"]})
@@ -463,7 +463,7 @@ def migrate_to_version_11_6(json_flow, flow=None):
     uuid_map = {}
 
     def remap_group(group):
-        if type(group) is dict:
+        if isinstance(group, dict):
             # we haven't been mapped yet (also, non-uuid groups can't be mapped)
             if "uuid" not in group or group["uuid"] not in uuid_map and group.get("name"):
                 group_instance = ContactGroup.get_group_by_name(flow.org, group["name"])
@@ -688,7 +688,7 @@ def migrate_export_to_version_11_0(json_export, org, same_site=True):
     ]
 
     # get all contact fields that are date or location for this org
-    fields = ContactField.user_fields.filter(org=org, is_active=True, value_type__in=["D", "S", "I", "W"]).only(
+    fields = org.fields.filter(is_active=True, is_proxy=False, value_type__in=["D", "S", "I", "W"]).only(
         "id", "value_type", "key"
     )
 
@@ -1154,7 +1154,7 @@ def migrate_to_version_6(json_flow, flow=None):
             for rule in ruleset.get("rules"):
                 # betweens haven't always required a category name, create one
                 rule_test = rule["test"]
-                if rule_test["type"] == "between" and "category" not in rule:
+                if rule_test["type"] == "between" and "category" not in rule:  # pragma: no cover
                     rule["category"] = "%s-%s" % (rule_test["min"], rule_test["max"])
 
                 # convert the category name
@@ -1209,7 +1209,7 @@ def migrate_to_version_5(json_flow, flow=None):
 
             # determine our type from our operand
             operand = ruleset.get("operand")
-            if not operand:
+            if not operand:  # pragma: no cover
                 operand = "@step.value"
 
             operand = operand.strip()

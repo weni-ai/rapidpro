@@ -3,39 +3,20 @@ from smartmin.views import SmartCRUDL, SmartListView
 from django.utils.translation import gettext_lazy as _
 
 from temba.orgs.views import OrgPermsMixin
+from temba.utils.views import SpaMixin
 
-from .models import Incident, Notification
-
-
-class NotificationTargetMixin:
-    """
-    Mixin for views which can be targets of notifications to help them clear unseen notifications
-    """
-
-    notification_type = None
-    notification_scope = ""
-
-    def get_notification_scope(self) -> tuple[str, str]:  # pragma: no cover
-        return self.notification_type, self.notification_scope
-
-    def get(self, request, *args, **kwargs):
-        response = super().get(request, *args, **kwargs)
-
-        notification_type, scope = self.get_notification_scope()
-        if request.org and notification_type and request.user.is_authenticated:
-            Notification.mark_seen(request.org, notification_type, scope=scope, user=request.user)
-
-        return response
+from .mixins import NotificationTargetMixin
+from .models import Incident
 
 
 class IncidentCRUDL(SmartCRUDL):
     model = Incident
     actions = ("list",)
 
-    class List(OrgPermsMixin, NotificationTargetMixin, SmartListView):
+    class List(OrgPermsMixin, SpaMixin, NotificationTargetMixin, SmartListView):
         default_order = "-started_on"
         title = _("Incidents")
-        menu_path = "/settings/workspace"
+        menu_path = "/settings/incidents"
         notification_type = "incident:started"
         notification_scope = None  # clear all incident started notifications
 

@@ -2,57 +2,57 @@ import logging
 from datetime import timedelta
 
 from celery import shared_task
+from django_redis import get_redis_connection
 
+from django.conf import settings
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from temba.contacts.models import URN, ContactURN, ExportContactsTask
-from temba.contacts.tasks import export_contacts_task
-from temba.flows.models import ExportFlowResultsTask
-from temba.flows.tasks import export_flow_results_task
-from temba.msgs.models import ExportMessagesTask
-from temba.msgs.tasks import export_messages_task
+from temba.contacts.models import URN, ContactURN
 from temba.utils.crons import cron_task
-from temba.utils.email import send_template_email
-from temba.utils.text import generate_secret
+from temba.utils.email import EmailSender
 
-from .models import Invitation, Org, OrgImport, User, UserSettings
-
-
-@shared_task
-def start_org_import_task(import_id):
-    org_import = OrgImport.objects.get(id=import_id)
-    org_import.start()
+from .models import Export, Invitation, Org, OrgImport, User, UserSettings
 
 
 @shared_task
-def send_invitation_email_task(invitation_id):
-    invitation = Invitation.objects.get(id=invitation_id)
-    invitation.send_email()
+def perform_import(import_id):
+    OrgImport.objects.get(id=import_id).perform()
 
 
 @shared_task
-def send_user_verification_email(user_id):
+def perform_export(export_id):
+    """
+    Perform an export
+    """
+    Export.objects.select_related("org", "created_by").get(id=export_id).perform()
+
+
+@shared_task
+def send_user_verification_email(org_id, user_id):
+    r = get_redis_connection()
+    org = Org.objects.get(id=org_id)
     user = User.objects.get(id=user_id)
+
+    assert user in org.get_users()
+
     if user.settings.email_status == UserSettings.STATUS_VERIFIED:
         return
 
-    verification_secret = user.settings.email_verification_secret
-    if not verification_secret:
-        verification_secret = generate_secret(64)
+    key = f"send_verification_email:{user.email}".lower()
 
-        user.settings.email_verification_secret = verification_secret
-        user.settings.save(update_fields=("email_verification_secret",))
+    if r.exists(key):
+        return
 
-    org = user.get_orgs().first()
+    sender = EmailSender.from_email_type(org.branding, "notifications")
+    sender.send(
+        [user.email],
+        _("%(name)s Email Verification") % org.branding,
+        "orgs/email/email_verification",
+        {"org": org, "secret": user.settings.email_verification_secret},
+    )
 
-    subject = _("%(name)s Email Verification") % org.branding
-    template = "orgs/email/email_verification"
-
-    context = dict(org=org, now=timezone.now(), branding=org.branding, secret=verification_secret)
-    context["subject"] = subject
-
-    send_template_email(user.email, subject, template, context, org.branding)
+    r.set(key, "1", ex=60 * 10)
 
 
 @shared_task
@@ -66,28 +66,40 @@ def normalize_contact_tels_task(org_id):
             urn.ensure_number_normalization(org.default_country_code)
 
 
+@cron_task()
+def trim_exports():
+    trim_before = timezone.now() - settings.RETENTION_PERIODS["export"]
+
+    num_deleted = 0
+    for export in Export.objects.filter(created_on__lt=trim_before):
+        export.delete()
+        num_deleted += 1
+
+    return {"deleted": num_deleted}
+
+
 @cron_task(lock_timeout=7200)
-def resume_failed_tasks():
+def restart_stalled_exports():
     now = timezone.now()
     window = now - timedelta(hours=1)
 
-    contact_exports = ExportContactsTask.objects.filter(modified_on__lte=window).exclude(
-        status__in=[ExportContactsTask.STATUS_COMPLETE, ExportContactsTask.STATUS_FAILED]
+    exports = Export.objects.filter(modified_on__lte=window).exclude(
+        status__in=[Export.STATUS_COMPLETE, Export.STATUS_FAILED]
     )
-    for contact_export in contact_exports:
-        export_contacts_task.delay(contact_export.pk)
+    for export in exports:
+        perform_export.delay(export.id)
 
-    flow_results_exports = ExportFlowResultsTask.objects.filter(modified_on__lte=window).exclude(
-        status__in=[ExportFlowResultsTask.STATUS_COMPLETE, ExportFlowResultsTask.STATUS_FAILED]
-    )
-    for flow_results_export in flow_results_exports:
-        export_flow_results_task.delay(flow_results_export.pk)
 
-    msg_exports = ExportMessagesTask.objects.filter(modified_on__lte=window).exclude(
-        status__in=[ExportMessagesTask.STATUS_COMPLETE, ExportMessagesTask.STATUS_FAILED]
-    )
-    for msg_export in msg_exports:
-        export_messages_task.delay(msg_export.pk)
+@cron_task(lock_timeout=7200)
+def expire_invitations():
+    # delete any invitations that are no longer valid
+    expire_before = timezone.now() - settings.INVITATION_VALIDITY
+    num_expired = 0
+    for invitation in Invitation.objects.filter(created_on__lt=expire_before, is_active=True):
+        invitation.release()
+        num_expired += 1
+
+    return {"expired": num_expired}
 
 
 @cron_task(lock_timeout=7 * 24 * 60 * 60)

@@ -51,6 +51,22 @@ def delete_in_batches(qs, *, batch_size: int = 1000, pk: str = "id", pre_delete=
     return num_deleted
 
 
+def update_if_changed(obj, **kwargs) -> bool:
+    """
+    Updates the given model instance with the given values, saving it if a change was made.
+    """
+    update_fields = []
+    for attr, value in kwargs.items():
+        if getattr(obj, attr) != value:
+            setattr(obj, attr, value)
+            update_fields.append(attr)
+
+    if update_fields:
+        obj.save(update_fields=update_fields)
+
+    return bool(update_fields)
+
+
 class LegacyUUIDMixin(SmartModel):
     """
     Model mixin for things with an old-style VARCHAR(36) UUID
@@ -244,7 +260,7 @@ class TembaModel(TembaUUIDMixin, TembaNameMixin, SmartModel):
         """
         How the shell will render this object
         """
-        return f'<{self.__class__.__name__}: uuid={self.uuid} name="{self.name}">'
+        return f'<{self.__class__.__name__}: id={self.id} name="{self.name}">'
 
     class Meta:
         abstract = True

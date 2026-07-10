@@ -1,0 +1,32 @@
+{% extends "smartmin/read.html" %}
+{% load i18n smartmin %}
+
+{% block title-text %}
+  {% trans "Template" %}: {{ object.name }}
+{% endblock title-text %}
+{% block content %}
+  {% if base_translation %}
+    <div class="card p-0 m-0">{% include "templates/includes/translation.html" with translation=base_translation %}</div>
+  {% endif %}
+  {% if other_translations %}
+    <div class="mt-2 mb-2 text-lg text-center">{% trans "Other Languages" %}</div>
+    <div class="card p-0 m-0">
+      {% for translation in other_translations %}
+        {% include "templates/includes/translation.html" with translation=translation %}
+      {% endfor %}
+    </div>
+  {% endif %}
+{% endblock content %}
+{% block extra-style %}
+  {{ block.super }}
+  <style type="text/css">
+    code {
+      font-size: 12px;
+      background-color: #f8f8f8;
+    }
+
+    .translation {
+      border-bottom: 1px solid #e6e6e6;
+    }
+  </style>
+{% endblock extra-style %}

@@ -1,29 +1,34 @@
 import itertools
 import logging
+import mimetypes
 import os
 from abc import ABCMeta
 from collections import defaultdict
-from datetime import timedelta
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import urlparse
 
 import pycountry
 import pyotp
 import pytz
 from packaging.version import Version
 from smartmin.models import SmartModel
-from smartmin.users.models import FailedLogin, RecoveryToken
+from storages.backends.s3boto3 import S3Boto3Storage
 from timezone_field import TimeZoneField
 
 from django.conf import settings
 from django.contrib.auth.models import Group, Permission, User as AuthUser
 from django.contrib.postgres.fields import ArrayField
 from django.contrib.postgres.validators import ArrayMinLengthValidator
+from django.core.files import File
+from django.core.files.storage import default_storage
 from django.db import models, transaction
-from django.db.models import Prefetch
-from django.urls import reverse
+from django.db.models import Count, Prefetch
+from django.db.models.signals import post_save
+from django.dispatch import receiver
 from django.utils import timezone
 from django.utils.encoding import force_str
 from django.utils.functional import cached_property
@@ -35,8 +40,10 @@ from temba.archives.models import Archive
 from temba.locations.models import AdminBoundary
 from temba.utils import json, languages, on_transaction_commit
 from temba.utils.dates import datetime_to_str
-from temba.utils.email import send_template_email
-from temba.utils.models import JSONField, delete_in_batches
+from temba.utils.email import EmailSender
+from temba.utils.fields import UploadToIdPathAndRename
+from temba.utils.models import JSONField, TembaUUIDMixin, delete_in_batches
+from temba.utils.s3 import public_file_storage
 from temba.utils.text import generate_secret, generate_token
 from temba.utils.timezones import timezone_to_country_code
 from temba.utils.uuid import uuid4
@@ -53,6 +60,10 @@ class DependencyMixin:
 
     def get_dependents(self):
         return {"flow": self.dependent_flows.filter(is_active=True)}
+
+    @classmethod
+    def annotate_usage(cls, queryset):
+        return queryset.annotate(usage_count=Count("dependent_flows", distinct=True))
 
     def release(self, user):
         """
@@ -157,16 +168,12 @@ class User(AuthUser):
         return cls.create(email, first_name, last_name, password=password, language=language)
 
     @classmethod
-    def get_orgs_for_request(cls, request, *, roles=None):
+    def get_orgs_for_request(cls, request):
         """
-        Gets the orgs that the logged in user has access to (i.e. a role in).
+        Gets the orgs that the logged in user has a membership of.
         """
-        user = request.user
-        orgs = user.orgs.filter(is_active=True).order_by("name")
-        if roles is not None:
-            orgs = orgs.filter(orgmembership__user=user, orgmembership__role_code__in=[r.code for r in roles])
 
-        return orgs
+        return request.user.orgs.filter(is_active=True).order_by("name")
 
     @classmethod
     def get_system_user(cls):
@@ -268,12 +275,6 @@ class User(AuthUser):
 
         return role.has_perm(permission)
 
-    @cached_property
-    def settings(self):
-        assert self.is_authenticated, "can't fetch user settings for anonymous users"
-
-        return UserSettings.objects.get_or_create(user=self)[0]
-
     def get_api_token(self, org) -> str:
         from temba.api.models import APIToken
 
@@ -282,24 +283,6 @@ class User(AuthUser):
             return token.key
         except ValueError:
             return None
-
-    def recover_password(self, branding: dict):
-        """
-        Generates a recovery token for this user and sends them an email with a recovery link using that token.
-        """
-
-        token = generate_secret(32)
-        RecoveryToken.objects.create(token=token, user=self)
-        FailedLogin.objects.filter(username__iexact=self.username).delete()
-
-        self.send_recovery_email(token, branding)
-
-    def send_recovery_email(self, token: str, branding: dict):
-        subject = _("Password Recovery Request")
-        template = "orgs/email/user_forget"
-        context = {"user": self, "path": reverse("users.user_recover", args=[token])}
-
-        send_template_email(self.email, subject, template, context, branding)
 
     def as_engine_ref(self) -> dict:
         return {"email": self.email, "name": self.name}
@@ -347,7 +330,7 @@ class UserSettings(models.Model):
         (STATUS_FAILING, _("Failing")),
     )
 
-    user = models.ForeignKey(User, on_delete=models.PROTECT, related_name="usersettings")
+    user = models.OneToOneField(User, on_delete=models.PROTECT, related_name="settings")
     language = models.CharField(max_length=8, choices=settings.LANGUAGES, default=settings.DEFAULT_LANGUAGE)
     team = models.ForeignKey("tickets.Team", on_delete=models.PROTECT, null=True)
     otp_secret = models.CharField(max_length=16, default=pyotp.random_base32)
@@ -356,7 +339,18 @@ class UserSettings(models.Model):
     external_id = models.CharField(max_length=128, null=True)
     verification_token = models.CharField(max_length=64, null=True)
     email_status = models.CharField(max_length=1, default=STATUS_UNVERIFIED, choices=STATUS_CHOICES)
-    email_verification_secret = models.CharField(max_length=64, null=True, db_index=True)
+    email_verification_secret = models.CharField(max_length=64, db_index=True)
+    avatar = models.ImageField(upload_to=UploadToIdPathAndRename("avatars/"), storage=public_file_storage, null=True)
+
+
+@receiver(post_save, sender=User)
+def on_user_post_save(sender, instance: User, created: bool, *args, **kwargs):
+    """
+    Handle user post-save signals so that we can create user settings for them.
+    """
+
+    if created:
+        instance.settings = UserSettings.objects.create(user=instance, email_verification_secret=generate_secret(64))
 
 
 class OrgRole(Enum):
@@ -364,7 +358,7 @@ class OrgRole(Enum):
     EDITOR = ("E", _("Editor"), _("Editors"), "Editors", "msgs.msg_inbox")
     VIEWER = ("V", _("Viewer"), _("Viewers"), "Viewers", "msgs.msg_inbox")
     AGENT = ("T", _("Agent"), _("Agents"), "Agents", "tickets.ticket_list")
-    SURVEYOR = ("S", _("Surveyor"), _("Surveyors"), "Surveyors", "orgs.org_surveyor")
+    SURVEYOR = ("S", _("Surveyor"), _("Surveyors"), "Surveyors", "users.login")
 
     def __init__(self, code: str, display: str, display_plural: str, group_name: str, start_view: str):
         self.code = code
@@ -455,7 +449,6 @@ class Org(SmartModel):
     )
 
     CONFIG_VERIFIED = "verified"
-    CONFIG_SMTP_SERVER = "smtp_server"
     CONFIG_TWILIO_SID = "ACCOUNT_SID"
     CONFIG_TWILIO_TOKEN = "ACCOUNT_TOKEN"
     CONFIG_VONAGE_KEY = "NEXMO_KEY"
@@ -520,6 +513,7 @@ class Org(SmartModel):
     country = models.ForeignKey("locations.AdminBoundary", null=True, on_delete=models.PROTECT)
     flow_languages = ArrayField(models.CharField(max_length=3), default=list, validators=[ArrayMinLengthValidator(1)])
     input_collation = models.CharField(max_length=32, choices=COLLATION_CHOICES, default=COLLATION_DEFAULT)
+    flow_smtp = models.CharField(null=True)  # e.g. smtp://...
 
     config = models.JSONField(default=dict)
     slug = models.SlugField(
@@ -776,7 +770,7 @@ class Org(SmartModel):
 
         # with all the flows and dependencies committed, we can now have mailroom do full validation
         for flow in new_flows:
-            flow_info = mailroom.get_client().flow_inspect(self.id, flow.get_definition())
+            flow_info = mailroom.get_client().flow_inspect(self, flow.get_definition())
             flow.has_issues = len(flow_info[Flow.INSPECT_ISSUES]) > 0
             flow.save(update_fields=("has_issues",))
 
@@ -933,26 +927,6 @@ class Org(SmartModel):
     @classmethod
     def get_possible_countries(cls):
         return AdminBoundary.objects.filter(level=0).order_by("name")
-
-    def add_smtp_config(self, from_email, host, username, password, port, user):
-        username = quote(username)
-        password = quote(password, safe="")
-        query = urlencode({"from": f"{from_email.strip()}", "tls": "true"})
-
-        self.config.update({Org.CONFIG_SMTP_SERVER: f"smtp://{username}:{password}@{host}:{port}/?{query}"})
-        self.modified_by = user
-        self.save(update_fields=("config", "modified_by", "modified_on"))
-
-    def remove_smtp_config(self, user):
-        if self.config:
-            self.config.pop(Org.CONFIG_SMTP_SERVER, None)
-            self.modified_by = user
-            self.save(update_fields=("config", "modified_by", "modified_on"))
-
-    def has_smtp_config(self):
-        if self.config:
-            return bool(self.config.get(Org.CONFIG_SMTP_SERVER))
-        return False
 
     @property
     def default_country_code(self) -> str:
@@ -1305,11 +1279,10 @@ class Org(SmartModel):
         delete_in_batches(self.notifications.all())
         delete_in_batches(self.notification_counts.all())
         delete_in_batches(self.incidents.all())
-        delete_in_batches(self.exportcontactstasks.all())
-        delete_in_batches(self.exportmessagestasks.all())
-        delete_in_batches(self.exportflowresultstasks.all())
-        delete_in_batches(self.exportticketstasks.all())
         delete_in_batches(self.flow_labels.all())
+
+        for exp in self.exports.all():
+            exp.delete()
 
         for imp in self.contact_imports.all():
             imp.delete()
@@ -1333,7 +1306,9 @@ class Org(SmartModel):
         # we want to manually release runs so we don't fire a mailroom task to do it
         for flow in self.flows.all():
             flow.release(user, interrupt_sessions=False)
-            counts["runs"] += flow.delete_runs()
+
+        # delete runs and keep the count
+        counts["runs"] = delete_in_batches(self.runs.all())
 
         # delete contact-related data
         delete_in_batches(self.http_logs.all())
@@ -1423,7 +1398,7 @@ class Org(SmartModel):
         }
 
     def __repr__(self):
-        return f'<Org: name="{self.name}">'
+        return f'<Org: id={self.id} name="{self.name}">'
 
     def __str__(self):
         return self.name
@@ -1463,12 +1438,12 @@ class OrgImport(SmartModel):
     file = models.FileField(upload_to=get_import_upload_path)
     status = models.CharField(max_length=1, default=STATUS_PENDING, choices=STATUS_CHOICES)
 
-    def start_async(self):
-        from .tasks import start_org_import_task
-
-        on_transaction_commit(lambda: start_org_import_task.delay(self.id))
-
     def start(self):
+        from .tasks import perform_import
+
+        on_transaction_commit(lambda: perform_import.delay(self.id))
+
+    def perform(self):
         assert self.status == self.STATUS_PENDING, "trying to start an already started import"
 
         # mark us as processing to prevent double starting
@@ -1494,28 +1469,15 @@ class OrgImport(SmartModel):
 
 class Invitation(SmartModel):
     """
-    An Invitation to an e-mail address to join an Org with specific roles.
+    An invitation to an e-mail address to join an org as a specific role.
     """
 
     ROLE_CHOICES = [(r.code, r.display) for r in OrgRole]
 
     org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="invitations")
-
     email = models.EmailField()
-
     secret = models.CharField(max_length=64, unique=True)
-
     user_group = models.CharField(max_length=1, choices=ROLE_CHOICES, default=OrgRole.VIEWER.code)
-
-    @classmethod
-    def create(cls, org, user, email, role: OrgRole):
-        return cls.objects.create(org=org, email=email, user_group=role.code, created_by=user, modified_by=user)
-
-    @classmethod
-    def bulk_create_or_update(cls, org, user, emails: list, role: OrgRole):
-        for email in emails:
-            invitation = cls.create(org, user, email, role)
-            invitation.send()
 
     def save(self, *args, **kwargs):
         if not self.secret:
@@ -1528,26 +1490,13 @@ class Invitation(SmartModel):
         return OrgRole.from_code(self.user_group)
 
     def send(self):
-        """
-        Sends this invitation as an email to the user
-        """
-        from .tasks import send_invitation_email_task
-
-        send_invitation_email_task(self.id)
-
-    def send_email(self):
-        # no=op if we do not know the email
-        if not self.email:  # pragma: needs cover
-            return
-
-        subject = _("%(name)s Invitation") % self.org.branding
-        template = "orgs/email/invitation_email"
-        to_email = self.email
-
-        context = dict(org=self.org, now=timezone.now(), branding=self.org.branding, invitation=self)
-        context["subject"] = subject
-
-        send_template_email(to_email, subject, template, context, self.org.branding)
+        sender = EmailSender.from_email_type(self.org.branding, "notifications")
+        sender.send(
+            [self.email],
+            _("%(name)s Invitation") % self.org.branding,
+            "orgs/email/invitation_email",
+            {"org": self.org, "invitation": self},
+        )
 
     def release(self):
         self.is_active = False
@@ -1574,3 +1523,296 @@ class BackupToken(models.Model):
 
     def __str__(self):
         return self.token
+
+
+class ExportType:
+    slug: str
+    name: str
+    download_prefix: str
+    download_template = "orgs/export_download.html"
+
+    @classmethod
+    def has_recent_unfinished(cls, org) -> bool:
+        """
+        Checks for unfinished exports created in the last 4 hours for this org
+        """
+
+        day_ago = timezone.now() - timedelta(hours=4)
+
+        return Export.get_unfinished(org, cls.slug).filter(created_on__gt=day_ago).order_by("created_on").exists()
+
+    def write(self, export) -> tuple:  # pragma: no cover
+        """
+        Should return tuple of 1) temporary file handle, 2) file extension, 3) count of items exported
+        """
+        pass
+
+    def get_download_context(self, export) -> dict:  # pragma: no cover
+        return {}
+
+
+class DefinitionExport(ExportType):
+    """
+    Export of definitions
+    """
+
+    slug = "definition"
+    name = _("Definitions")
+    download_prefix = "orgs_export"
+    download_template = "orgs/definitions_download.html"
+
+    @classmethod
+    def create(cls, org, user, flows=[], campaigns=[]):
+        export = Export.objects.create(
+            org=org,
+            export_type=cls.slug,
+            config={
+                "flow_ids": [f.id for f in flows],
+                "campigns_ids": [c.id for c in campaigns],
+            },
+            created_by=user,
+        )
+        return export
+
+    def get_flows(self, export):
+        flow_ids = export.config.get("flow_ids")
+
+        return export.org.flows.filter(id__in=flow_ids, is_active=True)
+
+    def get_campaigns(self, export):
+        campigns_ids = export.config.get("campigns_ids")
+
+        return export.org.campaigns.filter(id__in=campigns_ids, is_active=True)
+
+    def write(self, export) -> tuple:
+        org = export.org
+        flows = self.get_flows(export)
+        campaigns = self.get_campaigns(export)
+
+        components = set(itertools.chain(flows, campaigns))
+
+        # add triggers for the selected flows
+        for flow in flows:
+            components.update(flow.triggers.filter(is_active=True, is_archived=False))
+
+        export_defs = org.export_definitions(f"https://{org.get_brand_domain()}", components)
+
+        temp_file = NamedTemporaryFile(delete=False, suffix=".json", mode="w+", encoding="utf8")
+        json.json.dump(export_defs, temp_file)
+        temp_file.flush()
+
+        return temp_file, "json", len(components)
+
+    def get_download_context(self, export) -> dict:
+        flows = self.get_flows(export)
+        campaigns = self.get_campaigns(export)
+        return {
+            "campaigns": [dict(uuid=c.uuid, name=c.name) for c in campaigns],
+            "flows": [dict(uuid=f.uuid, name=f.name) for f in flows],
+        }
+
+
+class Export(TembaUUIDMixin, models.Model):
+    """
+    An export of workspace data initiated by a user
+    """
+
+    STATUS_PENDING = "P"
+    STATUS_PROCESSING = "O"
+    STATUS_COMPLETE = "C"
+    STATUS_FAILED = "F"
+    STATUS_CHOICES = (
+        (STATUS_PENDING, _("Pending")),
+        (STATUS_PROCESSING, _("Processing")),
+        (STATUS_COMPLETE, _("Complete")),
+        (STATUS_FAILED, _("Failed")),
+    )
+
+    # log progress after this number of exported objects have been exported
+    LOG_PROGRESS_PER_ROWS = 10000
+
+    org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="exports")
+    export_type = models.CharField(max_length=20)
+    status = models.CharField(max_length=1, default=STATUS_PENDING, choices=STATUS_CHOICES)
+    num_records = models.IntegerField(null=True)
+    path = models.CharField(null=True, max_length=2048)
+
+    # date range (optional depending on type)
+    start_date = models.DateField(null=True)
+    end_date = models.DateField(null=True)
+
+    # additional type specific filtering and extra columns
+    config = models.JSONField(default=dict)
+
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="exports")
+    created_on = models.DateTimeField(default=timezone.now)
+    modified_on = models.DateTimeField(default=timezone.now)
+
+    def start(self):
+        from .tasks import perform_export
+
+        perform_export.delay(self.id)
+
+    def perform(self):
+        from temba.notifications.types.builtin import ExportFinishedNotificationType
+
+        assert self.status != self.STATUS_PROCESSING, "can't start an export that's already processing"
+
+        self.status = self.STATUS_PROCESSING
+        self.save(update_fields=("status", "modified_on"))
+
+        try:
+            temp_file, extension, num_records = self.type.write(self)
+
+            # save file to storage
+            directory = os.path.join(settings.STORAGE_ROOT_DIR, str(self.org.id), self.type.slug + "_exports")
+            path = f"{directory}/{self.uuid}.{extension}"
+            default_storage.save(path, File(temp_file))
+
+            # remove temporary file
+            if hasattr(temp_file, "delete"):
+                if temp_file.delete is False:  # pragma: no cover
+                    os.unlink(temp_file.name)
+            else:  # pragma: no cover
+                os.unlink(temp_file.name)
+
+        except Exception as e:  # pragma: no cover
+            self.status = self.STATUS_FAILED
+            self.save(update_fields=("status", "modified_on"))
+            raise e
+        else:
+            self.status = self.STATUS_COMPLETE
+            self.num_records = num_records
+            self.path = path
+            self.save(update_fields=("status", "num_records", "path", "modified_on"))
+
+            ExportFinishedNotificationType.create(self)
+
+    @classmethod
+    def get_unfinished(cls, org, export_type: str):
+        """
+        Returns all unfinished exports
+        """
+        return cls.objects.filter(
+            org=org, export_type=export_type, status__in=(cls.STATUS_PENDING, cls.STATUS_PROCESSING)
+        )
+
+    def get_date_range(self) -> tuple:
+        """
+        Gets the since > until datetimes of items to export.
+        """
+        tz = self.org.timezone
+        start_date = max(datetime.combine(self.start_date, datetime.min.time()).replace(tzinfo=tz), self.org.created_on)
+        end_date = datetime.combine(self.end_date, datetime.max.time()).replace(tzinfo=tz)
+        return start_date, end_date
+
+    def get_contact_fields(self):
+        ids = self.config.get("with_fields", [])
+        id_by_order = {id: i for i, id in enumerate(ids)}
+        return sorted(self.org.fields.filter(id__in=ids), key=lambda o: id_by_order[o.id])
+
+    def get_contact_groups(self):
+        ids = self.config.get("with_groups", [])
+        id_by_order = {id: i for i, id in enumerate(ids)}
+        return sorted(self.org.groups.filter(id__in=ids), key=lambda o: id_by_order[o.id])
+
+    def get_contact_headers(self) -> list:
+        """
+        Gets the header values common to exports with contacts.
+        """
+        cols = ["Contact UUID", "Contact Name", "URN Scheme"]
+        if self.org.is_anon:
+            cols.append("Anon Value")
+        else:
+            cols.append("URN Value")
+
+        for cf in self.get_contact_fields():
+            cols.append("Field:%s" % cf.name)
+
+        for cg in self.get_contact_groups():
+            cols.append("Group:%s" % cg.name)
+
+        return cols
+
+    def get_contact_columns(self, contact, urn: str = "") -> list:
+        """
+        Gets the column values for the given contact.
+        """
+        from temba.contacts.models import URN
+
+        if urn == "":
+            urn_obj = contact.get_urn()
+            urn_scheme, urn_path = (urn_obj.scheme, urn_obj.path) if urn_obj else (None, None)
+        elif urn is not None:  # pragma: no cover
+            urn_scheme = URN.to_parts(urn)[0]
+            urn_path = URN.format(urn, international=False, formatted=False)
+        else:
+            urn_scheme, urn_path = None, None  # pragma: no cover
+
+        cols = [str(contact.uuid), contact.name, urn_scheme]
+        if self.org.is_anon:
+            cols.append(contact.anon_display)
+        else:
+            cols.append(urn_path)
+
+        for cf in self.get_contact_fields():
+            cols.append(contact.get_field_display(cf))
+
+        memberships = set(contact.groups.all())
+
+        for cg in self.get_contact_groups():
+            cols.append(cg in memberships)
+
+        return cols
+
+    @classmethod
+    def _get_types(cls) -> dict:
+        return {t.slug: t() for t in ExportType.__subclasses__()}
+
+    @property
+    def type(self):
+        return self._get_types()[self.export_type]
+
+    def get_raw_access(self) -> tuple[str]:
+        """
+        Gets a tuple of 1) raw storage URL, 2) a friendly filename and 3) its MIME type
+        """
+
+        filename = self._get_download_filename()
+
+        if isinstance(default_storage, S3Boto3Storage):  # pragma: needs cover
+            url = default_storage.url(
+                self.path,
+                parameters=dict(ResponseContentDisposition=f"attachment;filename={filename}"),
+                http_method="GET",
+            )
+        else:
+            url = default_storage.url(self.path)
+
+        return url, filename, mimetypes.guess_type(self.path)[0]
+
+    def _get_download_filename(self):
+        """
+        Create a more user friendly filename for download
+        """
+        _, extension = self.path.rsplit(".", 1)
+        date_str = datetime.today().strftime(r"%Y%m%d")
+        return f"{self.type.download_prefix}_{date_str}.{extension}"
+
+    @property
+    def notification_export_type(self):
+        return self.type.slug
+
+    def get_notification_scope(self) -> str:
+        return f"{self.notification_export_type}:{self.id}"
+
+    def delete(self):
+        self.notifications.all().delete()
+
+        if self.path:
+            default_storage.delete(self.path)
+
+        super().delete()
+
+    def __repr__(self):  # pragma: no cover
+        return f'<Export: id={self.id} type="{self.export_type}">'

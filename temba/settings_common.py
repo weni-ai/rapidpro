@@ -10,16 +10,13 @@ from django.utils.translation import gettext_lazy as _
 INTERNAL_IPS = iptools.IpRangeList("127.0.0.1", "192.168.0.10", "192.168.0.0/24", "0.0.0.0")  # network block
 HOSTNAME = "localhost"
 
-ADMINS = (("RapidPro", "code@yourdomain.io"),)
-MANAGERS = ADMINS
-
 # HTTP Headers using for outgoing requests to other services
 OUTGOING_REQUEST_HEADERS = {"User-agent": "RapidPro"}
 
 # Make this unique, and don't share it with anybody.
 SECRET_KEY = "your own secret key"
 
-HELP_URL = None
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 2500  # needed for exports of big workspaces
 
 # -----------------------------------------------------------------------------------
 # Tests
@@ -41,7 +38,7 @@ USER_RECOVER_MAX_ATTEMPTS = 5
 # Email
 # -----------------------------------------------------------------------------------
 
-SEND_EMAILS = False
+SEND_EMAILS = TESTING  # enable sending emails in tests
 
 EMAIL_HOST = "smtp.gmail.com"
 EMAIL_HOST_USER = "server@temba.io"
@@ -52,7 +49,7 @@ EMAIL_TIMEOUT = 10
 
 # Used when sending email from within a flow and the user hasn't configured
 # their own SMTP server.
-FLOW_FROM_EMAIL = "Temba <no-reply@temba.io>"
+FLOW_FROM_EMAIL = "no-reply@temba.io"
 
 # -----------------------------------------------------------------------------------
 # Storage
@@ -149,7 +146,6 @@ TEMPLATES = [
         "BACKEND": "django.template.backends.django.DjangoTemplates",
         "DIRS": [
             os.path.join(PROJECT_DIR, "../templates"),
-            os.path.join(PROJECT_DIR, "../node_modules/@nyaruka/temba-components/dist/templates"),
         ],
         "OPTIONS": {
             "context_processors": [
@@ -163,7 +159,6 @@ TEMPLATES = [
                 "temba.context_processors.branding",
                 "temba.context_processors.config",
                 "temba.orgs.context_processors.user_group_perms_processor",
-                "temba.orgs.context_processors.user_orgs",
             ],
             "loaders": [
                 "django.template.loaders.filesystem.Loader",
@@ -193,6 +188,7 @@ MIDDLEWARE = (
     "temba.middleware.OrgMiddleware",
     "temba.middleware.LanguageMiddleware",
     "temba.middleware.TimezoneMiddleware",
+    "temba.middleware.ToastMiddleware",
 )
 
 # -----------------------------------------------------------------------------------
@@ -230,7 +226,6 @@ INSTALLED_APPS = (
     "timezone_field",
     "temba.apks",
     "temba.archives",
-    "temba.assets",
     "temba.auth_tweaks",
     "temba.api",
     "temba.request_logs",
@@ -256,8 +251,8 @@ INSTALLED_APPS = (
     "temba.sql",
 )
 
-# the last installed app that uses smartmin permissions
-PERMISSIONS_APP = "temba.airtime"
+# don't let smartmin auto create django messages for create and update submissions
+SMARTMIN_DEFAULT_MESSAGES = False
 
 # -----------------------------------------------------------------------------------
 # Logging
@@ -283,16 +278,18 @@ BRAND = {
     "hosts": ["rapidpro.io"],
     "domain": "app.rapidpro.io",
     "emails": {"notifications": "support@rapidpro.io"},
-    "logos": {"primary": "images/logo-dark.svg", "favico": "brands/rapidpro/rapidpro.ico"},
+    "logos": {
+        "primary": "images/logo-dark.svg",
+        "favico": "brands/rapidpro/rapidpro.ico",
+        "avatar": "brands/rapidpro/rapidpro-avatar.webp",
+    },
     "landing": {
         "hero": "brands/rapidpro/splash.jpg",
     },
-    "docs_link": "http://docs.rapidpro.io",
-    "ticket_domain": "tickets.rapidpro.io",
     "features": ["signups"],
 }
 
-FEATURES = {"locations", "surveyor"}
+FEATURES = {"locations"}
 
 
 # -----------------------------------------------------------------------------------
@@ -325,35 +322,13 @@ PERMISSIONS = {
     "contacts.contactfield": ("update_priority",),
     "contacts.contactgroup": ("menu",),
     "contacts.contactimport": ("preview",),
-    "flows.flow": (
-        "activity_chart",
-        "activity_data",
-        "activity_list",
-        "activity",
-        "archived",
-        "assets",
-        "category_counts",
-        "change_language",
-        "copy",
-        "download_translation",
-        "editor",
-        "export_results",
-        "export_translation",
-        "export",
-        "filter",
-        "import_translation",
-        "menu",
-        "recent_contacts",
-        "results",
-        "revisions",
-        "simulate",
-        "start",
-    ),
+    "flows.flow": ("assets", "copy", "editor", "export", "menu", "results", "start"),
     "flows.flowsession": ("json",),
     "globals.global": ("unused",),
     "locations.adminboundary": ("alias", "boundaries", "geometry"),
     "msgs.broadcast": ("scheduled", "scheduled_read", "scheduled_delete"),
     "msgs.msg": ("archive", "export", "label", "menu"),
+    "orgs.export": ("download",),
     "orgs.org": (
         "country",
         "create",
@@ -363,6 +338,7 @@ PERMISSIONS = {
         "edit_sub_org",
         "edit",
         "export",
+        "flow_smtp",
         "grant",
         "join_accept",
         "join",
@@ -376,10 +352,8 @@ PERMISSIONS = {
         "resthooks",
         "service",
         "signup",
-        "smtp_server",
         "spa",
         "sub_orgs",
-        "surveyor",
         "trial",
         "twilio_account",
         "twilio_connect",
@@ -397,15 +371,7 @@ GROUP_PERMISSIONS = {
     "Alpha": (),
     "Beta": (),
     "Dashboard": ("orgs.org_dashboard",),
-    "Surveyors": (
-        "contacts.contact_list",
-        "contacts.contactfield_list",
-        "contacts.contactgroup_list",
-        "flows.flow_list",
-        "locations.adminboundary_list",
-        "orgs.org_export",
-        "orgs.org_surveyor",
-    ),
+    "Surveyors": (),
     "Customer Support": (),
     "Granters": ("orgs.org_grant",),
     "Administrators": (
@@ -426,7 +392,6 @@ GROUP_PERMISSIONS = {
         "channels.channel_delete",
         "channels.channel_facebook_whitelist",
         "channels.channel_list",
-        "channels.channel_menu",
         "channels.channel_read",
         "channels.channel_update",
         "channels.channelevent_list",
@@ -435,7 +400,6 @@ GROUP_PERMISSIONS = {
         "classifiers.classifier_connect",
         "classifiers.classifier_delete",
         "classifiers.classifier_list",
-        "classifiers.classifier_menu",
         "classifiers.classifier_read",
         "classifiers.classifier_sync",
         "contacts.contact_create",
@@ -478,6 +442,8 @@ GROUP_PERMISSIONS = {
         "msgs.optin.*",
         "notifications.incident.*",
         "notifications.notification.*",
+        "orgs.export.*",
+        "orgs.invitation.*",
         "orgs.org_country",
         "orgs.org_create",
         "orgs.org_dashboard",
@@ -486,6 +452,7 @@ GROUP_PERMISSIONS = {
         "orgs.org_edit_sub_org",
         "orgs.org_edit",
         "orgs.org_export",
+        "orgs.org_flow_smtp",
         "orgs.org_languages",
         "orgs.org_manage_accounts_sub_org",
         "orgs.org_manage_accounts",
@@ -494,7 +461,6 @@ GROUP_PERMISSIONS = {
         "orgs.org_prometheus",
         "orgs.org_read",
         "orgs.org_resthooks",
-        "orgs.org_smtp_server",
         "orgs.org_sub_orgs",
         "orgs.org_workspace",
         "orgs.orgimport.*",
@@ -503,7 +469,7 @@ GROUP_PERMISSIONS = {
         "request_logs.httplog_list",
         "request_logs.httplog_read",
         "request_logs.httplog_webhooks",
-        "templates.template_list",
+        "templates.template.*",
         "tickets.ticket.*",
         "tickets.topic.*",
         "triggers.trigger.*",
@@ -525,12 +491,10 @@ GROUP_PERMISSIONS = {
         "channels.channel_create",
         "channels.channel_delete",
         "channels.channel_list",
-        "channels.channel_menu",
         "channels.channel_read",
         "channels.channel_update",
         "channels.channelevent_list",
         "classifiers.classifier_list",
-        "classifiers.classifier_menu",
         "classifiers.classifier_read",
         "contacts.contact_create",
         "contacts.contact_delete",
@@ -573,6 +537,7 @@ GROUP_PERMISSIONS = {
         "msgs.optin_create",
         "msgs.optin_list",
         "notifications.notification_list",
+        "orgs.export_download",
         "orgs.org_download",
         "orgs.org_export",
         "orgs.org_languages",
@@ -585,6 +550,7 @@ GROUP_PERMISSIONS = {
         "orgs.user_token",
         "request_logs.httplog_webhooks",
         "templates.template_list",
+        "templates.template_read",
         "tickets.ticket.*",
         "tickets.topic.*",
         "triggers.trigger.*",
@@ -597,11 +563,9 @@ GROUP_PERMISSIONS = {
         "campaigns.campaignevent_list",
         "campaigns.campaignevent_read",
         "channels.channel_list",
-        "channels.channel_menu",
         "channels.channel_read",
         "channels.channelevent_list",
         "classifiers.classifier_list",
-        "classifiers.classifier_menu",
         "classifiers.classifier_read",
         "contacts.contact_export",
         "contacts.contact_history",
@@ -614,22 +578,12 @@ GROUP_PERMISSIONS = {
         "contacts.contactgroup_menu",
         "contacts.contactgroup_read",
         "contacts.contactimport_read",
-        "flows.flow_activity_chart",
-        "flows.flow_activity_data",
-        "flows.flow_activity",
-        "flows.flow_archived",
         "flows.flow_assets",
-        "flows.flow_category_counts",
         "flows.flow_editor",
-        "flows.flow_export_results",
         "flows.flow_export",
-        "flows.flow_filter",
         "flows.flow_list",
         "flows.flow_menu",
-        "flows.flow_recent_contacts",
         "flows.flow_results",
-        "flows.flow_revisions",
-        "flows.flow_simulate",
         "flows.flowrun_list",
         "flows.flowstart_list",
         "globals.global_list",
@@ -649,6 +603,7 @@ GROUP_PERMISSIONS = {
         "msgs.msg_menu",
         "msgs.optin_list",
         "notifications.notification_list",
+        "orgs.export_download",
         "orgs.org_download",
         "orgs.org_export",
         "orgs.org_menu",
@@ -656,6 +611,7 @@ GROUP_PERMISSIONS = {
         "orgs.org_workspace",
         "orgs.user_list",
         "templates.template_list",
+        "templates.template_read",
         "tickets.ticket_export",
         "tickets.ticket_list",
         "tickets.ticket_menu",
@@ -687,6 +643,7 @@ API_PERMISSIONS = {
         "contacts.contact_update",
         "contacts.contactfield_list",
         "contacts.contactgroup_list",
+        "locations.adminboundary_list",
         "msgs.media_create",
         "msgs.msg_create",
         "orgs.org_read",
@@ -711,17 +668,24 @@ AUTH_PASSWORD_VALIDATORS = [
 
 ANONYMOUS_USER_NAME = "AnonymousUser"
 
+INVITATION_VALIDITY = timedelta(days=30)
+
+_db_host = "localhost"
+_redis_host = "localhost"
+
+if os.getenv("REMOTE_CONTAINERS") == "true":
+    _db_host = "postgres"
+    _redis_host = "redis"
+
 # -----------------------------------------------------------------------------------
 # Database
 # -----------------------------------------------------------------------------------
-
-_services_host = "host.docker.internal" if os.getenv("REMOTE_CONTAINERS") == "true" else "localhost"
 _default_database_config = {
     "ENGINE": "django.contrib.gis.db.backends.postgis",
     "NAME": "temba",
     "USER": "temba",
     "PASSWORD": "temba",
-    "HOST": _services_host,
+    "HOST": _db_host,
     "PORT": "5432",
     "ATOMIC_REQUESTS": True,
     "CONN_MAX_AGE": 60,
@@ -738,8 +702,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.AutoField"
 # -----------------------------------------------------------------------------------
 # Cache
 # -----------------------------------------------------------------------------------
-
-_redis_url = f"redis://{_services_host}:6379/{10 if TESTING else 15}"
+_redis_url = f"redis://{_redis_host}:6379/{10 if TESTING else 15}"
 
 CACHES = {
     "default": {
@@ -765,14 +728,13 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {"socket_timeout": 5}
 
 CELERY_BEAT_SCHEDULE = {
     "check-android-channels": {"task": "check_android_channels", "schedule": timedelta(seconds=300)},
-    "check-elasticsearch-lag": {"task": "check_elasticsearch_lag", "schedule": timedelta(seconds=300)},
     "delete-released-orgs": {"task": "delete_released_orgs", "schedule": crontab(hour=4, minute=0)},
+    "expire-invitations": {"task": "expire_invitations", "schedule": crontab(hour=0, minute=10)},
     "fail-old-messages": {"task": "fail_old_messages", "schedule": crontab(hour=0, minute=0)},
     "interrupt-flow-sessions": {"task": "interrupt_flow_sessions", "schedule": crontab(hour=23, minute=30)},
-    "resolve-twitter-ids": {"task": "resolve_twitter_ids", "schedule": timedelta(seconds=900)},
     "refresh-whatsapp-tokens": {"task": "refresh_whatsapp_tokens", "schedule": crontab(hour=6, minute=0)},
     "refresh-turn-whatsapp-tokens": {"task": "refresh_turn_whatsapp_tokens", "schedule": crontab(hour=6, minute=0)},
-    "refresh-whatsapp-templates": {"task": "refresh_whatsapp_templates", "schedule": timedelta(seconds=900)},
+    "refresh-templates": {"task": "refresh_templates", "schedule": timedelta(seconds=900)},
     "send-notification-emails": {"task": "send_notification_emails", "schedule": timedelta(seconds=60)},
     "squash-channel-counts": {"task": "squash_channel_counts", "schedule": timedelta(seconds=60)},
     "squash-group-counts": {"task": "squash_group_counts", "schedule": timedelta(seconds=60)},
@@ -781,14 +743,16 @@ CELERY_BEAT_SCHEDULE = {
     "squash-notification-counts": {"task": "squash_notification_counts", "schedule": timedelta(seconds=60)},
     "squash-ticket-counts": {"task": "squash_ticket_counts", "schedule": timedelta(seconds=60)},
     "sync-classifier-intents": {"task": "sync_classifier_intents", "schedule": timedelta(seconds=300)},
-    "sync-old-seen-channels": {"task": "sync_old_seen_channels", "schedule": timedelta(seconds=600)},
     "track-org-channel-counts": {"task": "track_org_channel_counts", "schedule": crontab(hour=4, minute=0)},
+    "trim-channel-events": {"task": "trim_channel_events", "schedule": crontab(hour=3, minute=0)},
     "trim-channel-logs": {"task": "trim_channel_logs", "schedule": crontab(hour=3, minute=0)},
+    "trim-channel-sync-events": {"task": "trim_channel_sync_events", "schedule": crontab(hour=3, minute=0)},
     "trim-event-fires": {"task": "trim_event_fires", "schedule": timedelta(seconds=900)},
+    "trim-exports": {"task": "trim_exports", "schedule": crontab(hour=2, minute=0)},
     "trim-flow-revisions": {"task": "trim_flow_revisions", "schedule": crontab(hour=0, minute=0)},
     "trim-flow-sessions": {"task": "trim_flow_sessions", "schedule": crontab(hour=0, minute=0)},
     "trim-http-logs": {"task": "trim_http_logs", "schedule": crontab(hour=2, minute=0)},
-    "trim-sync-events": {"task": "trim_sync_events", "schedule": crontab(hour=3, minute=0)},
+    "trim-notifications": {"task": "trim_notifications", "schedule": crontab(hour=2, minute=0)},
     "trim-webhook-events": {"task": "trim_webhook_events", "schedule": crontab(hour=3, minute=0)},
 }
 
@@ -821,6 +785,11 @@ else:
     COMPRESS_PRECOMPILERS = (
         ("text/less", 'lessc --include-path="%s" {infile} {outfile}' % os.path.join(PROJECT_DIR, "../static", "less")),
     )
+
+COMPRESS_FILTERS = {
+    "css": ["compressor.filters.css_default.CssAbsoluteFilter"],
+    "js": [],
+}
 
 COMPRESS_ENABLED = False
 COMPRESS_OFFLINE = False
@@ -874,6 +843,7 @@ CHANNEL_TYPES = [
     "temba.channels.types.m3tech.M3TechType",
     "temba.channels.types.macrokiosk.MacrokioskType",
     "temba.channels.types.mblox.MbloxType",
+    "temba.channels.types.mailgun.MailgunType",
     "temba.channels.types.messagebird.MessageBirdType",
     "temba.channels.types.messangi.MessangiType",
     "temba.channels.types.mtn.MtnType",
@@ -927,12 +897,6 @@ MAILROOM_URL = None
 MAILROOM_AUTH_TOKEN = None
 
 # -----------------------------------------------------------------------------------
-# ElasticSearch
-# -----------------------------------------------------------------------------------
-
-ELASTICSEARCH_URL = os.environ.get("ELASTICSEARCH_URL", "http://localhost:9200")
-
-# -----------------------------------------------------------------------------------
 # Data Model
 # -----------------------------------------------------------------------------------
 
@@ -980,10 +944,13 @@ ORG_LIMIT_DEFAULTS = {
 }
 
 RETENTION_PERIODS = {
+    "channelevent": timedelta(days=90),
     "channellog": timedelta(days=14),
-    "eventfire": timedelta(days=90),  # matches default rp-archiver behavior
+    "export": timedelta(days=90),
+    "eventfire": timedelta(days=90),
     "flowsession": timedelta(days=7),
     "httplog": timedelta(days=3),
+    "notification": timedelta(days=30),
     "syncevent": timedelta(days=7),
     "webhookevent": timedelta(hours=48),
 }
@@ -1031,3 +998,7 @@ WHATSAPP_FACEBOOK_BUSINESS_ID = os.environ.get("WHATSAPP_FACEBOOK_BUSINESS_ID", 
 #
 # You need to change these to real addresses to work with these.
 IP_ADDRESSES = ("172.16.10.10", "162.16.10.20")
+
+# Android clients FCM config
+ANDROID_FCM_PROJECT_ID = os.environ.get("ANDROID_FCM_PROJECT_ID", "")
+ANDROID_FCM_SERVICE_ACCOUNT_FILE = os.environ.get("ANDROID_FCM_SERVICE_ACCOUNT_FILE", "")

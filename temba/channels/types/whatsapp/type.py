@@ -8,7 +8,6 @@ from django.utils.translation import gettext_lazy as _
 
 from temba.contacts.models import URN
 from temba.request_logs.models import HTTPLog
-from temba.utils.whatsapp.views import SyncLogsView, TemplatesView
 
 from ...models import ChannelType
 from .views import ClaimView, ClearSessionToken, Connect, RequestCode, VerifyCode
@@ -30,22 +29,17 @@ class WhatsAppType(ChannelType):
 
     courier_url = r"^wac/receive"
     schemes = [URN.WHATSAPP_SCHEME]
-    redact_values = (settings.WHATSAPP_ADMIN_SYSTEM_USER_TOKEN,)
+    template_type = "whatsapp"
 
     claim_blurb = _("If you have an enterprise WhatsApp account, you can connect it to communicate with your contacts")
     claim_view = ClaimView
 
-    menu_items = [
-        dict(label=_("Message Templates"), view_name="channels.types.whatsapp.templates"),
-        dict(label=_("Verify Number"), view_name="channels.types.whatsapp.request_code"),
-    ]
+    menu_items = [dict(label=_("Verify Number"), view_name="channels.types.whatsapp.request_code")]
 
     def get_urls(self):
         return [
             self.get_claim_url(),
             re_path(r"^clear_session_token$", ClearSessionToken.as_view(channel_type=self), name="clear_session_token"),
-            re_path(r"^(?P<uuid>[a-z0-9\-]+)/templates$", TemplatesView.as_view(channel_type=self), name="templates"),
-            re_path(r"^(?P<uuid>[a-z0-9\-]+)/sync_logs$", SyncLogsView.as_view(channel_type=self), name="sync_logs"),
             re_path(
                 r"^(?P<uuid>[a-z0-9\-]+)/request_code$", RequestCode.as_view(channel_type=self), name="request_code"
             ),
@@ -77,29 +71,31 @@ class WhatsAppType(ChannelType):
                 _("Unable to register phone with ID %s from WABA with ID %s" % (channel.address, waba_id))
             )
 
-    def get_api_templates(self, channel):
-        if not settings.WHATSAPP_ADMIN_SYSTEM_USER_TOKEN:  # pragma: no cover
-            return [], False
+    def fetch_templates(self, channel) -> list:
+        waba_id = channel.config["wa_waba_id"]
+        url = f"https://graph.facebook.com/v18.0/{waba_id}/message_templates"
+        headers = {"Authorization": f"Bearer {settings.WHATSAPP_ADMIN_SYSTEM_USER_TOKEN}"}
+        templates = []
 
-        waba_id = channel.config.get("wa_waba_id", None)
-        if not waba_id:  # pragma: no cover
-            return [], False
+        while url:
+            start = timezone.now()
+            try:
+                response = requests.get(url, params={"limit": 255}, headers=headers)
+                response.raise_for_status()
+                HTTPLog.from_response(
+                    HTTPLog.WHATSAPP_TEMPLATES_SYNCED, response, start, timezone.now(), channel=channel
+                )
 
-        start = timezone.now()
-        try:
-            template_data = []
-            url = f"https://graph.facebook.com/v18.0/{waba_id}/message_templates"
+                templates.extend(response.json()["data"])
+                url = response.json().get("paging", {}).get("next", None)
+            except requests.RequestException as e:
+                HTTPLog.from_exception(HTTPLog.WHATSAPP_TEMPLATES_SYNCED, e, start, channel=channel)
+                raise e
 
-            headers = {"Authorization": f"Bearer {settings.WHATSAPP_ADMIN_SYSTEM_USER_TOKEN}"}
-            while url:
-                resp = requests.get(url, params=dict(limit=255), headers=headers)
-                HTTPLog.from_response(HTTPLog.WHATSAPP_TEMPLATES_SYNCED, resp, start, timezone.now(), channel=channel)
-                if resp.status_code != 200:  # pragma: no cover
-                    return [], False
+        return templates
 
-                template_data.extend(resp.json()["data"])
-                url = resp.json().get("paging", {}).get("next", None)
-            return template_data, True
-        except requests.RequestException as e:
-            HTTPLog.from_exception(HTTPLog.WHATSAPP_TEMPLATES_SYNCED, e, start, channel=channel)
-            return [], False
+    def get_redact_values(self, channel) -> tuple:
+        """
+        Gets the values to redact from logs
+        """
+        return (settings.WHATSAPP_ADMIN_SYSTEM_USER_TOKEN,)

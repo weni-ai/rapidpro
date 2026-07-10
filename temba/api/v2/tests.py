@@ -8,10 +8,8 @@ from urllib.parse import quote_plus
 
 import iso8601
 from rest_framework import serializers
-from rest_framework.test import APIClient
 
 from django.conf import settings
-from django.contrib.auth.models import Group
 from django.contrib.gis.geos import GEOSGeometry
 from django.core.cache import cache
 from django.test import override_settings
@@ -32,7 +30,6 @@ from temba.locations.models import BoundaryAlias
 from temba.msgs.models import Broadcast, Label, Media, Msg, OptIn
 from temba.orgs.models import Org, OrgRole
 from temba.schedules.models import Schedule
-from temba.templates.models import TemplateTranslation
 from temba.tests import TembaTest, matchers, mock_mailroom, mock_uuids
 from temba.tests.engine import MockSessionWriter
 from temba.tickets.models import Topic
@@ -42,7 +39,8 @@ from ..tests import APITestMixin
 from . import fields
 from .serializers import format_datetime, normalize_extra
 
-NUM_BASE_REQUEST_QUERIES = 5  # number of db queries required for any API request
+NUM_BASE_SESSION_QUERIES = 4  # number of queries required for any request using session auth
+NUM_BASE_TOKEN_QUERIES = 3  # number of queries required for any request using token auth
 
 
 class APITest(APITestMixin, TembaTest):
@@ -396,7 +394,7 @@ class EndpointsTest(APITest):
     def setUp(self):
         super().setUp()
 
-        self.joe = self.create_contact("Joe Blow", phone="0788123123")
+        self.joe = self.create_contact("Joe Blow", phone="+250788123123")
         self.frank = self.create_contact("Frank", urns=["twitter:franky"])
 
         self.twitter = self.create_channel("TWT", "Twitter Channel", "billy_bob")
@@ -470,9 +468,8 @@ class EndpointsTest(APITest):
         fields_url = reverse("api.v2.fields")
 
         token1 = APIToken.get_or_create(self.org, self.admin, role=OrgRole.ADMINISTRATOR)
-        token2 = APIToken.get_or_create(self.org, self.admin, role=OrgRole.SURVEYOR)
-        token3 = APIToken.get_or_create(self.org, self.editor, role=OrgRole.EDITOR)
-        token4 = APIToken.get_or_create(self.org, self.customer_support, role=OrgRole.ADMINISTRATOR)
+        token2 = APIToken.get_or_create(self.org, self.editor, role=OrgRole.EDITOR)
+        token3 = APIToken.get_or_create(self.org, self.customer_support, role=OrgRole.ADMINISTRATOR)
 
         # can request fields endpoint using all 3 methods
         response = request_by_token(fields_url, token1.key)
@@ -499,18 +496,7 @@ class EndpointsTest(APITest):
         self.assertEqual(200, response.status_code)
         self.assertEqual(str(self.org.id), response["X-Temba-Org"])
 
-        # but not with surveyor token
-        response = request_by_token(campaigns_url, token2.key)
-        self.assertResponseError(response, None, "You do not have permission to perform this action.", status_code=403)
-
-        response = request_by_basic_auth(campaigns_url, self.admin.username, token2.key)
-        self.assertResponseError(response, None, "You do not have permission to perform this action.", status_code=403)
-
-        # but it can be used to access the contacts endpoint
-        response = request_by_token(contacts_url, token2.key)
-        self.assertEqual(200, response.status_code)
-
-        response = request_by_basic_auth(contacts_url, self.admin.username, token2.key)
+        response = request_by_basic_auth(contacts_url, self.editor.username, token2.key)
         self.assertEqual(200, response.status_code)
         self.assertEqual(str(self.org.id), response["X-Temba-Org"])
 
@@ -526,7 +512,7 @@ class EndpointsTest(APITest):
         self.assertEqual(response.status_code, 429)
 
         # or if another user in same org makes a request
-        response = request_by_token(fields_url, token3.key)
+        response = request_by_token(fields_url, token2.key)
         self.assertEqual(response.status_code, 429)
 
         # but they can still make a request if they have a session
@@ -534,7 +520,7 @@ class EndpointsTest(APITest):
         self.assertEqual(response.status_code, 200)
 
         # or if they're a staff user because they are user-scoped
-        response = request_by_token(fields_url, token4.key)
+        response = request_by_token(fields_url, token3.key)
         self.assertEqual(response.status_code, 200)
 
         # are allowed to access if we have not reached the configured org api rates
@@ -556,16 +542,16 @@ class EndpointsTest(APITest):
         self.assertEqual(request_by_token(campaigns_url, token1.key).status_code, 403)
         self.assertEqual(request_by_basic_auth(campaigns_url, self.admin.username, token1.key).status_code, 403)
         self.assertEqual(request_by_token(contacts_url, token2.key).status_code, 200)  # other token unaffected
-        self.assertEqual(request_by_basic_auth(contacts_url, self.admin.username, token2.key).status_code, 200)
+        self.assertEqual(request_by_basic_auth(contacts_url, self.editor.username, token2.key).status_code, 200)
 
         # and if user is inactive, disallow the request
         self.admin.is_active = False
         self.admin.save()
 
-        response = request_by_token(contacts_url, token2.key)
+        response = request_by_token(contacts_url, token1.key)
         self.assertResponseError(response, None, "Invalid token", status_code=403)
 
-        response = request_by_basic_auth(contacts_url, self.admin.username, token2.key)
+        response = request_by_basic_auth(contacts_url, self.admin.username, token1.key)
         self.assertResponseError(response, None, "Invalid token or email", status_code=403)
 
     @override_settings(SECURE_PROXY_SSL_HEADER=("HTTP_X_FORWARDED_HTTPS", "https"))
@@ -574,17 +560,37 @@ class EndpointsTest(APITest):
 
         # browse as HTML anonymously (should still show docs)
         response = self.client.get(root_url)
-        self.assertContains(response, "We provide a RESTful JSON API", status_code=200)
+        self.assertContains(response, "We provide a RESTful JSON API")
+
+        # POSTing just returns the docs with a 405
+        response = self.client.post(root_url, {})
+        self.assertContains(response, "We provide a RESTful JSON API", status_code=405)
 
         # same thing if user navigates to just /api
         response = self.client.get(reverse("api"), follow=True)
-        self.assertContains(response, "We provide a RESTful JSON API", status_code=200)
+        self.assertContains(response, "We provide a RESTful JSON API")
 
         # try to browse as JSON anonymously
         response = self.client.get(root_url + ".json")
         self.assertEqual(200, response.status_code)
         self.assertIsInstance(response.json(), dict)
         self.assertEqual(response.json()["runs"], "http://testserver/api/v2/runs")  # endpoints are listed
+
+    def test_docs(self):
+        messages_url = reverse("api.v2.messages")
+
+        # test fetching docs anonymously
+        response = self.client.get(messages_url)
+        self.assertContains(response, "This endpoint allows you to list messages in your account.")
+
+        # you can also post to docs endpoints tho it just returns the docs with a 403
+        response = self.client.post(messages_url, {})
+        self.assertContains(response, "This endpoint allows you to list messages in your account.", status_code=403)
+
+        # test fetching docs logged in
+        self.login(self.editor)
+        response = self.client.get(messages_url)
+        self.assertContains(response, "This endpoint allows you to list messages in your account.")
 
     def test_explorer(self):
         explorer_url = reverse("api.v2.explorer")
@@ -650,91 +656,6 @@ class EndpointsTest(APITest):
         returned_ids += [r["id"] for r in response.json()["results"]]
 
         self.assertEqual(returned_ids, actual_ids)  # ensure all results were returned and in correct order
-
-    def test_authenticate(self):
-        auth_url = reverse("api.v2.authenticate")
-
-        # fetch as HTML
-        response = self.client.get(auth_url)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(list(response.context["form"].fields.keys()), ["username", "password", "role", "loc"])
-
-        admins = Group.objects.get(name="Administrators")
-        surveyors = Group.objects.get(name="Surveyors")
-
-        # try to authenticate with incorrect password
-        response = self.client.post(auth_url, {"username": "admin@nyaruka.com", "password": "XXXX", "role": "A"})
-        self.assertEqual(response.status_code, 403)
-
-        # try to authenticate with invalid role
-        response = self.client.post(auth_url, {"username": "admin@nyaruka.com", "password": "Qwerty123", "role": "X"})
-        self.assertFormError(response, "form", "role", "Select a valid choice. X is not one of the available choices.")
-
-        # authenticate an admin as an admin
-        response = self.client.post(auth_url, {"username": "admin@nyaruka.com", "password": "Qwerty123", "role": "A"})
-
-        # should have created a new token object
-        token_obj1 = APIToken.objects.get(user=self.admin, role=admins)
-
-        tokens = response.json()["tokens"]
-        self.assertEqual(len(tokens), 1)
-        self.assertEqual(
-            tokens[0],
-            {"org": {"id": self.org.pk, "name": "Nyaruka", "uuid": str(self.org.uuid)}, "token": token_obj1.key},
-        )
-
-        # authenticate an admin as a surveyor
-        response = self.client.post(auth_url, {"username": "admin@nyaruka.com", "password": "Qwerty123", "role": "S"})
-
-        # should have created a new token object
-        token_obj2 = APIToken.objects.get(user=self.admin, role=surveyors)
-
-        tokens = response.json()["tokens"]
-        self.assertEqual(len(tokens), 1)
-        self.assertEqual(
-            tokens[0],
-            {"org": {"id": self.org.pk, "name": "Nyaruka", "uuid": str(self.org.uuid)}, "token": token_obj2.key},
-        )
-
-        # the keys should be different
-        self.assertNotEqual(token_obj1.key, token_obj2.key)
-
-        client = APIClient()
-
-        # campaigns can be fetched by admin token
-        client.credentials(HTTP_AUTHORIZATION="Token " + token_obj1.key)
-        self.assertEqual(client.get(reverse("api.v2.campaigns") + ".json").status_code, 200)
-
-        # but not by an admin's surveyor token
-        client.credentials(HTTP_AUTHORIZATION="Token " + token_obj2.key)
-        self.assertEqual(client.get(reverse("api.v2.campaigns") + ".json").status_code, 403)
-
-        # but their surveyor token can get flows or contacts
-        self.assertEqual(client.get(reverse("api.v2.flows") + ".json").status_code, 200)
-        self.assertEqual(client.get(reverse("api.v2.contacts") + ".json").status_code, 200)
-
-        # our surveyor can't login with an admin role
-        response = self.client.post(
-            auth_url, {"username": "surveyor@nyaruka.com", "password": "Qwerty123", "role": "A"}
-        )
-        tokens = response.json()["tokens"]
-        self.assertEqual(len(tokens), 0)
-
-        # but they can with a surveyor role
-        response = self.client.post(
-            auth_url, {"username": "surveyor@nyaruka.com", "password": "Qwerty123", "role": "S"}
-        )
-        tokens = response.json()["tokens"]
-        self.assertEqual(len(tokens), 1)
-
-        token_obj3 = APIToken.objects.get(user=self.surveyor, role=surveyors)
-
-        # and can fetch flows, contacts, and fields, but not campaigns
-        client.credentials(HTTP_AUTHORIZATION="Token " + token_obj3.key)
-        self.assertEqual(client.get(reverse("api.v2.flows") + ".json").status_code, 200)
-        self.assertEqual(client.get(reverse("api.v2.contacts") + ".json").status_code, 200)
-        self.assertEqual(client.get(reverse("api.v2.fields") + ".json").status_code, 200)
-        self.assertEqual(client.get(reverse("api.v2.campaigns") + ".json").status_code, 403)
 
     @patch("temba.flows.models.FlowStart.create")
     def test_transactions(self, mock_flowstart_create):
@@ -874,7 +795,7 @@ class EndpointsTest(APITest):
                     "start_date": "2017-04-05",
                 },
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 2,
+            num_queries=NUM_BASE_SESSION_QUERIES + 2,
         )
 
         self.assertGet(endpoint_url + "?after=2017-05-01", [self.editor], results=[archive4, archive3, archive2])
@@ -896,18 +817,10 @@ class EndpointsTest(APITest):
         response = self.client.get(endpoint_url)
         self.assertEqual(403, response.status_code)
 
-        # test fetching docs
-        response = self.client.get(reverse("api.v2.archives"))
-        self.assertContains(response, "This endpoint allows you to list", status_code=403)
-
-        self.login(self.editor)
-        response = self.client.get(reverse("api.v2.archives"))
-        self.assertContains(response, "This endpoint allows you to list", status_code=200)
-
     def test_boundaries(self):
         endpoint_url = reverse("api.v2.boundaries") + ".json"
 
-        self.assertGetNotPermitted(endpoint_url, [None, self.agent])
+        self.assertGetNotPermitted(endpoint_url, [None])
         self.assertPostNotAllowed(endpoint_url)
         self.assertDeleteNotAllowed(endpoint_url)
 
@@ -999,7 +912,7 @@ class EndpointsTest(APITest):
                     "geometry": None,
                 },
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 3,
+            num_queries=NUM_BASE_SESSION_QUERIES + 3,
         )
 
         # test with geometry
@@ -1028,7 +941,7 @@ class EndpointsTest(APITest):
                 matchers.Dict(),
                 matchers.Dict(),
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 3,
+            num_queries=NUM_BASE_SESSION_QUERIES + 3,
         )
 
         # if org doesn't have a country, just return no results
@@ -1037,8 +950,8 @@ class EndpointsTest(APITest):
 
         self.assertGet(endpoint_url, [self.admin], results=[])
 
-    @patch("temba.mailroom.queue_broadcast")
-    def test_broadcasts(self, mock_queue_broadcast):
+    @mock_mailroom
+    def test_broadcasts(self, mr_mocks):
         endpoint_url = reverse("api.v2.broadcasts") + ".json"
 
         self.assertGetNotPermitted(endpoint_url, [None, self.agent])
@@ -1047,35 +960,31 @@ class EndpointsTest(APITest):
 
         reporters = self.create_group("Reporters", [self.joe, self.frank])
 
-        bcast1 = Broadcast.create(self.org, self.admin, {"eng": {"text": "Hello 1"}}, urns=["twitter:franky"])
-        bcast2 = Broadcast.create(self.org, self.admin, {"eng": {"text": "Hello 2"}}, contacts=[self.joe])
-        bcast3 = Broadcast.create(self.org, self.admin, {"eng": {"text": "Hello 3"}}, contacts=[self.frank], status="S")
-        bcast4 = Broadcast.create(
-            self.org,
+        bcast1 = self.create_broadcast(self.admin, {"eng": {"text": "Hello 1"}}, urns=["twitter:franky"], status="Q")
+        bcast2 = self.create_broadcast(self.admin, {"eng": {"text": "Hello 2"}}, contacts=[self.joe], status="Q")
+        bcast3 = self.create_broadcast(self.admin, {"eng": {"text": "Hello 3"}}, contacts=[self.frank], status="S")
+        bcast4 = self.create_broadcast(
             self.admin,
             {"eng": {"text": "Hello 4"}},
             urns=["twitter:franky"],
             contacts=[self.joe],
             groups=[reporters],
+            status="F",
         )
-        Broadcast.create(
-            self.org,
+        self.create_broadcast(
             self.admin,
             {"eng": {"text": "Scheduled"}},
             contacts=[self.joe],
             schedule=Schedule.create(self.org, timezone.now(), Schedule.REPEAT_DAILY),
         )
-        Broadcast.create(self.org2, self.admin2, {"eng": {"text": "Different org..."}}, contacts=[self.hans])
-
-        bcast4.status = "F"
-        bcast4.save(update_fields=("status",))
+        self.create_broadcast(self.admin2, {"eng": {"text": "Different org..."}}, contacts=[self.hans], org=self.org2)
 
         # no filtering
         response = self.assertGet(
             endpoint_url,
             [self.user, self.editor, self.admin],
             results=[bcast4, bcast3, bcast2, bcast1],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 3,
+            num_queries=NUM_BASE_SESSION_QUERIES + 3,
         )
         resp_json = response.json()
 
@@ -1205,8 +1114,6 @@ class EndpointsTest(APITest):
         self.assertEqual({self.joe, self.frank}, set(broadcast.contacts.all()))
         self.assertEqual({reporters}, set(broadcast.groups.all()))
 
-        mock_queue_broadcast.assert_called_once_with(broadcast)
-
         # create new broadcast without translations
         response = self.assertPost(
             endpoint_url,
@@ -1302,7 +1209,7 @@ class EndpointsTest(APITest):
                     "created_on": format_datetime(campaign1.created_on),
                 },
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 2,
+            num_queries=NUM_BASE_SESSION_QUERIES + 2,
         )
 
         # filter by UUID
@@ -1476,7 +1383,7 @@ class EndpointsTest(APITest):
                     "created_on": format_datetime(event1.created_on),
                 },
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 4,
+            num_queries=NUM_BASE_SESSION_QUERIES + 4,
         )
 
         # filter by UUID
@@ -1779,7 +1686,7 @@ class EndpointsTest(APITest):
                     "created_on": format_datetime(self.channel.created_on),
                 },
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 2,
+            num_queries=NUM_BASE_SESSION_QUERIES + 2,
         )
 
         # filter by UUID
@@ -1795,13 +1702,13 @@ class EndpointsTest(APITest):
         self.assertPostNotAllowed(endpoint_url)
         self.assertDeleteNotAllowed(endpoint_url)
 
-        call1 = self.create_channel_event(self.channel, "tel:0788123123", ChannelEvent.TYPE_CALL_IN_MISSED)
+        call1 = self.create_channel_event(self.channel, "tel:+250788123123", ChannelEvent.TYPE_CALL_IN_MISSED)
         call2 = self.create_channel_event(
-            self.channel, "tel:0788124124", ChannelEvent.TYPE_CALL_IN, extra=dict(duration=36)
+            self.channel, "tel:+250788124124", ChannelEvent.TYPE_CALL_IN, extra=dict(duration=36)
         )
-        call3 = self.create_channel_event(self.channel, "tel:0788124124", ChannelEvent.TYPE_CALL_OUT_MISSED)
+        call3 = self.create_channel_event(self.channel, "tel:+250788124124", ChannelEvent.TYPE_CALL_OUT_MISSED)
         call4 = self.create_channel_event(
-            self.channel, "tel:0788123123", ChannelEvent.TYPE_CALL_OUT, extra=dict(duration=15)
+            self.channel, "tel:+250788123123", ChannelEvent.TYPE_CALL_OUT, extra=dict(duration=15)
         )
 
         # no filtering
@@ -1809,7 +1716,7 @@ class EndpointsTest(APITest):
             endpoint_url,
             [self.user, self.editor, self.admin],
             results=[call4, call3, call2, call1],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 3,
+            num_queries=NUM_BASE_SESSION_QUERIES + 3,
         )
 
         resp_json = response.json()
@@ -1876,7 +1783,7 @@ class EndpointsTest(APITest):
                     "created_on": format_datetime(c1.created_on),
                 }
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 2,
+            num_queries=NUM_BASE_SESSION_QUERIES + 2,
         )
 
         # filter by uuid (not there)
@@ -1933,7 +1840,7 @@ class EndpointsTest(APITest):
             endpoint_url,
             [self.user, self.editor, self.admin, self.agent],
             results=[contact4, self.joe, contact2, contact1, self.frank],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 6,
+            num_queries=NUM_BASE_SESSION_QUERIES + 6,
         )
         self.assertEqual(
             {
@@ -1952,6 +1859,15 @@ class EndpointsTest(APITest):
                 "stopped": False,
             },
             response.json()["results"][0],
+        )
+
+        # no filtering with token auth
+        response = self.assertGet(
+            endpoint_url,
+            [self.admin],
+            results=[contact4, self.joe, contact2, contact1, self.frank],
+            by_token=True,
+            num_queries=NUM_BASE_TOKEN_QUERIES + 6,
         )
 
         # with expanded URNs
@@ -1998,7 +1914,7 @@ class EndpointsTest(APITest):
                 endpoint_url,
                 [self.user, self.editor, self.admin, self.agent],
                 results=[contact4, self.joe, contact2, contact1, self.frank],
-                num_queries=NUM_BASE_REQUEST_QUERIES + 6,
+                num_queries=NUM_BASE_SESSION_QUERIES + 6,
             )
             self.assertEqual(
                 {
@@ -2305,7 +2221,7 @@ class EndpointsTest(APITest):
             endpoint_url,
             self.editor,
             {"name": "Robert", "urns": ["tel:+250-78-5555555"]},
-            errors={"urns": "URN belongs to another contact: tel:+250785555555"},
+            errors={("urns", "0"): "URN is in use by another contact."},
         )
 
         # try to update a contact with non-existent UUID
@@ -2831,14 +2747,14 @@ class EndpointsTest(APITest):
         # all flow dependencies and we should get the child flow
         self.assertGet(
             endpoint_url + f"?flow={flow.uuid}",
-            [self.surveyor],
+            [self.editor],
             raw=lambda j: {f["name"] for f in j["flows"]} == {"Child Flow", "Parent Flow"},
         )
 
         # export just the parent flow
         self.assertGet(
             endpoint_url + f"?flow={flow.uuid}&dependencies=none",
-            [self.surveyor],
+            [self.editor],
             raw=lambda j: {f["name"] for f in j["flows"]} == {"Parent Flow"},
         )
 
@@ -2849,14 +2765,14 @@ class EndpointsTest(APITest):
         flow = Flow.objects.get(name="Catch All")
         self.assertGet(
             endpoint_url + f"?flow={flow.uuid}&dependencies=none",
-            [self.surveyor],
+            [self.editor],
             raw=lambda j: len(j["flows"]) == 1 and len(j["campaigns"]) == 0 and len(j["triggers"]) == 0,
         )
 
         # with its trigger dependency
         self.assertGet(
             endpoint_url + f"?flow={flow.uuid}",
-            [self.surveyor],
+            [self.editor],
             raw=lambda j: len(j["flows"]) == 1 and len(j["campaigns"]) == 0 and len(j["triggers"]) == 1,
         )
 
@@ -2864,21 +2780,21 @@ class EndpointsTest(APITest):
         flow = Flow.objects.get(name="Register Patient")
         self.assertGet(
             endpoint_url + f"?flow={flow.uuid}&dependencies=none",
-            [self.surveyor],
+            [self.editor],
             raw=lambda j: len(j["flows"]) == 1 and len(j["campaigns"]) == 0 and len(j["triggers"]) == 0,
         )
 
         # touches a lot of stuff
         self.assertGet(
             endpoint_url + f"?flow={flow.uuid}",
-            [self.surveyor],
+            [self.editor],
             raw=lambda j: len(j["flows"]) == 6 and len(j["campaigns"]) == 1 and len(j["triggers"]) == 2,
         )
 
         # ignore campaign dependencies
         self.assertGet(
             endpoint_url + f"?flow={flow.uuid}&dependencies=flows",
-            [self.surveyor],
+            [self.editor],
             raw=lambda j: len(j["flows"]) == 2 and len(j["campaigns"]) == 0 and len(j["triggers"]) == 1,
         )
 
@@ -2886,27 +2802,27 @@ class EndpointsTest(APITest):
         missed_call = Flow.objects.get(name="Missed Call")
         self.assertGet(
             endpoint_url + f"?flow={flow.uuid}&flow={missed_call.uuid}&dependencies=all",
-            [self.surveyor],
+            [self.editor],
             raw=lambda j: len(j["flows"]) == 7 and len(j["campaigns"]) == 1 and len(j["triggers"]) == 3,
         )
 
         campaign = Campaign.objects.get(name="Appointment Schedule")
         self.assertGet(
             endpoint_url + f"?campaign={campaign.uuid}&dependencies=none",
-            [self.surveyor],
+            [self.editor],
             raw=lambda j: len(j["flows"]) == 0 and len(j["campaigns"]) == 1 and len(j["triggers"]) == 0,
         )
 
         self.assertGet(
             endpoint_url + f"?campaign={campaign.uuid}",
-            [self.surveyor],
+            [self.editor],
             raw=lambda j: len(j["flows"]) == 6 and len(j["campaigns"]) == 1 and len(j["triggers"]) == 2,
         )
 
         # test an invalid value for dependencies
         self.assertGet(
             endpoint_url + f"?flow={flow.uuid}&dependencies=xx",
-            [self.surveyor],
+            [self.editor],
             errors={None: "dependencies must be one of none, flows, all"},
         )
 
@@ -2916,7 +2832,7 @@ class EndpointsTest(APITest):
         flow = Flow.objects.get(name="Favorites")
         self.assertGet(
             endpoint_url + f"?flow={flow.uuid}",
-            [self.surveyor],
+            [self.editor],
             raw=lambda j: len(j["flows"]) == 1 and j["flows"][0]["spec_version"] == Flow.CURRENT_SPEC_VERSION,
         )
 
@@ -2969,7 +2885,7 @@ class EndpointsTest(APITest):
                     "value_type": "text",
                 },
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 1,
+            num_queries=NUM_BASE_SESSION_QUERIES + 1,
         )
 
         # filter by key
@@ -3006,8 +2922,8 @@ class EndpointsTest(APITest):
         self.assertPost(
             endpoint_url,
             self.admin,
-            {"name": "UUID", "type": "text"},
-            errors={"name": 'Generated key "uuid" is invalid or a reserved name.'},
+            {"name": "HAS", "type": "text"},
+            errors={"name": 'Generated key "has" is invalid or a reserved name.'},
         )
 
         # try again with a label that's already taken
@@ -3021,7 +2937,9 @@ class EndpointsTest(APITest):
         # create a new field
         self.assertPost(endpoint_url, self.editor, {"name": "Age", "type": "number"}, status=201)
 
-        age = ContactField.user_fields.get(org=self.org, name="Age", value_type="N", is_active=True)
+        age = ContactField.objects.get(
+            org=self.org, name="Age", value_type="N", is_proxy=False, is_system=False, is_active=True
+        )
 
         # update a field by its key
         self.assertPost(endpoint_url + "?key=age", self.admin, {"name": "Real Age", "type": "datetime"})
@@ -3180,7 +3098,7 @@ class EndpointsTest(APITest):
                     "modified_on": format_datetime(survey.modified_on),
                 },
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 5,
+            num_queries=NUM_BASE_SESSION_QUERIES + 5,
         )
 
         self.assertGet(endpoint_url, [self.admin2], results=[other_org])
@@ -3430,7 +3348,7 @@ class EndpointsTest(APITest):
             endpoint_url,
             [self.user, self.editor],
             results=[start4, start3, start2, start1],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 4,
+            num_queries=NUM_BASE_SESSION_QUERIES + 4,
         )
         self.assertEqual(
             response.json()["results"][1],
@@ -3506,12 +3424,16 @@ class EndpointsTest(APITest):
         self.assertDeleteNotAllowed(endpoint_url)
 
         # create some globals
+        deleted = Global.get_or_create(self.org, self.admin, "org_name", "Org Name", "Acme Ltd")
+        deleted.release(self.admin)
+
         global1 = Global.get_or_create(self.org, self.admin, "org_name", "Org Name", "Acme Ltd")
         global2 = Global.get_or_create(self.org, self.admin, "access_token", "Access Token", "23464373")
 
         # on another org
         global3 = Global.get_or_create(self.org2, self.admin, "thingy", "Thingy", "xyz")
 
+        # check no filtering
         response = self.assertGet(
             endpoint_url,
             [self.user, self.editor],
@@ -3529,7 +3451,16 @@ class EndpointsTest(APITest):
                     "modified_on": format_datetime(global1.modified_on),
                 },
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 1,
+            num_queries=NUM_BASE_SESSION_QUERIES + 1,
+        )
+
+        # check no filtering with token auth
+        response = self.assertGet(
+            endpoint_url,
+            [self.editor, self.admin],
+            results=[global2, global1],
+            by_token=True,
+            num_queries=NUM_BASE_TOKEN_QUERIES + 1,
         )
 
         self.assertGet(endpoint_url, [self.admin2], results=[global3])
@@ -3663,7 +3594,7 @@ class EndpointsTest(APITest):
                     "count": 0,
                 },
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 2,
+            num_queries=NUM_BASE_SESSION_QUERIES + 2,
         )
 
         # filter by UUID
@@ -3841,7 +3772,7 @@ class EndpointsTest(APITest):
                 {"uuid": str(feedback.uuid), "name": "Feedback", "count": 0},
                 {"uuid": str(important.uuid), "name": "Important", "count": 1},
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 2,
+            num_queries=NUM_BASE_SESSION_QUERIES + 2,
         )
 
         # filter by UUID
@@ -3978,8 +3909,8 @@ class EndpointsTest(APITest):
         frank_msg3 = self.create_incoming_msg(self.frank, "Bien", channel=self.twitter, visibility="A")
         frank_msg4 = self.create_outgoing_msg(self.frank, "Ça va?", status="F")
 
-        # add a surveyor message (no URN etc)
-        joe_msg4 = self.create_outgoing_msg(self.joe, "Surveys!", surveyor=True)
+        # add a failed message with no URN or channel
+        joe_msg4 = self.create_outgoing_msg(self.joe, "Sorry", failed_reason=Msg.FAILED_NO_DESTINATION)
 
         # add an unhandled message
         self.create_incoming_msg(self.joe, "Just in!", status="P")
@@ -4010,7 +3941,7 @@ class EndpointsTest(APITest):
             endpoint_url,
             [self.user, self.editor, self.admin],
             results=[joe_msg4, frank_msg4, frank_msg3, joe_msg3, frank_msg2, joe_msg2, frank_msg1, joe_msg1],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 6,
+            num_queries=NUM_BASE_SESSION_QUERIES + 6,
         )
 
         # filter by inbox
@@ -4039,7 +3970,7 @@ class EndpointsTest(APITest):
                     "visibility": "visible",
                 }
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 5,
+            num_queries=NUM_BASE_SESSION_QUERIES + 5,
         )
 
         # filter by incoming, should get deleted messages too
@@ -4053,8 +3984,8 @@ class EndpointsTest(APITest):
         self.assertGet(endpoint_url + "?folder=flows", [self.admin], results=[joe_msg3, joe_msg1])
         self.assertGet(endpoint_url + "?folder=archived", [self.admin], results=[frank_msg3])
         self.assertGet(endpoint_url + "?folder=outbox", [self.admin], results=[joe_msg2])
-        self.assertGet(endpoint_url + "?folder=sent", [self.admin], results=[frank_msg2, joe_msg4])
-        self.assertGet(endpoint_url + "?folder=failed", [self.admin], results=[frank_msg4])
+        self.assertGet(endpoint_url + "?folder=sent", [self.admin], results=[frank_msg2])
+        self.assertGet(endpoint_url + "?folder=failed", [self.admin], results=[joe_msg4, frank_msg4])
 
         # filter by invalid folder
         self.assertGet(endpoint_url + "?folder=invalid", [self.admin], results=[])
@@ -4092,7 +4023,9 @@ class EndpointsTest(APITest):
         )
 
         # filter by broadcast
-        broadcast = self.create_broadcast(self.user, "A beautiful broadcast", contacts=[self.joe, self.frank])
+        broadcast = self.create_broadcast(
+            self.user, {"eng": {"text": "A beautiful broadcast"}}, contacts=[self.joe, self.frank]
+        )
         self.assertGet(
             endpoint_url + f"?broadcast={broadcast.id}",
             [self.editor],
@@ -4144,7 +4077,7 @@ class EndpointsTest(APITest):
             {
                 "id": msg.id,
                 "type": "text",
-                "channel": {"uuid": str(self.twitter.uuid), "name": "Twitter Channel"},
+                "channel": {"uuid": str(self.channel.uuid), "name": "Test Channel"},
                 "contact": {"uuid": str(self.joe.uuid), "name": "Joe Blow"},
                 "urn": "tel:+250788123123",
                 "text": "Interesting",
@@ -4165,7 +4098,7 @@ class EndpointsTest(APITest):
         )
 
         self.assertEqual(
-            call(self.org.id, self.admin.id, self.joe.id, "Interesting", [], None),
+            call(self.org, self.admin, self.joe, "Interesting", [], None),
             mr_mocks.calls["msg_send"][-1],
         )
 
@@ -4192,7 +4125,7 @@ class EndpointsTest(APITest):
             endpoint_url, self.admin, {"contact": self.joe.uuid, "attachments": [str(upload.uuid)]}, status=201
         )
         self.assertEqual(  # check that was sent via mailroom
-            call(self.org.id, self.admin.id, self.joe.id, "", [f"image/jpeg:{upload.url}"], None),
+            call(self.org, self.admin, self.joe, "", [f"image/jpeg:{upload.url}"], None),
             mr_mocks.calls["msg_send"][-1],
         )
 
@@ -4204,7 +4137,7 @@ class EndpointsTest(APITest):
             status=201,
         )
         self.assertEqual(
-            call(self.org.id, self.admin.id, self.joe.id, "", [f"image/jpeg:{upload.url}"], None),
+            call(self.org, self.admin, self.joe, "", [f"image/jpeg:{upload.url}"], None),
             mr_mocks.calls["msg_send"][-1],
         )
 
@@ -4468,7 +4401,7 @@ class EndpointsTest(APITest):
             endpoint_url,
             [self.user, self.editor],
             results=[joe_run3, joe_run2, frank_run2, frank_run1, joe_run1],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 6,
+            num_queries=NUM_BASE_SESSION_QUERIES + 6,
         )
         resp_json = response.json()
         self.assertEqual(
@@ -4711,7 +4644,7 @@ class EndpointsTest(APITest):
                     "created_on": format_datetime(polls.created_on),
                 },
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 1,
+            num_queries=NUM_BASE_SESSION_QUERIES + 1,
         )
 
         # try to create empty optin
@@ -4790,7 +4723,7 @@ class EndpointsTest(APITest):
                     "modified_on": format_datetime(resthook1.modified_on),
                 },
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 1,
+            num_queries=NUM_BASE_SESSION_QUERIES + 1,
         )
 
         # try to create empty subscription
@@ -4841,7 +4774,7 @@ class EndpointsTest(APITest):
                     "created_on": format_datetime(hook1_subscriber.created_on),
                 },
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 1,
+            num_queries=NUM_BASE_SESSION_QUERIES + 1,
         )
 
         # filter by id
@@ -4893,195 +4826,11 @@ class EndpointsTest(APITest):
                     "data": {"event": "new mother", "values": {"name": "Greg"}, "steps": {"uuid": "abcde"}},
                 },
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 1,
+            num_queries=NUM_BASE_SESSION_QUERIES + 1,
         )
 
-    def test_templates(self):
-        endpoint_url = reverse("api.v2.templates") + ".json"
-
-        self.assertGetNotPermitted(endpoint_url, [None, self.agent])
-        self.assertPostNotAllowed(endpoint_url)
-        self.assertDeleteNotAllowed(endpoint_url)
-
-        # create some templates
-        tpl1 = TemplateTranslation.get_or_create(
-            self.channel,
-            "hello",
-            locale="eng-US",
-            content="Hi {{1}}",
-            variable_count=1,
-            status=TemplateTranslation.STATUS_APPROVED,
-            external_id="1234",
-            external_locale="en_US",
-            namespace="foo_namespace",
-            components=[
-                {
-                    "type": "BODY",
-                    "text": "Hi {{1}}",
-                    "example": {"body_text": [["Bob"]]},
-                },
-            ],
-            params={"body": [{"type": "text"}]},
-        ).template
-        TemplateTranslation.get_or_create(
-            self.channel,
-            "hello",
-            locale="fra-FR",
-            content="Bonjour {{1}}",
-            variable_count=1,
-            status=TemplateTranslation.STATUS_PENDING,
-            external_id="5678",
-            external_locale="fr_FR",
-            namespace="foo_namespace",
-            components=[
-                {
-                    "type": "BODY",
-                    "text": "Bonjour {{1}}",
-                    "example": {"body_text": [["Bob"]]},
-                },
-            ],
-            params={"body": [{"type": "text"}]},
-        )
-        tt = TemplateTranslation.get_or_create(
-            self.channel,
-            "hello",
-            locale="afr-ZA",
-            content="This is a template translation for a deleted channel {{1}}",
-            variable_count=1,
-            status=TemplateTranslation.STATUS_APPROVED,
-            external_id="9012",
-            external_locale="af_ZA",
-            namespace="foo_namespace",
-            components=[
-                {
-                    "type": "BODY",
-                    "text": "This is a template translation for a deleted channel {{1}}",
-                    "example": {"body_text": [["Bob"]]},
-                },
-            ],
-            params={"body": [{"type": "text"}]},
-        )
-        tt.is_active = False
-        tt.save()
-
-        tpl2 = TemplateTranslation.get_or_create(
-            self.channel,
-            "goodbye",
-            locale="eng-US",
-            content="Goodbye {{1}}",
-            variable_count=1,
-            status=TemplateTranslation.STATUS_PENDING,
-            external_id="6789",
-            external_locale="en_US",
-            namespace="foo_namespace",
-            components=[
-                {
-                    "type": "BODY",
-                    "text": "Goodbye {{1}}",
-                    "example": {"body_text": [["Bob"]]},
-                },
-            ],
-            params={"body": [{"type": "text"}]},
-        ).template
-
-        # templates on other org to test filtering
-        TemplateTranslation.get_or_create(
-            self.org2channel,
-            "goodbye",
-            locale="eng-US",
-            content="Goodbye {{1}}",
-            variable_count=1,
-            status=TemplateTranslation.STATUS_APPROVED,
-            external_id="1234",
-            external_locale="en_US",
-            namespace="bar_namespace",
-            components=[
-                {
-                    "type": "BODY",
-                    "text": "Goodbye {{1}}",
-                    "example": {"body_text": [["Bob"]]},
-                },
-            ],
-            params={"body": [{"type": "text"}]},
-        )
-        TemplateTranslation.get_or_create(
-            self.org2channel,
-            "goodbye",
-            locale="fra-FR",
-            content="Salut {{1}}",
-            variable_count=1,
-            status=TemplateTranslation.STATUS_PENDING,
-            external_id="5678",
-            external_locale="fr_FR",
-            namespace="bar_namespace",
-            components=[
-                {
-                    "type": "BODY",
-                    "text": "Salut {{1}}",
-                    "example": {"body_text": [["Bob"]]},
-                },
-            ],
-            params={"body": [{"type": "text"}]},
-        )
-
-        tpl1.refresh_from_db()
-        tpl2.refresh_from_db()
-
-        # no filtering
-        self.assertGet(
-            endpoint_url,
-            [self.user, self.editor],
-            results=[
-                {
-                    "name": "goodbye",
-                    "uuid": str(tpl2.uuid),
-                    "translations": [
-                        {
-                            "language": "eng",
-                            "locale": "eng-US",
-                            "content": "Goodbye {{1}}",
-                            "namespace": "foo_namespace",
-                            "variable_count": 1,
-                            "status": "pending",
-                            "channel": {"name": self.channel.name, "uuid": self.channel.uuid},
-                        },
-                    ],
-                    "created_on": format_datetime(tpl2.created_on),
-                    "modified_on": format_datetime(tpl2.modified_on),
-                },
-                {
-                    "name": "hello",
-                    "uuid": str(tpl1.uuid),
-                    "translations": [
-                        {
-                            "language": "eng",
-                            "locale": "eng-US",
-                            "content": "Hi {{1}}",
-                            "namespace": "foo_namespace",
-                            "variable_count": 1,
-                            "status": "approved",
-                            "channel": {"name": self.channel.name, "uuid": self.channel.uuid},
-                        },
-                        {
-                            "language": "fra",
-                            "locale": "fra-FR",
-                            "content": "Bonjour {{1}}",
-                            "namespace": "foo_namespace",
-                            "variable_count": 1,
-                            "status": "pending",
-                            "channel": {"name": self.channel.name, "uuid": self.channel.uuid},
-                        },
-                    ],
-                    "created_on": format_datetime(tpl1.created_on),
-                    "modified_on": format_datetime(tpl1.modified_on),
-                },
-            ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 3,
-        )
-
-    @patch("temba.mailroom.client.MailroomClient.ticket_close")
-    @patch("temba.mailroom.client.MailroomClient.ticket_reopen")
-    def test_tickets(self, mock_ticket_reopen, mock_ticket_close):
+    @mock_mailroom
+    def test_tickets(self, mr_mocks):
         endpoint_url = reverse("api.v2.tickets") + ".json"
 
         self.assertGetNotPermitted(endpoint_url, [None])
@@ -5147,7 +4896,7 @@ class EndpointsTest(APITest):
                     "closed_on": "2021-01-01T12:30:45.123456Z",
                 },
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 6,
+            num_queries=NUM_BASE_SESSION_QUERIES + 6,
         )
 
         # filter by contact uuid (not there)
@@ -5340,7 +5089,7 @@ class EndpointsTest(APITest):
                     "created_on": format_datetime(self.org.default_ticket_topic.created_on),
                 },
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 3,
+            num_queries=NUM_BASE_SESSION_QUERIES + 3,
         )
 
         # try to create empty topic
@@ -5431,6 +5180,7 @@ class EndpointsTest(APITest):
             [self.agent, self.user, self.editor, self.admin],
             results=[
                 {
+                    "avatar": None,
                     "email": "surveyor@nyaruka.com",
                     "first_name": "Stu",
                     "last_name": "McSurveys",
@@ -5438,6 +5188,7 @@ class EndpointsTest(APITest):
                     "created_on": format_datetime(self.surveyor.date_joined),
                 },
                 {
+                    "avatar": None,
                     "email": "agent@nyaruka.com",
                     "first_name": "Agnes",
                     "last_name": "",
@@ -5445,6 +5196,7 @@ class EndpointsTest(APITest):
                     "created_on": format_datetime(self.agent.date_joined),
                 },
                 {
+                    "avatar": None,
                     "email": "viewer@nyaruka.com",
                     "first_name": "",
                     "last_name": "",
@@ -5452,6 +5204,7 @@ class EndpointsTest(APITest):
                     "created_on": format_datetime(self.user.date_joined),
                 },
                 {
+                    "avatar": None,
                     "email": "editor@nyaruka.com",
                     "first_name": "Ed",
                     "last_name": "McEdits",
@@ -5459,6 +5212,7 @@ class EndpointsTest(APITest):
                     "created_on": format_datetime(self.editor.date_joined),
                 },
                 {
+                    "avatar": None,
                     "email": "admin@nyaruka.com",
                     "first_name": "Andy",
                     "last_name": "",
@@ -5466,7 +5220,8 @@ class EndpointsTest(APITest):
                     "created_on": format_datetime(self.admin.date_joined),
                 },
             ],
-            num_queries=NUM_BASE_REQUEST_QUERIES + 2,
+            # one query per user for their settings
+            num_queries=NUM_BASE_SESSION_QUERIES + 3,
         )
 
         # filter by roles

@@ -6,11 +6,9 @@ from datetime import datetime, timezone as tzone
 import iso8601
 from django_redis import get_redis_connection
 from packaging.version import Version
-from xlsxlite.writer import XLSXBook
 
 from django.conf import settings
 from django.contrib.postgres.fields import ArrayField
-from django.core.files.temp import NamedTemporaryFile
 from django.db import models, transaction
 from django.db.models import Max, Prefetch, Q, Sum
 from django.db.models.functions import Lower, TruncDate
@@ -18,18 +16,16 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from temba import mailroom
-from temba.assets.models import register_asset_store
 from temba.channels.models import Channel
 from temba.classifiers.models import Classifier
-from temba.contacts import search
 from temba.contacts.models import Contact, ContactField, ContactGroup
 from temba.globals.models import Global
 from temba.msgs.models import Label, OptIn
-from temba.orgs.models import DependencyMixin, Org, User
+from temba.orgs.models import DependencyMixin, Export, ExportType, Org, User
 from temba.templates.models import Template
 from temba.tickets.models import Topic
 from temba.utils import analytics, chunk_list, json, on_transaction_commit, s3
-from temba.utils.export import BaseExportAssetStore, BaseItemWithContactExport
+from temba.utils.export.models import MultiSheetExporter
 from temba.utils.models import JSONAsTextField, LegacyUUIDMixin, SquashableModel, TembaModel, delete_in_batches
 from temba.utils.uuid import uuid4
 
@@ -107,10 +103,16 @@ class Flow(LegacyUUIDMixin, TembaModel, DependencyMixin):
         TYPE_SURVEY: "messaging_offline",
         TYPE_VOICE: "voice",
     }
+    TYPE_ICONS = {
+        TYPE_MESSAGE: "flow_message",
+        TYPE_VOICE: "flow_ivr",
+        TYPE_BACKGROUND: "flow_background",
+        TYPE_SURVEY: "flow_surveyor",
+    }
 
     FINAL_LEGACY_VERSION = legacy.VERSIONS[-1]
     INITIAL_GOFLOW_VERSION = "13.0.0"  # initial version of flow spec to use new engine
-    CURRENT_SPEC_VERSION = "13.2.0"  # current flow spec version
+    CURRENT_SPEC_VERSION = "13.5.0"  # current flow spec version
 
     EXPIRES_CHOICES = {
         TYPE_MESSAGE: (
@@ -346,13 +348,11 @@ class Flow(LegacyUUIDMixin, TembaModel, DependencyMixin):
 
     @classmethod
     def export_translation(cls, org, flows, language):
-        flow_ids = [f.id for f in flows]
-        return mailroom.get_client().po_export(org.id, flow_ids, language=language)
+        return mailroom.get_client().po_export(org, flows, language=language)
 
     @classmethod
     def import_translation(cls, org, flows, language, po_data):
-        flow_ids = [f.id for f in flows]
-        response = mailroom.get_client().po_import(org.id, flow_ids, language=language, po_data=po_data)
+        response = mailroom.get_client().po_import(org, flows, language=language, po_data=po_data)
         return {d["uuid"]: d for d in response["flows"]}
 
     @classmethod
@@ -385,19 +385,7 @@ class Flow(LegacyUUIDMixin, TembaModel, DependencyMixin):
                 pass
 
     def get_attrs(self):
-        icon = (
-            "flow_message"
-            if self.flow_type == Flow.TYPE_MESSAGE
-            else "flow_ivr"
-            if self.flow_type == Flow.TYPE_VOICE
-            else "flow_background"
-            if self.flow_type == Flow.TYPE_BACKGROUND
-            else "flow_surveyor"
-            if self.flow_type == Flow.TYPE_SURVEY
-            else "flow"
-        )
-
-        return {"icon": icon, "type": self.flow_type, "uuid": self.uuid}
+        return {"icon": self.TYPE_ICONS.get(self.flow_type, "flow"), "type": self.flow_type, "uuid": self.uuid}
 
     def get_category_counts(self):
         keys = [r["key"] for r in self.metadata["results"]]
@@ -486,7 +474,7 @@ class Flow(LegacyUUIDMixin, TembaModel, DependencyMixin):
 
         definition = Flow.migrate_definition(definition, flow=None)
 
-        flow_info = mailroom.get_client().flow_inspect(self.org.id, definition)
+        flow_info = mailroom.get_client().flow_inspect(self.org, definition)
         dependencies = flow_info[Flow.INSPECT_DEPENDENCIES]
 
         # converts a dep ref {uuid|key, name, type, missing} to an importable partial definition {uuid|key, name}
@@ -564,7 +552,7 @@ class Flow(LegacyUUIDMixin, TembaModel, DependencyMixin):
         mailroom.queue_interrupt(self.org, flow=self)
 
         # archive our triggers as well
-        for trigger in self.triggers.all():
+        for trigger in self.triggers.filter(is_active=True):
             trigger.archive(user)
 
     def restore(self, user):
@@ -584,7 +572,7 @@ class Flow(LegacyUUIDMixin, TembaModel, DependencyMixin):
             {
                 "uuid": "8ca44c09-791d-453a-9799-a70dd3303306",
                 "name": self.name,
-                "spec_version": "13.0.0",
+                "spec_version": "13.5.0",
                 "language": base_language,
                 "type": "messaging_background",
                 "localization": localization,
@@ -773,7 +761,7 @@ class Flow(LegacyUUIDMixin, TembaModel, DependencyMixin):
         definition[Flow.DEFINITION_EXPIRE_AFTER_MINUTES] = self.expires_after_minutes
 
         # inspect the flow (with optional validation)
-        flow_info = mailroom.get_client().flow_inspect(self.org.id, definition)
+        flow_info = mailroom.get_client().flow_inspect(self.org, definition)
         dependencies = flow_info[Flow.INSPECT_DEPENDENCIES]
         issues = flow_info[Flow.INSPECT_ISSUES]
 
@@ -868,7 +856,7 @@ class Flow(LegacyUUIDMixin, TembaModel, DependencyMixin):
         dep_objs = {
             "channel": self.org.channels.filter(is_active=True, uuid__in=identifiers["channel"]),
             "classifier": self.org.classifiers.filter(is_active=True, uuid__in=identifiers["classifier"]),
-            "field": ContactField.user_fields.filter(org=self.org, is_active=True, key__in=identifiers["field"]),
+            "field": self.org.fields.filter(is_active=True, is_proxy=False, key__in=identifiers["field"]),
             "flow": self.org.flows.filter(is_active=True, uuid__in=identifiers["flow"]),
             "global": self.org.globals.filter(is_active=True, key__in=identifiers["global"]),
             "group": ContactGroup.get_groups(self.org).filter(uuid__in=identifiers["group"]),
@@ -911,7 +899,7 @@ class Flow(LegacyUUIDMixin, TembaModel, DependencyMixin):
             event.release(user)
 
         # release any triggers that depend on this flow
-        for trigger in self.triggers.all():
+        for trigger in self.triggers.filter(is_active=True):
             trigger.release(user)
 
         self.channel_dependencies.clear()
@@ -928,31 +916,6 @@ class Flow(LegacyUUIDMixin, TembaModel, DependencyMixin):
         # queue mailroom to interrupt sessions where contact is currently in this flow
         if interrupt_sessions:
             mailroom.queue_interrupt(self.org, flow=self)
-
-    def delete_runs(self) -> int:
-        """
-        Deletes any runs and sessions associated with this flow. Called as part of org deletion. Returns number of runs
-        deleted.
-        """
-
-        assert not self.is_active, "can't delete runs for flow which hasn't been released"
-
-        num_deleted = 0
-
-        while True:
-            batch = list(self.runs.only("id", "session_id")[:1000])
-            if not batch:
-                break
-
-            # delete the runs (won't call FlowRun.delete() so won't create mailroom interrupt tasks)
-            FlowRun.objects.filter(id__in=[r.id for r in batch]).delete()
-            num_deleted += len(batch)
-
-            # delete the sessions
-            session_ids = {r.session_id for r in batch}
-            FlowSession.objects.filter(id__in=session_ids).delete()
-
-        return num_deleted
 
     def delete(self):
         """
@@ -1056,8 +1019,8 @@ class FlowSession(models.Model):
 
         super().delete()
 
-    def __str__(self):  # pragma: no cover
-        return str(self.contact)
+    def __repr__(self):  # pragma: no cover
+        return f"<FlowSession: id={self.id} contact={self.contact.id}>"
 
     class Meta:
         indexes = [
@@ -1131,23 +1094,6 @@ class FlowRun(models.Model):
         (EXIT_TYPE_FAILED, "Failed"),
     )
 
-    RESULT_NAME = "name"
-    RESULT_NODE_UUID = "node_uuid"
-    RESULT_CATEGORY = "category"
-    RESULT_CATEGORY_LOCALIZED = "category_localized"
-    RESULT_VALUE = "value"
-    RESULT_INPUT = "input"
-    RESULT_CREATED_ON = "created_on"
-
-    PATH_STEP_UUID = "uuid"
-    PATH_NODE_UUID = "node_uuid"
-    PATH_ARRIVED_ON = "arrived_on"
-    PATH_EXIT_UUID = "exit_uuid"
-
-    EVENT_TYPE = "type"
-    EVENT_STEP_UUID = "step_uuid"
-    EVENT_CREATED_ON = "created_on"
-
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(unique=True, default=uuid4)
     org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="runs", db_index=False)
@@ -1171,9 +1117,6 @@ class FlowRun(models.Model):
     # flow start which started the session this run belongs to
     start = models.ForeignKey("flows.FlowStart", on_delete=models.PROTECT, null=True, related_name="runs")
 
-    # if this run is part of a Surveyor session, the user that submitted it
-    submitted_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, db_index=False)
-
     # results collected in this run keyed by snakified result name
     results = JSONAsTextField(null=True, default=dict)
 
@@ -1190,16 +1133,16 @@ class FlowRun(models.Model):
         from temba.api.v2.views import FlowRunReadSerializer
 
         def convert_step(step):
-            return {"node": step[FlowRun.PATH_NODE_UUID], "time": step[FlowRun.PATH_ARRIVED_ON]}
+            return {"node": step["node_uuid"], "time": step["arrived_on"]}
 
         def convert_result(result):
             return {
-                "name": result.get(FlowRun.RESULT_NAME),
-                "node": result.get(FlowRun.RESULT_NODE_UUID),
-                "time": result[FlowRun.RESULT_CREATED_ON],
-                "input": result.get(FlowRun.RESULT_INPUT),
-                "value": result[FlowRun.RESULT_VALUE],
-                "category": result.get(FlowRun.RESULT_CATEGORY),
+                "name": result.get("name"),
+                "node": result.get("node_uuid"),
+                "time": result["created_on"],
+                "input": result.get("input"),
+                "value": result["value"],
+                "category": result.get("category"),
             }
 
         return {
@@ -1214,7 +1157,6 @@ class FlowRun(models.Model):
             "modified_on": self.modified_on.isoformat(),
             "exited_on": self.exited_on.isoformat() if self.exited_on else None,
             "exit_type": FlowRunReadSerializer.EXIT_TYPES.get(self.status),
-            "submitted_by": self.submitted_by.username if self.submitted_by else None,
         }
 
     def delete(self, interrupt: bool = True):
@@ -1230,8 +1172,8 @@ class FlowRun(models.Model):
 
             super().delete()
 
-    def __str__(self):  # pragma: no cover
-        return f"FlowRun[uuid={self.uuid}, flow={self.flow.uuid}]"
+    def __repr__(self):  # pragma: no cover
+        return f"<FlowRun: id={self.id} flow={self.flow.name}>"
 
     class Meta:
         indexes = [
@@ -1612,44 +1554,52 @@ class FlowRunStatusCount(SquashableModel):
         ]
 
 
-class ExportFlowResultsTask(BaseItemWithContactExport):
+class ResultsExport(ExportType):
     """
-    Container for managing our export requests
+    Export of flow results
     """
 
-    analytics_key = "flowresult_export"
-    notification_export_type = "results"
-
-    RESPONDED_ONLY = "responded_only"
-    EXTRA_URNS = "extra_urns"
-
-    flows = models.ManyToManyField(Flow, related_name="exports", help_text=_("The flows to export"))
-
-    # TODO backfill, for now overridden from base class to make nullable
-    start_date = models.DateField(null=True)
-    end_date = models.DateField(null=True)
-
-    config = JSONAsTextField(null=True, default=dict, help_text=_("Any configuration options for this flow export"))
+    slug = "results"
+    name = _("Flow Results")
+    download_prefix = "flow_results"
+    download_template = "flows/export_download.html"
 
     @classmethod
-    def create(cls, org, user, start_date, end_date, flows, with_fields, with_groups, responded_only, extra_urns):
-        config = {ExportFlowResultsTask.RESPONDED_ONLY: responded_only, ExportFlowResultsTask.EXTRA_URNS: extra_urns}
-
-        export = cls.objects.create(
-            org=org, created_by=user, start_date=start_date, end_date=end_date, modified_by=user, config=config
+    def create(
+        cls,
+        org,
+        user,
+        start_date,
+        end_date,
+        flows=[],
+        with_fields=[],
+        with_groups=[],
+        responded_only=True,
+        extra_urns=[],
+    ):
+        export = Export.objects.create(
+            org=org,
+            export_type=cls.slug,
+            start_date=start_date,
+            end_date=end_date,
+            config={
+                "flow_ids": [f.id for f in flows],
+                "with_fields": [f.id for f in with_fields],
+                "with_groups": [g.id for g in with_groups],
+                "responded_only": responded_only,
+                "extra_urns": extra_urns,
+            },
+            created_by=user,
         )
-        export.flows.add(*flows)
-        export.with_fields.add(*with_fields)
-        export.with_groups.add(*with_groups)
         return export
 
-    def _get_runs_columns(self, extra_urn_columns, result_fields, show_submitted_by=False):
-        columns = []
+    def get_flows(self, export):
+        flow_ids = export.config.get("flow_ids")
 
-        if show_submitted_by:
-            columns.append("Submitted By")
+        return export.org.flows.filter(id__in=flow_ids, is_active=True)
 
-        columns += self._get_contact_headers()
+    def get_runs_columns(self, export, extra_urn_columns, result_fields):
+        columns = export.get_contact_headers()
 
         for extra_urn in extra_urn_columns:
             columns.append(extra_urn["label"])
@@ -1667,23 +1617,13 @@ class ExportFlowResultsTask(BaseItemWithContactExport):
 
         return columns
 
-    def _add_runs_sheet(self, book, columns):
-        name = "Runs (%d)" % (book.num_runs_sheets + 1) if book.num_runs_sheets > 0 else "Runs"
-        sheet = book.add_sheet(name, index=book.num_runs_sheets)
-        book.num_runs_sheets += 1
+    def write(self, export) -> tuple:
+        flows = self.get_flows(export)
+        start_date, end_date = export.get_date_range()
+        responded_only = export.config.get("responded_only", True)
+        extra_urns = export.config.get("extra_urns", [])
 
-        self.append_row(sheet, columns)
-        return sheet
-
-    def write_export(self):
-        config = self.config
-        responded_only = config.get(ExportFlowResultsTask.RESPONDED_ONLY, True)
-        extra_urns = config.get(ExportFlowResultsTask.EXTRA_URNS, [])
-
-        # get all result saving nodes across all flows being exported
-        show_submitted_by = False
         result_fields = []
-        flows = list(self.flows.filter(is_active=True))
         for flow in flows:
             for result_field in flow.metadata["results"]:
                 if not result_field["name"].startswith("_"):
@@ -1692,47 +1632,30 @@ class ExportFlowResultsTask(BaseItemWithContactExport):
                     result_field["flow_name"] = flow.name
                     result_fields.append(result_field)
 
-            if flow.flow_type == Flow.TYPE_SURVEY:
-                show_submitted_by = True
-
         extra_urn_columns = []
-        if not self.org.is_anon:
+        if not export.org.is_anon:
             for extra_urn in extra_urns:
                 label = f"URN:{extra_urn.capitalize()}"
                 extra_urn_columns.append(dict(label=label, scheme=extra_urn))
 
-        runs_columns = self._get_runs_columns(extra_urn_columns, result_fields, show_submitted_by=show_submitted_by)
+        runs_columns = self.get_runs_columns(export, extra_urn_columns, result_fields)
 
-        book = XLSXBook()
-        book.num_runs_sheets = 0
-        book.num_msgs_sheets = 0
+        # create our exporter
+        exporter = MultiSheetExporter("Runs", runs_columns, export.org.timezone)
+        num_records = 0
 
-        # the current sheets
-        book.current_runs_sheet = self._add_runs_sheet(book, runs_columns)
-        book.current_msgs_sheet = None
+        for batch in self._get_run_batches(export, start_date, end_date, flows, responded_only):
+            self._write_runs(export, exporter, batch, extra_urn_columns, result_fields)
 
-        start_date, end_date = self._get_date_range()
+            num_records += len(batch)
 
-        for batch in self._get_run_batches(start_date, end_date, flows, responded_only):
-            self._write_runs(
-                book,
-                batch,
-                extra_urn_columns,
-                show_submitted_by,
-                runs_columns,
-                result_fields,
-            )
+            export.modified_on = timezone.now()
+            export.save(update_fields=("modified_on",))
 
-            self.modified_on = timezone.now()
-            self.save(update_fields=("modified_on",))
+        return *exporter.save_file(), num_records
 
-        temp = NamedTemporaryFile(delete=True)
-        book.finalize(to_file=temp)
-        temp.flush()
-        return temp, "xlsx"
-
-    def _get_run_batches(self, start_date, end_date, flows, responded_only: bool):
-        logger.info(f"Results export #{self.id} for org #{self.org.id}: fetching runs from archives to export...")
+    def _get_run_batches(self, export, start_date, end_date, flows, responded_only: bool):
+        logger.info(f"Results export #{export.id} for org #{export.org.id}: fetching runs from archives to export...")
 
         # firstly get runs from archives
         from temba.archives.models import Archive
@@ -1748,7 +1671,7 @@ class ExportFlowResultsTask(BaseItemWithContactExport):
         if responded_only:
             where["responded"] = True
         records = Archive.iter_all_records(
-            self.org, Archive.TYPE_FLOWRUN, after=max(earliest_created_on, start_date), before=end_date, where=where
+            export.org, Archive.TYPE_FLOWRUN, after=max(earliest_created_on, start_date), before=end_date, where=where
         )
         seen = set()
 
@@ -1770,7 +1693,7 @@ class ExportFlowResultsTask(BaseItemWithContactExport):
         run_ids = array(str("l"), runs.values_list("id", flat=True))
 
         logger.info(
-            f"Results export #{self.id} for org #{self.org.id}: found {len(run_ids)} runs in database to export"
+            f"Results export #{export.id} for org #{export.org.id}: found {len(run_ids)} runs in database to export"
         )
 
         for id_batch in chunk_list(run_ids, 1000):
@@ -1787,22 +1710,14 @@ class ExportFlowResultsTask(BaseItemWithContactExport):
             # convert this batch of runs to same format as records in our archives
             yield [run.as_archive_json() for run in run_batch if run.id not in seen]
 
-    def _write_runs(
-        self,
-        book,
-        runs,
-        extra_urn_columns,
-        show_submitted_by,
-        runs_columns,
-        result_fields,
-    ):
+    def _write_runs(self, export, exporter, runs, extra_urn_columns, result_fields):
         """
         Writes a batch of run JSON blobs to the export
         """
         # get all the contacts referenced in this batch
         contact_uuids = {r["contact"]["uuid"] for r in runs}
         contacts = (
-            Contact.objects.filter(org=self.org, uuid__in=contact_uuids)
+            Contact.objects.filter(org=export.org, uuid__in=contact_uuids)
             .select_related("org")
             .prefetch_related("groups")
             .using("readonly")
@@ -1822,10 +1737,12 @@ class ExportFlowResultsTask(BaseItemWithContactExport):
                 results_by_key = {key: result for key, result in run_values.items()}
 
             # generate contact info columns
-            contact_values = self._get_contact_columns(contact)
+            contact_values = export.get_contact_columns(contact)
 
             for extra_urn_column in extra_urn_columns:
-                urn_display = contact.get_urn_display(org=self.org, formatted=False, scheme=extra_urn_column["scheme"])
+                urn_display = contact.get_urn_display(
+                    org=export.org, formatted=False, scheme=extra_urn_column["scheme"]
+                )
                 contact_values.append(urn_display)
 
             # generate result columns for each ruleset
@@ -1840,16 +1757,8 @@ class ExportFlowResultsTask(BaseItemWithContactExport):
                 node_input = node_result.get("input", "")
                 result_values += [node_category, node_value, node_input]
 
-            if book.current_runs_sheet.num_rows >= self.MAX_EXCEL_ROWS:  # pragma: no cover
-                book.current_runs_sheet = self._add_runs_sheet(book, runs_columns)
-
             # build the whole row
-            runs_sheet_row = []
-
-            if show_submitted_by:
-                runs_sheet_row.append(run.get("submitted_by") or "")
-
-            runs_sheet_row += contact_values
+            runs_sheet_row = contact_values
             runs_sheet_row += [
                 iso8601.parse_date(run["created_on"]),
                 iso8601.parse_date(run["modified_on"]),
@@ -1858,16 +1767,15 @@ class ExportFlowResultsTask(BaseItemWithContactExport):
             ]
             runs_sheet_row += result_values
 
-            self.append_row(book.current_runs_sheet, runs_sheet_row)
+            exporter.write_row(runs_sheet_row)
 
-
-@register_asset_store
-class ResultsExportAssetStore(BaseExportAssetStore):
-    model = ExportFlowResultsTask
-    key = "results_export"
-    directory = "results_exports"
-    permission = "flows.flow_export_results"
-    extensions = ("xlsx",)
+    def get_download_context(self, export) -> dict:
+        flows = self.get_flows(export)
+        responded_only = export.config.get("responded_only", True)
+        return {
+            "responded_only": responded_only,
+            "flows": [dict(uuid=f.uuid, name=f.name) for f in flows],
+        }
 
 
 class FlowStart(models.Model):
@@ -1976,7 +1884,7 @@ class FlowStart(models.Model):
         Requests a preview of the recipients of a start created with the given inclusions/exclusions, returning a tuple
         of the canonical query and the total count of contacts.
         """
-        preview = search.preview_start(flow.org, flow, include=include, exclude=exclude)
+        preview = mailroom.get_client().flow_start_preview(flow.org, flow, include=include, exclude=exclude)
 
         return preview.query, preview.total
 

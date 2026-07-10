@@ -16,12 +16,14 @@
     <div class="inline-flex mr-8">
       {% if object.flow %}
         <div class="font-normal mr-2">{% trans "Flow" %}</div>
-        <div onclick="goto(event, this)" href="{% url "flows.flow_editor" object.flow.uuid %}" class="linked">{{ object.flow.name }}</div>
+        <div>
+          <a href="{% url "flows.flow_editor" object.flow.uuid %}" class="linked">{{ object.flow.name }}</a>
+        </div>
       {% endif %}
     </div>
     <div class="inline-flex mr-8">
       <div class="font-normal mr-2">{% trans "Date" %}</div>
-      {% format_datetime object.created_on seconds=True %}
+      {{ object.created_on|datetime }}
     </div>
   </div>
   {% include "includes/http_log.html" with log=object.get_display %}

@@ -1,5 +1,5 @@
 <!DOCTYPE HTML>
-{% load humanize i18n smartmin sms compress %}
+{% load humanize i18n smartmin sms compress static %}
 
 {% block html-tag %}
   <html lang="{{ LANGUAGE_CODE }}">
@@ -15,26 +15,41 @@
       {% endblock head-title %}
     </title>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
     <meta name="description"
           content="{% block page-description %}{{ branding.name }} lets you visually build interactive SMS applications and launch them anywhere in the world.{% endblock page-description %}">
     <meta name="author" content="Nyaruka Ltd">
     <meta http-equiv="X-UA-Compatible" content="IE=10">
+    {% block extra-meta %}
+    {% endblock extra-meta %}
     <script src="{% url 'django.views.i18n.javascript_catalog' %}"></script>
     {% compress js %}
-      <script src="{{ STATIC_URL }}jquery/dist/jquery.min.js"></script>
-      <script src="{{ STATIC_URL }}js/libs/jquery.url.js"></script>
       <script src="{{ STATIC_URL }}rest_framework/js/prettify-min.js"></script>
       <script src="{{ STATIC_URL }}highcharts/highstock.js?v=9.3.0"></script>
       <script src="{{ STATIC_URL }}highcharts/modules/drilldown.js"></script>
       <script src="{{ STATIC_URL }}qrious/dist/qrious.min.js"></script>
       <script src="{{ STATIC_URL }}rest_framework/js/prettify-min.js"></script>
+      <script src="{{ STATIC_URL }}croppie/croppie.js"></script>
     {% endcompress %}
-    {% if not debug and not testing %}<script src="{{ STATIC_URL }}lib/raven.min.js"></script>{% endif %}
     {% compress js %}
       <script src="{{ STATIC_URL }}js/utils.js"></script>
     {% endcompress %}
     <script type="text/javascript">
+      function isMobile() {
+        return window.innerWidth < 600;
+      }
+
+      function updateFrameForMobile() {
+        var body = document.querySelector("body");
+        if (body) {
+          if (isMobile()) {
+            body.classList.add("mobile");
+          } else {
+            body.classList.remove("mobile");
+          }
+        }
+      }
+
       var static_url = "{{ STATIC_URL }}";
       var org_id = {% if active_org %}{{ active_org.id }}{% else %}null{% endif %};
       var tembaVersion = "{{ temba_version }}";
@@ -52,11 +67,49 @@
         }
       }
 
+      function handleMenuListSelection(evt) {
+        document.activeElement.blur()
+        spaGet(evt.detail.selected.target_url);
+      }
+
       // set our initial title
       document.addEventListener("DOMContentLoaded", function(event) {
         const titleText = document.querySelector("#title-text");
         if (titleText) {
           document.title = titleText.innerText;
+        }
+
+        updateFrameForMobile();
+
+        if (isMobile()) {
+          var menu = document.querySelector("temba-menu");
+          if (menu) {
+            menu.collapsed = true;
+          }
+        }
+
+        window.addEventListener('resize', function(event) {
+          updateFrameForMobile();
+        });
+      });
+
+      document.addEventListener("temba-workspace-choosen", function(event) {
+        const item = event.detail;
+        handleWorkspaceChanged(item.id);
+      });
+
+      document.addEventListener("temba-workspace-settings", function(event) {
+        spaGet('/org/workspace');
+        var menu = document.querySelector('temba-menu');
+        if (menu) {
+          menu.click();
+        }
+      });
+
+      document.addEventListener('temba-open-tab', function(event) {
+        const item = event.detail;
+        if (item.href) {
+          window.open(item.href, '_blank');
         }
       });
     </script>
@@ -69,9 +122,6 @@
     {% endblock scripts %}
     {% for script in flow_editor_scripts %}<script type="text/javascript" src="{{script}}"></script>{% endfor %}
     {% for style in flow_editor_styles %}<link rel="stylesheet" href="{{ style }}" type="text/css">{% endfor %}
-    {% if not COMPONENTS_DEV_MODE %}
-      {% include "components-head.html" %}
-    {% endif %}
     {% block favico %}
       <link type="image/ico" rel="shortcut icon" href="{{ STATIC_URL }}images/favicon.ico">
     {% endblock favico %}
@@ -79,13 +129,10 @@
       <link rel="stylesheet"
             href="https://fonts.googleapis.com/css?family=Roboto+Mono:300|Roboto:200,300,400,500">
       {% compress css %}
-        <link rel="stylesheet" href="{{ STATIC_URL }}less/style.less" type="text/less">
-        <link rel="stylesheet" href="{{ STATIC_URL }}css/tailwind.css" type="text/css">
-        <link rel="stylesheet" href="{{ STATIC_URL }}less/refresh.less" type="text/less">
-      {% endcompress %}
-      {% compress css %}
+        <link type="text/css" rel="stylesheet" href="{{ STATIC_URL }}css/tailwind.css">
         <link type="text/css" rel="stylesheet" href="{{ STATIC_URL }}css/temba-components.css">
         <link type="text/css" rel="stylesheet" href="{{ STATIC_URL }}css/frame.css">
+        <link type="text/css" rel="stylesheet" href="{{ STATIC_URL }}css/mobile.css">
       {% endcompress %}
     {% endblock styles %}
     {% include "includes/frame_top.html" %}
@@ -97,7 +144,9 @@
           import '/out-tsc/temba-modules.js';
         </script>
       {% else %}
-        {% include "components-body.html" %}
+        {% compress js %}
+          <script src="{% static '@nyaruka/temba-components/dist/temba-components.js' %}"></script>
+        {% endcompress %}
       {% endif %}
       {% if user_org %}
         <temba-store {% if org_perms.globals.global_list %}globals="/api/v2/globals.json"{% endif %}
@@ -113,13 +162,6 @@
         </temba-store>
       {% endif %}
       <div class="flex flex-col h-full">
-        {% if messages %}
-          {% block messages %}
-            {% if messages %}
-              {% for msg in messages %}<div class="alert alert-{{ message.tags }}">{{ msg }}</div>{% endfor %}
-            {% endif %}
-          {% endblock messages %}
-        {% endif %}
         {% block post-header %}
         {% endblock post-header %}
         <!-- Content -->
@@ -131,29 +173,29 @@
           </temba-modax>
           <temba-dialog id="shared-dialog">
           </temba-dialog>
+          <temba-toast duration="5000" error-sticky>
+          </temba-toast>
           <div class="ajax-scripts"></div>
           <div class="flex-col">
-            <div style="height:100vh;overflow:hidden" class="flex widget-container">
-              {% if request.user.is_staff %}
-                {% if user_org and user_org not in user_orgs %}
-                  <div style="z-index:999999;
-                              right:0;
-                              bottom:0"
-                       class="servicing absolute bg-secondary my-2 mr-20 rounded shadow-xl">
-                    <a href="{% url 'orgs.org_service' %}"
-                       style="text-decoration:none"
-                       onclick="handlePosterizeClick(event)"
-                       class="relative">
-                      <div style="opacity:1;padding:0em 0.5em;" class="flex items-center text-white text-lg hover rounded">
-                        <div class="flex-grow"></div>
-                        <temba-icon style="color:#fff" name="service">
-                        </temba-icon>
-                        <div class="ml-2">{{ user_org.name }}</div>
-                        <div class="flex-grow"></div>
-                      </div>
-                    </a>
-                  </div>
-                {% endif %}
+            <div style="height:100vh;width:100%;overflow:hidden" class="flex widget-container">
+              {% if request.user.is_staff and request.session.servicing %}
+                <div style="z-index:999999;
+                            right:0;
+                            bottom:0"
+                     class="servicing absolute bg-secondary my-2 mr-20 rounded shadow-xl">
+                  <a href="{% url 'orgs.org_service' %}"
+                     style="text-decoration:none"
+                     onclick="handlePosterizeClick(event)"
+                     class="relative">
+                    <div style="opacity:1;padding:0em 0.5em;" class="flex items-center text-white text-lg hover rounded">
+                      <div class="flex-grow"></div>
+                      <temba-icon style="color:#fff" name="service">
+                      </temba-icon>
+                      <div class="ml-2">{{ user_org.name }}</div>
+                      <div class="flex-grow"></div>
+                    </div>
+                  </a>
+                </div>
               {% endif %}
               <div class="folders">
                 <temba-menu style="height:100%"
@@ -161,6 +203,7 @@
                             onchange="handleMenuChanged(event)"
                             -temba-button-clicked="handleMenuClicked(event)"
                             -temba-ready="handleMenuReady"
+                            -temba-selection="handleMenuListSelection"
                             class="{% if servicing %}{% endif %}"
                             id="nav">
                   {% block menu-header %}
@@ -180,6 +223,7 @@
                   {% block extra-script %}
                   {% endblock extra-script %}
                   {% block page-header %}
+                    {% csrf_token %}
                     <div class="mb-4">
                       <div class="no-menu flex items-center">
                         <div class="text-container text-2xl text-gray-700">
@@ -210,13 +254,6 @@
                     {% if user_org.is_suspended %}
                       {% include "org_suspended_include.html" %}
                     {% endif %}
-                    {% if messages %}
-                      {% for msg in messages %}
-                        <temba-alert class="mb-3">
-                          {{ msg }}
-                        </temba-alert>
-                      {% endfor %}
-                    {% endif %}
                   {% endblock alert-messages %}
                   {% block content %}
                   {% endblock content %}
@@ -246,9 +283,6 @@
       </temba-dialog>
       <!-- media associated with any form we are displaying -->
       {% if form %}{{ form.media }}{% endif %}
-      <form id="posterizer" method="post">
-        {% csrf_token %}
-      </form>
     </body>
   {% endblock body %}
 </html>

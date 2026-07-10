@@ -65,22 +65,23 @@
 
     .spa-container,
     .spa-content {
-      overflow-x: clip !important;
+      overflow-x: auto !important;
     }
   </style>
 {% endblock extra-style %}
 {% block content %}
-  <div class="flex">
-    <div class="flex-grow self-end items-end">
-      <div class="flex flex-col">
-        <form method="get" action="{{ request.path }}" id="search-form">
-          <temba-textinput placeholder="{% trans "Search" %}" name="search" value="{{ search }}" class="w-full">
-          </temba-textinput>
-          <input type="submit" class="hide">
-        </form>
-      </div>
-    </div>
+  <div>
+    <form method="get" action="{{ request.path }}" id="search-form">
+      <temba-textinput placeholder="{% trans "Search" %}" name="search" value="{{ search }}" class="w-full">
+      </temba-textinput>
+      <input type="submit" class="hide">
+    </form>
   </div>
+  {% if search_error %}
+    <div class="alert alert-error mt-4">
+      {{ search_error }}
+    </div>
+  {% endif %}
   {% if org_perms.contacts.contact_delete %}
     <temba-dialog header="{{ _("Delete Selected Contacts") |escapejs }}"
                   primaryButtonName="{{ _("Delete") |escapejs }}"
@@ -249,18 +250,14 @@
               <td class="value-received field_received">
                 <div class="whitespace-nowrap">
                   {% if object.last_seen_on %}
-                    <temba-date value="{{ object.last_seen_on.isoformat }}" display="date">
-                    </temba-date>
+                    {{ object.last_seen_on|timedate }}
                   {% else %}
                     {{ "--" }}
                   {% endif %}
                 </div>
               </td>
               <td class="value-received field_received">
-                <div class="whitespace-nowrap">
-                  <temba-date value="{{ object.created_on.isoformat }}" display="date">
-                  </temba-date>
-                </div>
+                <div class="whitespace-nowrap">{{ object.created_on|timedate }}</div>
               </td>
               <!-- This is needed for action buttons -->
               <td class="hide">
@@ -362,76 +359,9 @@
       } else {
         sendModal.setAttribute("endpoint", sendEndpoint);
       }
-
       sendModal.open = true;
     }
 
-    // keeps track if we are on a link or not
-    var onLink = false;
-
-    {% if org_perms.contacts.contact_update %}
-
-    function addContactToGroup(groupId) {
-      window.lastChecked = getCheckedIds();
-      var groupedIds = getLabeledIds(groupId);
-
-      var addGroup = true;
-
-      // find the intersection of contactIds and groupedIds
-      var contactIdsWithGroup = intersect(window.lastChecked, groupedIds);
-
-      // they all belong to the group, so we are actually removing these contacts from the group
-      if (contactIdsWithGroup.length == window.lastChecked.length) {
-        addGroup = false;
-      }
-      jQuery.ajaxSettings.traditional = true;
-      fetchPJAXContent(document.location.href, "#pjax", {
-        postData: {
-          objects: window.lastChecked,
-          label: groupId,
-          add: addGroup,
-          action: 'label',
-          pjax: 'true'
-        },
-        forceReload: true,
-        onSuccess: function() {
-          recheckIds();
-          wireTableListeners()
-        }
-      });
-    }
-    {% endif %}
-
-    {% if org_perms.contacts.contact_block %}
-    $(".lp-frame").on('click', ".object-btn-unblock", function() {
-      runActionOnObjectRows("unblock", wireTableListeners);
-    });
-    $(".lp-frame").on('click', ".object-btn-block", function() {
-      runActionOnObjectRows("block", wireTableListeners);
-    });
-    {% endif %}
-
-    {% if org_perms.contacts.contact_unstop %}
-    $(".lp-frame").on('click', ".object-btn-unstop", function() {
-      runActionOnObjectRows("unstop", wireTableListeners);
-    });
-    {% endif %}
-
-    function handleCreateGroupModalLoaded(event) {
-      window.lastChecked = getCheckedIds();
-      var body = event.detail.body;
-      body.querySelector("#id_preselected_contacts").value = window.lastChecked.join();
-    }
-
-    function handleCreateGroupModalSubmitted(event) {
-      refresh(function() {
-        recheckIds();
-      }, true);
-    }
-
-    function handleAddGroupClicked() {
-      document.getElementById("create-group-modal").open = true;
-    }
 
     {% if org_perms.contacts.contact_delete %}
 
@@ -447,22 +377,14 @@
 
     function deleteAllArchivedContacts(event) {
       var deleteAllConfirmation = document.querySelector('#delete-all-confirmation');
-
       if (event.detail.button.attributes.destructive) {
-        jQuery.ajaxSettings.traditional = true;
         var url = "{% url 'contacts.contact_archived' %}";
-
-        var store = document.querySelector("temba-store");
-        store.postForm(url, {
-          action: "delete",
-          all: 'true',
-          pjax: true
-        }).then(function(response) {
-          gotoURL(url);
-        }).catch(function(error) {
-          console.log(error);
+        const formData = new FormData();
+        formData.append("action", "delete");
+        formData.append("all", "true");
+        spaPost(url, {
+          postData: formData
         });
-
       }
       deleteAllConfirmation.classList.add("hide");
       deleteAllConfirmation.open = false;

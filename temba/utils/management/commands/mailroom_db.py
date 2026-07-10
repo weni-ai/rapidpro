@@ -47,6 +47,7 @@ RESET_SEQUENCES = (
 )
 
 PG_CONTAINER_NAME = "textit-postgres-1"
+MAILROOM_PORT = 8092
 MAILROOM_DB_NAME = "mailroom_test"
 MAILROOM_DB_USER = "mailroom_test"
 DUMP_FILE = "mailroom_test.dump"
@@ -56,9 +57,9 @@ class Command(BaseCommand):
     help = "Generates a database suitable for mailroom testing"
 
     def handle(self, *args, **kwargs):
-        self.generate_and_dump(SPECS_FILE, LOCATIONS_FILE, MAILROOM_DB_NAME, MAILROOM_DB_USER, DUMP_FILE)
+        self.generate_and_dump(SPECS_FILE, LOCATIONS_FILE, MAILROOM_PORT, MAILROOM_DB_NAME, MAILROOM_DB_USER, DUMP_FILE)
 
-    def generate_and_dump(self, specs_file, locs_file, db_name, db_user, dump_file):
+    def generate_and_dump(self, specs_file, locs_file, mr_port: int, db_name, db_user, dump_file):
         with open(specs_file, "r") as orgs_file:
             orgs_spec = json.load(orgs_file)
 
@@ -74,7 +75,7 @@ class Command(BaseCommand):
         # always use test db as our db and override mailroom location
         settings.DATABASES["default"]["NAME"] = db_name
         settings.DATABASES["default"]["USER"] = db_user
-        settings.MAILROOM_URL = "http://host.docker.internal:8090"
+        settings.MAILROOM_URL = f"http://host.docker.internal:{mr_port}"
 
         self._log("Running migrations...\n")
 
@@ -91,7 +92,7 @@ class Command(BaseCommand):
         superuser = User.objects.create_superuser("root", "root@nyaruka.com", USER_PASSWORD)
         self._log(self.style.SUCCESS("OK") + "\n")
 
-        mr_cmd = f'mailroom -db="postgres://{db_user}:temba@localhost/{db_name}?sslmode=disable" -uuid-seed=123'
+        mr_cmd = f'mailroom --port={mr_port} -db="postgres://{db_user}:temba@localhost/{db_name}?sslmode=disable" -uuid-seed=123'
         input(f"\nPlease start mailroom:\n   % ./{mr_cmd}\n\nPress enter when ready.\n")
 
         country = self.load_locations(locs_file)
@@ -392,22 +393,23 @@ class Command(BaseCommand):
         self._log(f"Creating {len(spec['templates'])} templates... ")
 
         for t in spec["templates"]:
-            Template.objects.create(org=org, uuid=t["uuid"], name=t["name"])
+            template = Template.objects.create(
+                org=org, uuid=t["uuid"], name=t["name"], created_by=org.created_by, modified_by=org.modified_by
+            )
             for tt in t["translations"]:
                 channel = Channel.objects.get(uuid=tt["channel_uuid"])
-                TemplateTranslation.get_or_create(
-                    channel,
-                    t["name"],
+                TemplateTranslation.objects.create(
+                    template=template,
+                    channel=channel,
                     locale=tt["locale"],
-                    content=tt["content"],
-                    variable_count=tt["variable_count"],
                     status=tt["status"],
                     external_id=tt["external_id"],
                     external_locale=tt["external_locale"],
                     namespace=tt["namespace"],
                     components=tt["components"],
-                    params=tt["params"],
+                    variables=tt["variables"],
                 )
+            template.update_base()
 
         self._log(self.style.SUCCESS("OK") + "\n")
 
@@ -420,7 +422,16 @@ class Command(BaseCommand):
             values = {fields_by_key[key]: val for key, val in c.get("fields", {}).items()}
             groups = list(ContactGroup.objects.filter(org=org, name__in=c.get("groups", [])))
 
-            contact = Contact.create(org, user, c["name"], language="", urns=c["urns"], fields=values, groups=groups)
+            contact = Contact.create(
+                org,
+                user,
+                name=c["name"],
+                language="",
+                status=Contact.STATUS_ACTIVE,
+                urns=c["urns"],
+                fields=values,
+                groups=groups,
+            )
             contact.uuid = c["uuid"]
             contact.created_on = c["created_on"]
             contact.save(update_fields=("uuid", "created_on"))
@@ -438,9 +449,21 @@ class Command(BaseCommand):
                 contacts = []
                 for i in range(size):
                     urn = f"tel:+250788{i:06}"
-                    contact = ContactURN.lookup(org, urn)
-                    if not contact:
-                        contact = Contact.create(org, user, name="", language="", urns=[urn], fields={}, groups=[])
+                    urn_obj = ContactURN.objects.filter(org=org, identity=urn).first()
+                    if urn_obj and urn_obj.contact:
+                        contact = urn_obj.contact
+                    else:
+                        contact = Contact.create(
+                            org,
+                            user,
+                            name="",
+                            language="",
+                            status=Contact.STATUS_ACTIVE,
+                            urns=[urn],
+                            fields={},
+                            groups=[],
+                        )
+
                     contacts.append(contact)
 
                 Contact.bulk_change_group(user, contacts, group, add=True)

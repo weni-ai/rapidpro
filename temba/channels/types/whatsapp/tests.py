@@ -7,8 +7,7 @@ from django.test import override_settings
 from django.urls import reverse
 
 from temba.request_logs.models import HTTPLog
-from temba.templates.models import TemplateTranslation
-from temba.tests import MockResponse, TembaTest
+from temba.tests import MockJsonResponse, MockResponse, TembaTest
 from temba.utils.views import TEMBA_MENU_SELECTION
 
 from ...models import Channel
@@ -41,7 +40,7 @@ class WhatsAppTypeTest(TembaTest):
         self.assertNotContains(response, claim_whatsapp_cloud_url)
 
         with patch("requests.get") as wa_cloud_get:
-            wa_cloud_get.return_value = MockResponse(400, {})
+            wa_cloud_get.return_value = MockJsonResponse(400, {})
             response = self.client.get(claim_whatsapp_cloud_url)
 
             self.assertEqual(response.status_code, 302)
@@ -52,7 +51,7 @@ class WhatsAppTypeTest(TembaTest):
 
         self.make_beta(self.admin)
         with patch("requests.get") as wa_cloud_get:
-            wa_cloud_get.return_value = MockResponse(400, {})
+            wa_cloud_get.return_value = MockJsonResponse(400, {})
             response = self.client.get(claim_whatsapp_cloud_url)
 
             self.assertEqual(response.status_code, 302)
@@ -63,54 +62,48 @@ class WhatsAppTypeTest(TembaTest):
 
         with patch("requests.get") as wa_cloud_get:
             wa_cloud_get.side_effect = [
-                MockResponse(400, {}),
+                MockJsonResponse(400, {}),
                 # missing permissions
-                MockResponse(
+                MockJsonResponse(
                     200,
-                    json.dumps({"data": {"scopes": []}}),
+                    {"data": {"scopes": []}},
                 ),
                 # success
-                MockResponse(
+                MockJsonResponse(
                     200,
-                    json.dumps(
-                        {
-                            "data": {
-                                "scopes": [
-                                    "business_management",
-                                    "whatsapp_business_management",
-                                    "whatsapp_business_messaging",
-                                ]
-                            }
+                    {
+                        "data": {
+                            "scopes": [
+                                "business_management",
+                                "whatsapp_business_management",
+                                "whatsapp_business_messaging",
+                            ]
                         }
-                    ),
+                    },
                 ),
-                MockResponse(
+                MockJsonResponse(
                     200,
-                    json.dumps(
-                        {
-                            "data": {
-                                "scopes": [
-                                    "business_management",
-                                    "whatsapp_business_management",
-                                    "whatsapp_business_messaging",
-                                ]
-                            }
+                    {
+                        "data": {
+                            "scopes": [
+                                "business_management",
+                                "whatsapp_business_management",
+                                "whatsapp_business_messaging",
+                            ]
                         }
-                    ),
+                    },
                 ),
-                MockResponse(
+                MockJsonResponse(
                     200,
-                    json.dumps(
-                        {
-                            "data": {
-                                "scopes": [
-                                    "business_management",
-                                    "whatsapp_business_management",
-                                    "whatsapp_business_messaging",
-                                ]
-                            }
+                    {
+                        "data": {
+                            "scopes": [
+                                "business_management",
+                                "whatsapp_business_management",
+                                "whatsapp_business_messaging",
+                            ]
                         }
-                    ),
+                    },
                 ),
             ]
             response = self.client.get(connect_whatsapp_cloud_url)
@@ -301,9 +294,9 @@ class WhatsAppTypeTest(TembaTest):
 
                 post_data = response.context["form"].initial
                 post_data["number"] = "1234"
-                post_data[
-                    "verified_name"
-                ] = "Long WABA name foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar"
+                post_data["verified_name"] = (
+                    "Long WABA name foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar foobar"
+                )
                 post_data["phone_number_id"] = "123123123"
                 post_data["waba_id"] = "111111111111111"
                 post_data["business_id"] = "2222222222222"
@@ -358,6 +351,8 @@ class WhatsAppTypeTest(TembaTest):
                 self.assertEqual("2222222222222", channel.config["wa_business_id"])
                 self.assertEqual("111111", channel.config["wa_pin"])
                 self.assertEqual("namespace-uuid", channel.config["wa_message_template_namespace"])
+                self.assertEqual("WAC", channel.type.code)
+                self.assertEqual("whatsapp", channel.template_type.slug)
 
                 response = self.client.get(reverse("channels.types.whatsapp.request_code", args=(channel.uuid,)))
                 self.assertEqual(200, response.status_code)
@@ -576,10 +571,7 @@ class WhatsAppTypeTest(TembaTest):
 
     @override_settings(WHATSAPP_ADMIN_SYSTEM_USER_TOKEN="WA_ADMIN_TOKEN")
     @patch("requests.get")
-    def test_get_api_templates(self, mock_get):
-        TemplateTranslation.objects.all().delete()
-        Channel.objects.all().delete()
-
+    def test_fetch_templates(self, mock_get):
         channel = self.create_channel(
             "WAC",
             "WABA name",
@@ -592,29 +584,39 @@ class WhatsAppTypeTest(TembaTest):
         mock_get.side_effect = [
             RequestException("Network is unreachable", response=MockResponse(100, "")),
             MockResponse(400, '{ "meta": { "success": false } }'),
-            MockResponse(200, '{"data": ["foo", "bar"]}'),
+            MockResponse(200, '{"data": ["foo", "bar"]}', headers={"Authorization": "Bearer WA_ADMIN_TOKEN"}),
             MockResponse(
                 200,
                 '{"data": ["foo"], "paging": {"cursors": {"after": "MjQZD"}, "next": "https://graph.facebook.com/v18.0/111111111111111/message_templates?after=MjQZD" } }',
+                headers={"Authorization": "Bearer WA_ADMIN_TOKEN"},
             ),
-            MockResponse(200, '{"data": ["bar"], "paging": {"cursors": {"after": "MjQZD"} } }'),
+            MockResponse(
+                200,
+                '{"data": ["bar"], "paging": {"cursors": {"after": "MjQZD"} } }',
+                headers={"Authorization": "Bearer WA_ADMIN_TOKEN"},
+            ),
         ]
 
-        # RequestException check HTTPLog
-        templates_data, no_error = WhatsAppType().get_api_templates(channel)
-        self.assertEqual(1, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED).count())
-        self.assertFalse(no_error)
-        self.assertEqual([], templates_data)
+        with self.assertRaises(RequestException):
+            channel.type.fetch_templates(channel)
 
-        # should be empty list with an error flag if fail with API
-        templates_data, no_error = WhatsAppType().get_api_templates(channel)
-        self.assertFalse(no_error)
-        self.assertEqual([], templates_data)
+        self.assertEqual(1, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, is_error=True).count())
 
-        # success no error and list
-        templates_data, no_error = WhatsAppType().get_api_templates(channel)
-        self.assertTrue(no_error)
-        self.assertEqual(["foo", "bar"], templates_data)
+        with self.assertRaises(RequestException):
+            channel.type.fetch_templates(channel)
+
+        self.assertEqual(2, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, is_error=True).count())
+
+        # check when no next page
+        templates = channel.type.fetch_templates(channel)
+        self.assertEqual(["foo", "bar"], templates)
+
+        self.assertEqual(2, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, is_error=True).count())
+        self.assertEqual(1, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, is_error=False).count())
+
+        # check admin token is redacted in HTTP logs
+        for log in HTTPLog.objects.all():
+            self.assertNotIn("WA_ADMIN_TOKEN", json.dumps(log.get_display()))
 
         mock_get.assert_called_with(
             "https://graph.facebook.com/v18.0/111111111111111/message_templates",
@@ -622,10 +624,9 @@ class WhatsAppTypeTest(TembaTest):
             headers={"Authorization": "Bearer WA_ADMIN_TOKEN"},
         )
 
-        # success no error and pagination
-        templates_data, no_error = WhatsAppType().get_api_templates(channel)
-        self.assertTrue(no_error)
-        self.assertEqual(["foo", "bar"], templates_data)
+        # check when templates across two pages
+        templates = channel.type.fetch_templates(channel)
+        self.assertEqual(["foo", "bar"], templates)
 
         mock_get.assert_has_calls(
             [

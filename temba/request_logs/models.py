@@ -119,7 +119,7 @@ class HTTPLog(models.Model):
 
     def _get_redact_secrets(self) -> tuple:
         if self.channel:
-            return self.channel.type.redact_values
+            return self.channel.type.get_redact_values(self.channel)
         return ()
 
     def _get_display_value(self, original):
@@ -146,4 +146,10 @@ class HTTPLog(models.Model):
             Index(fields=("classifier", "-created_on")),
             # for webhook log view
             Index(name="httplog_org_flows_only", fields=("org", "-created_on"), condition=Q(flow__isnull=False)),
+            # for webhook log view errors only
+            Index(
+                name="httplog_org_flows_only_error",
+                fields=("org", "-created_on"),
+                condition=Q(flow__isnull=False, is_error=True),
+            ),
         )

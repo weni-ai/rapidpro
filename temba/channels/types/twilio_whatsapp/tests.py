@@ -1,11 +1,15 @@
+import json
 from unittest.mock import patch
 
+from requests import RequestException
 from twilio.base.exceptions import TwilioRestException
 
 from django.urls import reverse
 
 from temba.channels.models import Channel
+from temba.request_logs.models import HTTPLog
 from temba.tests import TembaTest
+from temba.tests.requests import MockResponse
 from temba.tests.twilio import MockRequestValidator, MockTwilioClient
 
 from .type import TwilioWhatsappType
@@ -107,7 +111,9 @@ class TwilioWhatsappTypeTest(TembaTest):
 
             # claim it
             response = self.client.post(claim_twilio, dict(country="US", phone_number="12062345678"))
-            self.assertFormError(response, "form", "phone_number", "Only existing Twilio WhatsApp number are supported")
+            self.assertFormError(
+                response.context["form"], "phone_number", "Only existing Twilio WhatsApp number are supported"
+            )
 
         with patch("temba.tests.twilio.MockTwilioClient.MockPhoneNumbers.stream") as mock_numbers:
             mock_numbers.return_value = iter([MockTwilioClient.MockPhoneNumber("+12062345678")])
@@ -136,6 +142,8 @@ class TwilioWhatsappTypeTest(TembaTest):
         twilio_channel.role = Channel.ROLE_SEND + Channel.ROLE_RECEIVE + Channel.ROLE_ANSWER + Channel.ROLE_CALL
         twilio_channel.save()
         self.assertEqual("TWA", twilio_channel.channel_type)
+        self.assertEqual("TWA", twilio_channel.type.code)
+        self.assertEqual("twilio", twilio_channel.template_type.slug)
 
         self.client.post(reverse("channels.channel_delete", args=[twilio_channel.pk]))
         self.assertIsNotNone(self.org.channels.all().first())
@@ -163,7 +171,7 @@ class TwilioWhatsappTypeTest(TembaTest):
         self.login(self.admin)
         response = self.client.get(update_url)
         self.assertEqual(
-            ["name", "allow_international", "account_sid", "auth_token", "loc"],
+            ["name", "allow_international", "account_sid", "auth_token", "messaging_service_sid", "loc"],
             list(response.context["form"].fields.keys()),
         )
 
@@ -186,4 +194,63 @@ class TwilioWhatsappTypeTest(TembaTest):
             mock_check_credentials.return_value = False
 
             response = self.client.post(update_url, post_data)
-            self.assertFormError(response, "form", None, "Credentials don't appear to be valid.")
+            self.assertFormError(response.context["form"], None, "Credentials don't appear to be valid.")
+
+    @patch("requests.get")
+    def test_fetch_templates(self, mock_get):
+        config = {
+            Channel.CONFIG_ACCOUNT_SID: "TEST_SID",
+            Channel.CONFIG_AUTH_TOKEN: "TEST_TOKEN",
+        }
+        channel = self.org.channels.all().first()
+        channel.config = config
+        channel.channel_type = "TWA"
+        channel.save()
+
+        mock_get.side_effect = [
+            RequestException("Network is unreachable", response=MockResponse(100, "")),
+            MockResponse(400, '{ "meta": { "success": false } }'),
+            MockResponse(
+                200,
+                json.dumps(
+                    {
+                        "contents": [
+                            {"friendly_name": "call_to_action_template"},
+                            {"friendly_name": "media_template"},
+                        ],
+                        "meta": {"next_page_url": "https://content.twilio.com/v1/Content?PageSize=50&Page=1"},
+                    }
+                ),
+            ),
+            MockResponse(
+                200,
+                json.dumps(
+                    {
+                        "contents": [
+                            {"friendly_name": "quick_reply_template"},
+                        ],
+                        "meta": {"next_page_url": None},
+                    }
+                ),
+            ),
+        ]
+
+        with self.assertRaises(RequestException):
+            channel.type.fetch_templates(channel)
+
+        self.assertEqual(1, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, is_error=True).count())
+
+        with self.assertRaises(RequestException):
+            channel.type.fetch_templates(channel)
+
+        self.assertEqual(2, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, is_error=True).count())
+
+        templates = channel.type.fetch_templates(channel)
+        self.assertEqual(
+            templates,
+            [
+                {"friendly_name": "call_to_action_template"},
+                {"friendly_name": "media_template"},
+                {"friendly_name": "quick_reply_template"},
+            ],
+        )

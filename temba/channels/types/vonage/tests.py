@@ -190,7 +190,7 @@ class VonageTypeTest(TembaTest):
         # try posting without an account token
         post_data = {"api_key": "key"}
         response = self.client.post(connect_url, post_data)
-        self.assertFormError(response, "form", "api_secret", "This field is required.")
+        self.assertFormError(response.context["form"], "api_secret", "This field is required.")
 
         # simulate invalid credentials on both pages
         mock_check_credentials.return_value = False
@@ -223,7 +223,7 @@ class VonageTypeTest(TembaTest):
             self.user,
             "RW",
             "NX",
-            None,
+            "Vonage",
             "+250788123123",
             uuid="00000000-0000-0000-0000-000000001234",
             config={VonageType.CONFIG_API_KEY: "1234", VonageType.CONFIG_API_SECRET: "secret"},

@@ -5,9 +5,9 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     env:
-      python-version: "3.10.x"
-      node-version: "12"
-      mailroom-version: "9.0.0"
+      python-version: "3.11.x"
+      node-version: "20"
+      mailroom-version: "9.1.78"
       DJANGO_SETTINGS_MODULE: temba.settings_ci
 
     services:
@@ -24,13 +24,6 @@ jobs:
         ports:
           - 5432:5432
         options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
-      elastic:
-        image: elasticsearch:7.17.9
-        ports:
-          - 9200:9200
-          - 9300:9300
-        env:
-          discovery.type: single-node
     
     steps:
       - name: Checkout code
@@ -42,7 +35,7 @@ jobs:
           sudo apt install -y --no-install-recommends libgdal-dev ffmpeg
 
       - name: Install Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.python-version }}
 

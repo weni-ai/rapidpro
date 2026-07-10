@@ -7,6 +7,7 @@ from rest_framework.response import Response
 
 from django.db import transaction
 
+from temba import mailroom
 from temba.api.support import InvalidQueryError
 from temba.contacts.models import URN
 from temba.utils.models import TembaModel
@@ -94,6 +95,9 @@ class BaseAPIView(NonAtomicMixin, generics.GenericAPIView):
         except ValueError:
             raise InvalidQueryError("Invalid URN: %s" % value)
 
+    def is_docs(self):
+        return "format" not in self.kwargs
+
 
 class ListAPIMixin(mixins.ListModelMixin):
     """
@@ -108,7 +112,7 @@ class ListAPIMixin(mixins.ListModelMixin):
     def list(self, request, *args, **kwargs):
         self.check_query(self.request.query_params)
 
-        if not kwargs.get("format", None):
+        if self.is_docs():
             # if this is just a request to browse the endpoint docs, don't make a query
             return Response([])
         else:
@@ -128,7 +132,7 @@ class ListAPIMixin(mixins.ListModelMixin):
             try:
                 before = iso8601.parse_date(before)
                 queryset = queryset.filter(**{field + "__lte": before})
-            except Exception:
+            except ValueError:
                 queryset = queryset.filter(pk=-1)
 
         after = self.request.query_params.get("after")
@@ -136,7 +140,7 @@ class ListAPIMixin(mixins.ListModelMixin):
             try:
                 after = iso8601.parse_date(after)
                 queryset = queryset.filter(**{field + "__gte": after})
-            except Exception:
+            except ValueError:
                 queryset = queryset.filter(pk=-1)
 
         return queryset
@@ -200,7 +204,11 @@ class WriteAPIMixin:
         if serializer.is_valid():
             mgr = transaction.atomic() if self.write_with_transaction else contextlib.suppress()
             with mgr:
-                output = serializer.save()
+                try:
+                    output = serializer.save()
+                except mailroom.URNValidationException as e:
+                    return Response(serializer.urn_exception(e), status=status.HTTP_400_BAD_REQUEST)
+
                 self.post_save(output)
                 return self.render_write_response(output, context)
         else:

@@ -1,5 +1,4 @@
 import logging
-import time
 from datetime import date, datetime, timedelta, timezone as tzone
 from decimal import Decimal
 from itertools import chain
@@ -17,26 +16,23 @@ from smartmin.models import SmartModel
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
-from django.db import IntegrityError, models, transaction
+from django.db import models, transaction
 from django.db.models import Count, F, Max, Q, Sum, Value
 from django.db.models.functions import Concat, Lower
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from temba import mailroom
-from temba.assets.models import register_asset_store
-from temba.channels.models import Channel, ChannelEvent
+from temba.channels.models import Channel
 from temba.locations.models import AdminBoundary
 from temba.mailroom import ContactSpec, modifiers, queue_populate_dynamic_group
-from temba.orgs.models import DependencyMixin, Org, OrgRole
+from temba.orgs.models import DependencyMixin, Export, ExportType, Org, OrgRole
 from temba.utils import chunk_list, format_number, on_transaction_commit
-from temba.utils.export import BaseExport, BaseExportAssetStore, MultiSheetExporter
-from temba.utils.models import JSONField, LegacyUUIDMixin, SquashableModel, TembaModel
+from temba.utils.export import MultiSheetExporter
+from temba.utils.models import JSONField, LegacyUUIDMixin, SquashableModel, TembaModel, delete_in_batches
 from temba.utils.text import decode_stream, unsnakify
 from temba.utils.urns import ParsedURN, parse_number, parse_urn
 from temba.utils.uuid import uuid4
-
-from .search import SearchException, elastic, parse_query
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +77,7 @@ class URN:
         (FACEBOOK_SCHEME, _("Facebook Identifier")),
         (FCM_SCHEME, _("Firebase Cloud Messaging Identifier")),
         (FRESHCHAT_SCHEME, _("Freshchat Identifier")),
-        (INSTAGRAM_SCHEME, _("Instagram Handle")),
+        (INSTAGRAM_SCHEME, _("Instagram Identifier")),
         (JIOCHAT_SCHEME, _("JioChat Identifier")),
         (LINE_SCHEME, _("LINE Identifier")),
         (ROCKETCHAT_SCHEME, _("RocketChat Identifier")),
@@ -307,10 +303,6 @@ class URN:
         return cls.from_parts(cls.TEL_SCHEME, path)
 
     @classmethod
-    def from_twitterid(cls, id, screen_name=None):
-        return cls.from_parts(cls.TWITTERID_SCHEME, id, display=screen_name)
-
-    @classmethod
     def from_discord(cls, path):
         return cls.from_parts(cls.DISCORD_SCHEME, path)
 
@@ -365,58 +357,22 @@ class ContactField(TembaModel, DependencyMixin):
         TYPE_WARD: "ward",
     }
 
-    # fixed keys for system-fields
-    KEY_ID = "id"
-    KEY_NAME = "name"
-    KEY_CREATED_ON = "created_on"
-    KEY_LANGUAGE = "language"
-    KEY_LAST_SEEN_ON = "last_seen_on"
-
-    # fields that cannot be updated by user
-    IMMUTABLE_FIELDS = (KEY_ID, KEY_CREATED_ON, KEY_LAST_SEEN_ON)
-
-    SYSTEM_FIELDS = {
-        KEY_ID: {"name": "ID", "value_type": TYPE_NUMBER},
-        KEY_NAME: {"name": "Name", "value_type": TYPE_TEXT},
-        KEY_CREATED_ON: {"name": "Created On", "value_type": TYPE_DATETIME},
-        KEY_LANGUAGE: {"name": "Language", "value_type": TYPE_TEXT},
-        KEY_LAST_SEEN_ON: {"name": "Last Seen On", "value_type": TYPE_DATETIME},
-    }
+    # system fields that all workspaces get
+    SYSTEM_FIELDS = (
+        # used for campaign events
+        {"key": "created_on", "name": "Created On", "value_type": TYPE_DATETIME, "is_proxy": True},
+        {"key": "last_seen_on", "name": "Last Seen On", "value_type": TYPE_DATETIME, "is_proxy": True},
+    )
 
     # can't create custom contact fields with these keys
-    RESERVED_KEYS = {
-        # contactql syntax
-        "has",
-        "is",
-        # searchable attributes in queries
-        "created_on",
-        "flow",
-        "group",
-        "history",
-        "id",
-        "language",
-        "last_seen_on",
-        "name",
-        "status",
-        "ticket",
-        "urn",
-        "uuid",
-        # @contact.* properties in expressions
-        "channel",
-        "fields",
-        "first_name",
-        "groups",
-        "tickets",
-        "timezone",
-        "urns",
-    }.union(URN.VALID_SCHEMES)
+    RESERVED_KEYS = {"has", "is", "fields", "urns", "created_on", "last_seen_on"}
 
     org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="fields")
 
     key = models.CharField(max_length=MAX_KEY_LEN)
     name = models.CharField(max_length=MAX_NAME_LEN)
     value_type = models.CharField(choices=TYPE_CHOICES, max_length=1, default=TYPE_TEXT)
-    is_system = models.BooleanField()
+    is_proxy = models.BooleanField(default=False)  # field is just a proxy for a contact property
 
     # how field is displayed in the UI
     show_in_table = models.BooleanField(default=False)
@@ -434,13 +390,14 @@ class ContactField(TembaModel, DependencyMixin):
     def create_system_fields(cls, org):
         assert not org.fields.filter(is_system=True).exists(), "org already has system fields"
 
-        for key, spec in cls.SYSTEM_FIELDS.items():
+        for spec in cls.SYSTEM_FIELDS:
             org.fields.create(
                 is_system=True,
-                key=key,
+                key=spec["key"],
                 name=spec["name"],
                 value_type=spec["value_type"],
                 show_in_table=False,
+                is_proxy=spec["is_proxy"],
                 created_by=org.created_by,
                 modified_by=org.modified_by,
             )
@@ -546,7 +503,7 @@ class ContactField(TembaModel, DependencyMixin):
         Gets the fields for the given org
         """
 
-        fields = org.fields.filter(is_system=False, is_active=True)
+        fields = org.fields.filter(is_active=True, is_proxy=False)
 
         if viewable_by and org.get_user_role(viewable_by) == OrgRole.AGENT:
             fields = fields.exclude(agent_access=cls.ACCESS_NONE)
@@ -579,6 +536,9 @@ class ContactField(TembaModel, DependencyMixin):
     def get_access(self, user) -> str:
         return self.agent_access if self.org.get_user_role(user) == OrgRole.AGENT else self.ACCESS_EDIT
 
+    def get_attrs(self):
+        return {"icon": "info" if self.is_proxy else "fields"}
+
     def release(self, user):
         assert not (self.is_system and self.org.is_active), "can't release system fields"
 
@@ -608,6 +568,12 @@ class Contact(LegacyUUIDMixin, SmartModel):
         (STATUS_STOPPED, "Stopped"),
         (STATUS_ARCHIVED, "Archived"),
     )
+    ENGINE_STATUSES = {
+        STATUS_ACTIVE: "active",
+        STATUS_BLOCKED: "blocked",
+        STATUS_STOPPED: "stopped",
+        STATUS_ARCHIVED: "archived",
+    }
 
     org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="contacts")
 
@@ -640,46 +606,28 @@ class Contact(LegacyUUIDMixin, SmartModel):
 
     @classmethod
     def create(
-        cls, org, user, name: str, language: str, urns: list[str], fields: dict[ContactField, str], groups: list
+        cls,
+        org,
+        user,
+        *,
+        name: str,
+        language: str,
+        status: str,
+        urns: list[str],
+        fields: dict[ContactField, str],
+        groups: list,
     ):
+        engine_status = cls.ENGINE_STATUSES[status]
         fields_by_key = {f.key: v for f, v in fields.items()}
         group_uuids = [g.uuid for g in groups]
 
-        response = mailroom.get_client().contact_create(
-            org.id,
-            user.id,
-            ContactSpec(name=name, language=language, urns=urns, fields=fields_by_key, groups=group_uuids),
+        return mailroom.get_client().contact_create(
+            org,
+            user,
+            ContactSpec(
+                name=name, language=language, status=engine_status, urns=urns, fields=fields_by_key, groups=group_uuids
+            ),
         )
-        return Contact.objects.get(id=response["contact"]["id"])
-
-    @classmethod
-    def resolve(cls, channel, urn):
-        """
-        Resolves a contact and URN from a channel interaction. Only used for relayer endpoints.
-        """
-        try:
-            response = mailroom.get_client().contact_resolve(channel.org_id, channel.id, urn)
-        except mailroom.MailroomException as e:
-            raise ValueError(e.response.get("error"))
-
-        contact = Contact.objects.get(id=response["contact"]["id"])
-        contact_urn = ContactURN.objects.get(id=response["urn"]["id"])
-        return contact, contact_urn
-
-    @classmethod
-    def from_urn(cls, org, urn_as_string, country=None):
-        """
-        Looks up a contact by a URN string (which will be normalized)
-        """
-        try:
-            urn_obj = ContactURN.lookup(org, urn_as_string, country)
-        except ValueError:
-            return None
-
-        if urn_obj and urn_obj.contact and urn_obj.contact.is_active:
-            return urn_obj.contact
-        else:
-            return None
 
     @property
     def anon_display(self):
@@ -874,36 +822,32 @@ class Contact(LegacyUUIDMixin, SmartModel):
 
         return events
 
-    def get_field_json(self, field):
-        """
-        Returns the JSON (as a dict) value for this field, or None if there is no value
-        """
-        assert not field.is_system, f"not supported for system field {field.key}"
-
-        return self.fields.get(str(field.uuid)) if self.fields else None
-
-    def get_field_serialized(self, field):
+    def get_field_serialized(self, field) -> str:
         """
         Given the passed in contact field object, returns the value (as a string) for this contact or None.
         """
-        json_value = self.get_field_json(field)
-        if not json_value:
+
+        value_dict = self.fields.get(str(field.uuid)) if self.fields else None
+        if not value_dict:
             return
 
         engine_type = ContactField.ENGINE_TYPES[field.value_type]
 
         if field.value_type == ContactField.TYPE_NUMBER:
-            dec_value = json_value.get(engine_type, json_value.get("decimal"))
+            dec_value = value_dict.get(engine_type, value_dict.get("decimal"))
             return format_number(Decimal(dec_value)) if dec_value is not None else None
 
-        return json_value.get(engine_type)
+        return value_dict.get(engine_type)
 
     def get_field_value(self, field):
         """
         Given the passed in contact field object, returns the value (as a string, decimal, datetime, AdminBoundary)
         for this contact or None.
         """
-        if not field.is_system:
+
+        if field.is_proxy:  # i.e. created_on, last_seen_on
+            return getattr(self, field.key)
+        else:
             string_value = self.get_field_serialized(field)
             if string_value is None:
                 return None
@@ -916,18 +860,6 @@ class Contact(LegacyUUIDMixin, SmartModel):
                 return Decimal(string_value)
             elif field.value_type in [ContactField.TYPE_STATE, ContactField.TYPE_DISTRICT, ContactField.TYPE_WARD]:
                 return AdminBoundary.get_by_path(self.org, string_value)
-
-        else:
-            if field.key == "created_on":
-                return self.created_on
-            if field.key == "last_seen_on":
-                return self.last_seen_on
-            elif field.key == "language":
-                return self.language
-            elif field.key == "name":
-                return self.name
-            else:
-                raise ValueError(f"System contact field '{field.key}' is not supported")
 
     def get_field_display(self, field):
         """
@@ -1013,8 +945,8 @@ class Contact(LegacyUUIDMixin, SmartModel):
         org = contacts[0].org
         client = mailroom.get_client()
         try:
-            response = client.contact_modify(org.id, user.id, [c.id for c in contacts], mods)
-        except mailroom.MailroomException as e:
+            response = client.contact_modify(org, user, contacts, mods)
+        except mailroom.RequestException as e:
             logger.error(f"Contact update failed: {str(e)}", exc_info=True)
             raise e
 
@@ -1082,8 +1014,8 @@ class Contact(LegacyUUIDMixin, SmartModel):
         Interrupts this contact's current flow
         """
         if self.current_flow:
-            sessions = mailroom.get_client().contact_interrupt(self.org.id, user.id, self.id)
-            return len(sessions) > 0
+            return mailroom.get_client().contact_interrupt(self.org, user, self) > 0
+
         return False
 
     def block(self, user):
@@ -1194,8 +1126,7 @@ class Contact(LegacyUUIDMixin, SmartModel):
                 urn.release()
 
             # release our channel events
-            for event in self.channel_events.all():  # pragma: needs cover
-                event.release()
+            delete_in_batches(self.channel_events.all())
 
             for run in self.runs.all():
                 run.delete(interrupt=False)  # don't try interrupting sessions that are about to be deleted
@@ -1246,9 +1177,7 @@ class Contact(LegacyUUIDMixin, SmartModel):
         if not contacts:
             return {}
 
-        resp = mailroom.get_client().contact_inspect(contacts[0].org_id, [c.id for c in contacts])
-
-        return {c: resp[str(c.id)] for c in contacts}
+        return mailroom.get_client().contact_inspect(contacts[0].org, contacts)
 
     def get_groups(self, *, manual_only=False):
         """
@@ -1323,6 +1252,9 @@ class Contact(LegacyUUIDMixin, SmartModel):
     def __str__(self):
         return self.get_display()
 
+    def __repr__(self):  # pragma: no cover
+        return f'<Contact: id={self.id} name="{self.name}">'
+
     class Meta:
         indexes = [
             # for API endpoint access
@@ -1334,6 +1266,9 @@ class Contact(LegacyUUIDMixin, SmartModel):
             models.Index(name="contacts_contact_org_modified", fields=["org", "-modified_on"]),
             # for indexing modified contacts
             models.Index(name="contacts_modified", fields=("modified_on",)),
+        ]
+        constraints = [
+            models.CheckConstraint(check=Q(status__in=("A", "B", "S", "V")), name="contact_status_valid"),
         ]
 
 
@@ -1348,6 +1283,7 @@ class ContactURN(models.Model):
         URN.VIBER_SCHEME,
         URN.TELEGRAM_SCHEME,
         URN.INSTAGRAM_SCHEME,
+        URN.WEBCHAT_SCHEME,
     }
     SCHEMES_SUPPORTING_REFERRALS = {URN.FACEBOOK_SCHEME}  # schemes that support "referral" triggers
     SCHEMES_SUPPORTING_OPTINS = {URN.FACEBOOK_SCHEME}  # schemes that support opt-in/opt-out triggers
@@ -1377,62 +1313,9 @@ class ContactURN(models.Model):
     # auth tokens - usage is channel specific, e.g. every FCM URN has its own token, FB channels have per opt-in tokens
     auth_tokens = models.JSONField(null=True)
 
-    @classmethod
-    def get_or_create(cls, org, contact, urn_as_string, channel=None, priority=PRIORITY_HIGHEST):
-        urn = cls.lookup(org, urn_as_string)
-
-        # not found? create it
-        if not urn:
-            try:
-                with transaction.atomic():
-                    urn = cls.create(org, contact, urn_as_string, channel=channel, priority=priority)
-            except IntegrityError:
-                urn = cls.lookup(org, urn_as_string)
-
-        return urn
-
-    @classmethod
-    def create(cls, org, contact, urn_as_string, channel=None, priority=PRIORITY_HIGHEST, auth=None):
-        scheme, path, query, display = URN.to_parts(urn_as_string)
-        urn_as_string = URN.from_parts(scheme, path)
-
-        return cls.objects.create(
-            org=org,
-            contact=contact,
-            priority=priority,
-            channel=channel,
-            scheme=scheme,
-            path=path,
-            identity=urn_as_string,
-            display=display,
-        )
-
-    @classmethod
-    def lookup(cls, org, urn_as_string, country_code=None, normalize=True):
-        """
-        Looks up an existing URN by a formatted URN string, e.g. "tel:+250234562222"
-        """
-        if normalize:
-            urn_as_string = URN.normalize(urn_as_string, country_code)
-
-        identity = URN.identity(urn_as_string)
-        (scheme, path, query, display) = URN.to_parts(urn_as_string)
-
-        existing = cls.objects.filter(org=org, identity=identity).select_related("contact").first()
-
-        # is this a TWITTER scheme? check TWITTERID scheme by looking up by display
-        if scheme == URN.TWITTER_SCHEME:
-            twitterid_urn = (
-                cls.objects.filter(org=org, scheme=URN.TWITTERID_SCHEME, display=path).select_related("contact").first()
-            )
-            if twitterid_urn:
-                return twitterid_urn
-
-        return existing
-
     def release(self):
-        for event in ChannelEvent.objects.filter(contact_urn=self):
-            event.release()
+        delete_in_batches(self.channel_events.all())
+
         self.delete()
 
     def ensure_number_normalization(self, country_code):
@@ -1670,7 +1553,7 @@ class ContactGroup(LegacyUUIDMixin, TembaModel, DependencyMixin):
 
         try:
             if not parsed:
-                parsed = parse_query(self.org, query)
+                parsed = mailroom.get_client().contact_parse_query(self.org, query)
 
             if not parsed.metadata.allow_as_group:
                 raise ValueError(f"Cannot use query '{query}' as a smart group")
@@ -1690,7 +1573,7 @@ class ContactGroup(LegacyUUIDMixin, TembaModel, DependencyMixin):
             # and add them as dependencies
             self.query_fields.add(*field_ids)
 
-        except SearchException as e:
+        except mailroom.QueryValidationException as e:
             raise ValueError(str(e))
 
         # start background task to re-evaluate who belongs in this group
@@ -1699,7 +1582,7 @@ class ContactGroup(LegacyUUIDMixin, TembaModel, DependencyMixin):
 
     def get_member_count(self):
         """
-        Returns the number of active and non-test contacts in the group
+        Returns the number of contacts in the group
         """
         return ContactGroupCount.get_totals([self])[self]
 
@@ -1719,7 +1602,7 @@ class ContactGroup(LegacyUUIDMixin, TembaModel, DependencyMixin):
         from .tasks import release_group_task
 
         # delete all triggers for this group
-        for trigger in self.triggers.all():
+        for trigger in self.triggers.filter(is_active=True):
             trigger.release(user)
 
         super().release(user)
@@ -1777,7 +1660,7 @@ class ContactGroup(LegacyUUIDMixin, TembaModel, DependencyMixin):
 
             parsed_query = None
             if group_query:
-                parsed_query = parse_query(org, group_query, parse_only=True)
+                parsed_query = mailroom.get_client().contact_parse_query(org, group_query, parse_only=True)
                 for field_ref in parsed_query.metadata.fields:
                     ContactField.get_or_create(org, user, key=field_ref["key"])
 
@@ -1849,29 +1732,31 @@ class ContactGroupCount(SquashableModel):
         ]
 
 
-class ExportContactsTask(BaseExport):
-    analytics_key = "contact_export"
-    notification_export_type = "contact"
+class ContactExport(ExportType):
+    """
+    Export of contacts
+    """
 
-    group = models.ForeignKey(
-        ContactGroup,
-        on_delete=models.PROTECT,
-        null=True,
-        related_name="exports",
-        help_text=_("The unique group to export"),
-    )
-
-    group_memberships = models.ManyToManyField(ContactGroup)
-
-    search = models.TextField(null=True, blank=True, help_text=_("The search query"))
+    slug = "contact"
+    name = _("Contacts")
+    download_prefix = "contacts"
+    download_template = "contacts/export_download.html"
 
     @classmethod
-    def create(cls, org, user, group=None, search=None, group_memberships=()):
-        export = cls.objects.create(org=org, group=group, search=search, created_by=user, modified_by=user)
-        export.group_memberships.add(*group_memberships)
+    def create(cls, org, user, group=None, search=None, with_groups=()):
+        export = Export.objects.create(
+            org=org,
+            export_type=cls.slug,
+            config={
+                "group_id": group.id if group else None,
+                "search": search,
+                "with_groups": [g.id for g in with_groups],
+            },
+            created_by=user,
+        )
         return export
 
-    def get_export_fields_and_schemes(self):
+    def get_export_fields_and_schemes(self, export):
         fields = [
             dict(label="Contact UUID", key="uuid", field=None, urn_scheme=None),
             dict(label="Name", key="name", field=None, urn_scheme=None),
@@ -1882,15 +1767,15 @@ class ExportContactsTask(BaseExport):
         ]
 
         # anon orgs also get an ID column that is just the PK
-        if self.org.is_anon:
+        if export.org.is_anon:
             fields = [
                 dict(label="ID", key="id", field=None, urn_scheme=None),
                 dict(label="Scheme", key="scheme", field=None, urn_scheme=None),
             ] + fields
 
         scheme_counts = dict()
-        if not self.org.is_anon:
-            org_urns = self.org.urns.using("readonly")
+        if not export.org.is_anon:
+            org_urns = export.org.urns.using("readonly")
             schemes_in_use = sorted(list(org_urns.order_by().values_list("scheme", flat=True).distinct()))
             scheme_contact_max = {}
 
@@ -1918,7 +1803,7 @@ class ExportContactsTask(BaseExport):
                     )
 
         contact_fields_list = (
-            ContactField.get_fields(self.org).using("readonly").select_related("org").order_by("-priority", "pk")
+            ContactField.get_fields(export.org).using("readonly").select_related("org").order_by("-priority", "pk")
         )
         for contact_field in contact_fields_list:
             fields.append(
@@ -1931,29 +1816,36 @@ class ExportContactsTask(BaseExport):
             )
 
         group_fields = []
-        for group in self.group_memberships.all():
+        for group in export.get_contact_groups():
             group_fields.append(dict(label="Group:%s" % group.name, key=None, group_id=group.id, group=group))
 
         return fields, scheme_counts, group_fields
 
-    def write_export(self):
-        fields, scheme_counts, group_fields = self.get_export_fields_and_schemes()
-        group = self.group or self.org.active_contacts_group
-
-        include_group_memberships = bool(self.group_memberships.exists())
-
-        if self.search:
-            contact_ids = elastic.query_contact_ids(self.org, self.search, group=group)
+    def get_group(self, export):
+        group_id = export.config.get("group_id")
+        if group_id:
+            return export.org.groups.filter(id=group_id).get()
         else:
-            contact_ids = group.contacts.order_by("name", "id").values_list("id", flat=True)
+            return export.org.active_contacts_group
+
+    def write(self, export):
+        fields, scheme_counts, group_fields = self.get_export_fields_and_schemes(export)
+        group = self.get_group(export)
+        search = export.config.get("search")
+
+        include_group_memberships = bool(len(group_fields) > 0)
+
+        if search:
+            contact_ids = mailroom.get_client().contact_export(export.org, group, query=search)
+        else:
+            contact_ids = group.contacts.using("readonly").order_by("id").values_list("id", flat=True)
 
         # create our exporter
         exporter = MultiSheetExporter(
-            "Contact", [f["label"] for f in fields] + [g["label"] for g in group_fields], self.org.timezone
+            "Contact", [f["label"] for f in fields] + [g["label"] for g in group_fields], export.org.timezone
         )
 
-        total_exported_contacts = 0
-        start = time.time()
+        num_records = 0
 
         # write out contacts in batches to limit memory usage
         for batch_ids in chunk_list(contact_ids, 1000):
@@ -1972,7 +1864,7 @@ class ExportContactsTask(BaseExport):
 
                 values = []
                 for field in fields:
-                    values.append(self.get_field_value(field, contact))
+                    values.append(self.get_field_value(export.org, field, contact=contact))
 
                 group_values = []
                 if include_group_memberships:
@@ -1983,31 +1875,16 @@ class ExportContactsTask(BaseExport):
 
                 # write this contact's values
                 exporter.write_row(values + group_values)
-                total_exported_contacts += 1
+                num_records += 1
 
-                # output some status information every 10,000 contacts
-                if total_exported_contacts % ExportContactsTask.LOG_PROGRESS_PER_ROWS == 0:
-                    elapsed = time.time() - start
-                    predicted = elapsed // (total_exported_contacts / len(contact_ids))
+            # keep bumping our modified_on to show we're alive
+            if timezone.now() - export.modified_on > timedelta(minutes=3):  # pragma: no cover
+                export.modified_on = timezone.now()
+                export.save(update_fields=("modified_on",))
 
-                    logger.info(
-                        "Export of %s contacts - %d%% (%s/%s) complete in %0.2fs (predicted %0.0fs)"
-                        % (
-                            self.org.name,
-                            total_exported_contacts * 100 // len(contact_ids),
-                            "{:,}".format(total_exported_contacts),
-                            "{:,}".format(len(contact_ids)),
-                            time.time() - start,
-                            predicted,
-                        )
-                    )
+        return *exporter.save_file(), num_records
 
-                    self.modified_on = timezone.now()
-                    self.save(update_fields=["modified_on"])
-
-        return exporter.save_file()
-
-    def get_field_value(self, field: dict, contact: Contact):
+    def get_field_value(self, org, field: dict, contact: Contact):
         if field["key"] == "name":
             return contact.name
         elif field["key"] == "uuid":
@@ -2034,11 +1911,14 @@ class ExportContactsTask(BaseExport):
             position = field["position"]
             if len(scheme_urns) > position:
                 urn_obj = scheme_urns[position]
-                return urn_obj.get_display(org=self.org, formatted=False) if urn_obj else ""
+                return urn_obj.get_display(org=org, formatted=False) if urn_obj else ""
             else:
                 return ""
         else:
             return contact.get_field_display(field["field"])
+
+    def get_download_context(self, export) -> dict:
+        return {"group": self.get_group(export)}
 
 
 def get_import_upload_path(instance: Any, filename: str):
@@ -2537,12 +2417,3 @@ class ContactImportBatch(models.Model):
 
     def import_async(self):
         mailroom.queue_contact_import_batch(self)
-
-
-@register_asset_store
-class ContactExportAssetStore(BaseExportAssetStore):
-    model = ExportContactsTask
-    key = "contact_export"
-    directory = "contact_exports"
-    permission = "contacts.contact_export"
-    extensions = ("xlsx", "csv")

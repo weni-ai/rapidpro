@@ -11,6 +11,7 @@ from smartmin.views import (
 from django import forms
 from django.contrib import messages
 from django.core.exceptions import ValidationError
+from django.db.models.functions import Lower
 from django.http import Http404, HttpResponseRedirect
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
@@ -38,7 +39,7 @@ class CampaignForm(forms.ModelForm):
     def __init__(self, org, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.fields["group"].queryset = ContactGroup.get_groups(org)
+        self.fields["group"].queryset = ContactGroup.get_groups(org).order_by(Lower("name"))
 
     class Meta:
         model = Campaign
@@ -80,7 +81,6 @@ class CampaignCRUDL(SmartCRUDL):
 
     class Update(OrgObjPermsMixin, ModalMixin, SmartUpdateView):
         fields = ("name", "group")
-        success_message = ""
         form_class = CampaignForm
 
         def pre_process(self, request, *args, **kwargs):
@@ -136,10 +136,8 @@ class CampaignCRUDL(SmartCRUDL):
                         _("New Event"),
                         "event-add",
                         f"{reverse('campaigns.campaignevent_create')}?campaign={obj.id}",
+                        as_button=True,
                     )
-
-                if self.has_org_perm("orgs.org_export"):
-                    menu.add_link(_("Export"), f"{reverse('orgs.org_export')}?campaign={obj.id}")
 
                 if self.has_org_perm("campaigns.campaign_update"):
                     menu.add_modax(
@@ -149,13 +147,15 @@ class CampaignCRUDL(SmartCRUDL):
                         title=_("Edit Campaign"),
                     )
 
+                if self.has_org_perm("orgs.org_export"):
+                    menu.add_link(_("Export"), f"{reverse('orgs.org_export')}?campaign={obj.id}")
+
                 if self.has_org_perm("campaigns.campaign_archive"):
                     menu.add_url_post(_("Archive"), reverse("campaigns.campaign_archive", args=[obj.id]))
 
     class Create(OrgPermsMixin, ModalMixin, SmartCreateView):
         fields = ("name", "group")
         form_class = CampaignForm
-        success_message = ""
         success_url = "uuid@campaigns.campaign_read"
 
         def pre_save(self, obj):
@@ -180,13 +180,11 @@ class CampaignCRUDL(SmartCRUDL):
             return context
 
     class List(BaseList):
+        title = _("Active")
         fields = ("name", "group")
         bulk_actions = ("archive",)
         search_fields = ("name__icontains", "group__name__icontains")
         menu_path = "/campaign/active"
-
-        def derive_title(self):
-            return _("Active Campaigns")
 
         def get_queryset(self, *args, **kwargs):
             qs = super().get_queryset(*args, **kwargs)
@@ -204,12 +202,10 @@ class CampaignCRUDL(SmartCRUDL):
                 )
 
     class Archived(BaseList):
+        title = _("Archived")
         fields = ("name",)
         bulk_actions = ("restore",)
         menu_path = "/campaign/archived"
-
-        def derive_title(self):
-            return _("Archived Campaigns")
 
         def get_queryset(self, *args, **kwargs):
             qs = super().get_queryset(*args, **kwargs)
@@ -379,7 +375,9 @@ class CampaignEventForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
 
         relative_to = self.fields["relative_to"]
-        relative_to.queryset = org.fields.filter(is_active=True, value_type=ContactField.TYPE_DATETIME).order_by("name")
+        relative_to.queryset = org.fields.filter(is_active=True, value_type=ContactField.TYPE_DATETIME).order_by(
+            Lower("name")
+        )
 
         flow = self.fields["flow_to_start"]
         flow.queryset = org.flows.filter(
@@ -562,10 +560,7 @@ class CampaignEventCRUDL(SmartCRUDL):
             return reverse("campaigns.campaign_read", args=[self.object.campaign.uuid])
 
     class Update(OrgObjPermsMixin, ModalMixin, SmartUpdateView):
-        success_message = ""
         form_class = CampaignEventForm
-        submit_button_name = _("Save")
-
         default_fields = [
             "event_type",
             "flow_to_start",
@@ -676,9 +671,7 @@ class CampaignEventCRUDL(SmartCRUDL):
             "flow_start_mode",
         ]
         form_class = CampaignEventForm
-        success_message = ""
         template_name = "campaigns/campaignevent_update.html"
-        submit_button_name = _("Save")
 
         def get_context_data(self, **kwargs):
             context = super().get_context_data(**kwargs)

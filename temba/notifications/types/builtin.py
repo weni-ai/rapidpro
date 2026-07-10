@@ -24,27 +24,24 @@ class ExportFinishedNotificationType(NotificationType):
             users=[export.created_by],
             medium=Notification.MEDIUM_UI + Notification.MEDIUM_EMAIL,
             email_status=Notification.EMAIL_STATUS_PENDING,
-            **{export.notification_export_type + "_export": export},
+            **{"export": export},
         )
 
     def get_target_url(self, notification) -> str:
-        return notification.export.get_download_url()
+        return reverse("orgs.export_download", kwargs={"uuid": notification.export.uuid})
 
     def get_email_subject(self, notification) -> str:
         return _("Your %s export is ready") % notification.export.notification_export_type
 
     def get_email_template(self, notification) -> str:
-        return f"notifications/email/export_finished.{notification.export.notification_export_type}"
-
-    def get_email_context(self, notification):
-        context = super().get_email_context(notification)
-        if notification.results_export:
-            context["flows"] = notification.results_export.flows.order_by("name")
-        return context
+        return "notifications/email/export_finished"
 
     def as_json(self, notification) -> dict:
         json = super().as_json(notification)
-        json["export"] = {"type": notification.export.notification_export_type}
+        json["export"] = {
+            "type": notification.export.notification_export_type,
+            "num_records": notification.export.num_records,
+        }
         return json
 
 
@@ -122,3 +119,60 @@ class TicketActivityNotificationType(NotificationType):
 
     def get_target_url(self, notification) -> str:
         return "/ticket/mine/"
+
+
+class UserEmailNotificationType(NotificationType):
+    """
+    Notification that a user's email has been changed.
+    """
+
+    slug = "user:email"
+
+    @classmethod
+    def create(cls, org, user, prev_email: str):
+        Notification.create_all(
+            org,
+            cls.slug,
+            scope=str(user.id),
+            users=[user],
+            medium=Notification.MEDIUM_EMAIL,
+            email_status=Notification.EMAIL_STATUS_PENDING,
+            email_address=prev_email,
+        )
+
+    def get_target_url(self, notification) -> str:
+        pass
+
+    def get_email_subject(self, notification) -> str:
+        return _("Your email has been changed")
+
+    def get_email_template(self, notification) -> str:
+        return "notifications/email/user_email"
+
+
+class UserPasswordNotificationType(NotificationType):
+    """
+    Notification that a user's password has been changed.
+    """
+
+    slug = "user:password"
+
+    @classmethod
+    def create(cls, org, user):
+        Notification.create_all(
+            org,
+            cls.slug,
+            scope=str(user.id),
+            users=[user],
+            medium=Notification.MEDIUM_EMAIL,
+            email_status=Notification.EMAIL_STATUS_PENDING,
+        )
+
+    def get_target_url(self, notification) -> str:
+        pass
+
+    def get_email_subject(self, notification) -> str:
+        return _("Your password has been changed")
+
+    def get_email_template(self, notification) -> str:
+        return "notifications/email/user_password"
