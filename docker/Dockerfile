@@ -1,4 +1,4 @@
-FROM python:3.10-slim-bullseye as build-poetry
+FROM python:3.11-slim-bullseye AS build-poetry
 
 WORKDIR /app
 
@@ -11,7 +11,7 @@ RUN python -m pip install -U poetry==2.3.4 poetry-plugin-export \
  && poetry add -n --lock $(cat pip-requires.txt) \
  && poetry export --without-hashes --output requirements.txt
 
-FROM python:3.10-slim-bullseye
+FROM python:3.11-slim-bullseye
 
 ARG COMPRESS_ENABLED
 ARG BRANDING_ENABLED
