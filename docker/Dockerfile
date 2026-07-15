@@ -34,7 +34,7 @@ ENV PATH              "${NPM_CONFIG_PREFIX}/bin:${PATH}"
 RUN apt-get update \
  && apt-get install --no-install-recommends --no-install-suggests -y apt-utils \
  && apt-get install --no-install-recommends --no-install-suggests -y gcc bzip2 git curl ca-certificates gnupg nginx libpq-dev gettext \
-    libgdal-dev python3-cffi python3-gdal vim
+    libgdal-dev python3-cffi python3-gdal vim libmagic1
 
 RUN curl -sL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get install --no-install-recommends --no-install-suggests -y nodejs
