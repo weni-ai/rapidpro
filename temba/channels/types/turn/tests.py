@@ -11,7 +11,6 @@ from temba.channels.types.turn.type import (
     CONFIG_FB_BUSINESS_ID,
     CONFIG_FB_NAMESPACE,
     CONFIG_FB_TEMPLATE_LIST_DOMAIN,
-    TurnType,
 )
 from temba.request_logs.models import HTTPLog
 from temba.templates.models import TemplateTranslation
@@ -94,7 +93,7 @@ class TurnTypeTest(CRUDLTestMixin, TembaTest):
         self.assertContains(response, reverse("courier.trn", args=[channel.uuid, "receive"]))
 
     @patch("requests.get")
-    def test_get_api_templates(self, mock_get):
+    def test_fetch_templates(self, mock_get):
         TemplateTranslation.objects.all().delete()
         Channel.objects.all().delete()
         HTTPLog.objects.all().delete()
@@ -126,18 +125,22 @@ class TurnTypeTest(CRUDLTestMixin, TembaTest):
             MockResponse(200, '{"data": ["bar"], "paging": {"next": null} }'),
         ]
 
-        templates_data, no_error = TurnType().get_api_templates(channel)
-        self.assertEqual(1, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED).count())
-        self.assertFalse(no_error)
-        self.assertEqual([], templates_data)
+        with self.assertRaises(RequestException):
+            channel.type.fetch_templates(channel)
 
-        templates_data, no_error = TurnType().get_api_templates(channel)
-        self.assertFalse(no_error)
-        self.assertEqual([], templates_data)
+        self.assertEqual(1, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, is_error=True).count())
 
-        templates_data, no_error = TurnType().get_api_templates(channel)
-        self.assertTrue(no_error)
-        self.assertEqual(["foo", "bar"], templates_data)
+        with self.assertRaises(RequestException):
+            channel.type.fetch_templates(channel)
+
+        self.assertEqual(2, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, is_error=True).count())
+
+        # check when no next page
+        templates = channel.type.fetch_templates(channel)
+        self.assertEqual(["foo", "bar"], templates)
+
+        self.assertEqual(2, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, is_error=True).count())
+        self.assertEqual(1, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, is_error=False).count())
 
         for log in HTTPLog.objects.all():
             self.assertNotIn("token123", json.dumps(log.get_display()))
@@ -147,9 +150,9 @@ class TurnTypeTest(CRUDLTestMixin, TembaTest):
             params={"access_token": "token123", "limit": 255},
         )
 
-        templates_data, no_error = TurnType().get_api_templates(channel)
-        self.assertTrue(no_error)
-        self.assertEqual(["foo", "bar"], templates_data)
+        # check when templates across two pages
+        templates = channel.type.fetch_templates(channel)
+        self.assertEqual(["foo", "bar"], templates)
 
         mock_get.assert_has_calls(
             [
