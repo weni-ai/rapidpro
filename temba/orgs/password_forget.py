@@ -11,7 +11,7 @@ USER_RECOVER_TIME_INTERVAL = settings.USER_RECOVER_TIME_INTERVAL * 60 * 60
 
 class UserCRUDL(UserCRUDLBase):
     class Forget(UserCRUDLBase.Forget):
-        class ForgetForm(UserCRUDLBase.Forget.ForgetForm):
+        class ForgetForm(UserCRUDLBase.Forget.Form):
             def clean_email(self):
                 email = super().clean_email()
                 attempts_key = USER_RECOVER_ATTEMPTS_CACHE_KEY.format(email=email)
@@ -24,8 +24,9 @@ class UserCRUDL(UserCRUDLBase):
                     raise forms.ValidationError(
                         _(
                             "You have exceeded the maximum number of attempts, "
-                            "please try again in {settings.USER_RECOVER_TIME_INTERVAL} hours!"
+                            "please try again in %(hours)s hours!"
                         )
+                        % {"hours": settings.USER_RECOVER_TIME_INTERVAL}
                     )
 
                 return email

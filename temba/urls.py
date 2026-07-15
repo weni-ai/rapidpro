@@ -50,6 +50,7 @@ urlpatterns += [
         r"^users/user/recover/(?P<token>\w+)/$", RedirectView.as_view(pattern_name="orgs.user_recover", permanent=True)
     ),
     re_path(r"^users/", include("smartmin.users.urls")),
+    re_path(r"^redirect/", WeniRedirect.as_view(), {}, "weni.redirect"),
 ]
 
 if settings.DEBUG:

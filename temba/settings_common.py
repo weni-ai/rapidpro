@@ -734,6 +734,7 @@ CELERY_BEAT_SCHEDULE = {
     "interrupt-flow-sessions": {"task": "interrupt_flow_sessions", "schedule": crontab(hour=23, minute=30)},
     "refresh-whatsapp-tokens": {"task": "refresh_whatsapp_tokens", "schedule": crontab(hour=6, minute=0)},
     "refresh-turn-whatsapp-tokens": {"task": "refresh_turn_whatsapp_tokens", "schedule": crontab(hour=6, minute=0)},
+    "refresh-teams-tokens": {"task": "refresh_teams_tokens", "schedule": crontab(hour=6, minute=0)},
     "refresh-templates": {"task": "refresh_templates", "schedule": timedelta(seconds=900)},
     "send-notification-emails": {"task": "send_notification_emails", "schedule": timedelta(seconds=60)},
     "squash-channel-counts": {"task": "squash_channel_counts", "schedule": timedelta(seconds=60)},
@@ -900,35 +901,6 @@ MAILROOM_AUTH_TOKEN = None
 # Data Model
 # -----------------------------------------------------------------------------------
 
-WHATSAPP_ADMIN_SYSTEM_USER_ID = os.environ.get("WHATSAPP_ADMIN_SYSTEM_USER_ID", "MISSING_WHATSAPP_ADMIN_SYSTEM_USER_ID")
-WHATSAPP_ADMIN_SYSTEM_USER_TOKEN = os.environ.get(
-    "WHATSAPP_ADMIN_SYSTEM_USER_TOKEN", "MISSING_WHATSAPP_ADMIN_SYSTEM_USER_TOKEN"
-)
-WHATSAPP_FACEBOOK_BUSINESS_ID = os.environ.get("WHATSAPP_FACEBOOK_BUSINESS_ID", "MISSING_WHATSAPP_FACEBOOK_BUSINESS_ID")
-
-ALLOWED_WHATSAPP_FACEBOOK_BUSINESS_IDS = [
-    os.environ.get("WHATSAPP_FACEBOOK_BUSINESS_ID", "MISSING_WHATSAPP_FACEBOOK_BUSINESS_ID")
-]
-
-WHATSAPP_APPLICATION_ID = os.environ.get("WHATSAPP_APPLICATION_ID", "")
-WHATSAPP_APPLICATION_SECRET = os.environ.get("WHATSAPP_APPLICATION_SECRET", "")
-WHATSAPP_WEBHOOK_SECRET = os.environ.get("WHATSAPP_WEBHOOK_SECRET", "")
-WHATSAPP_CONFIGURATION_ID = os.environ.get("WHATSAPP_CONFIGURATION_ID", "")
-WHATSAPP_CLOUD_EXTENDED_CREDIT_ID = os.environ.get("WHATSAPP_CLOUD_EXTENDED_CREDIT_ID", "")
-
-
-# -----------------------------------------------------------------------------------
-# IP Addresses
-# These are the externally accessible IP addresses of the servers running RapidPro.
-# Needed for channel types that authenticate by whitelisting public IPs.
-#
-# You need to change these to real addresses to work with these.
-# -----------------------------------------------------------------------------------
-IP_ADDRESSES = ("172.16.10.10", "162.16.10.20")
-
-# -----------------------------------------------------------------------------------
-# Data model limits
-# -----------------------------------------------------------------------------------
 MSG_FIELD_SIZE = 640  # used for broadcast text and message campaign events
 FLOW_START_PARAMS_SIZE = 256  # used for params passed to flow start API endpoint
 GLOBAL_VALUE_SIZE = 10_000  # max length of global values
@@ -991,6 +963,16 @@ WHATSAPP_ADMIN_SYSTEM_USER_TOKEN = os.environ.get(
     "WHATSAPP_ADMIN_SYSTEM_USER_TOKEN", "MISSING_WHATSAPP_ADMIN_SYSTEM_USER_TOKEN"
 )
 WHATSAPP_FACEBOOK_BUSINESS_ID = os.environ.get("WHATSAPP_FACEBOOK_BUSINESS_ID", "MISSING_WHATSAPP_FACEBOOK_BUSINESS_ID")
+
+ALLOWED_WHATSAPP_FACEBOOK_BUSINESS_IDS = [
+    os.environ.get("WHATSAPP_FACEBOOK_BUSINESS_ID", "MISSING_WHATSAPP_FACEBOOK_BUSINESS_ID")
+]
+
+WHATSAPP_APPLICATION_ID = os.environ.get("WHATSAPP_APPLICATION_ID", "")
+WHATSAPP_APPLICATION_SECRET = os.environ.get("WHATSAPP_APPLICATION_SECRET", "")
+WHATSAPP_WEBHOOK_SECRET = os.environ.get("WHATSAPP_WEBHOOK_SECRET", "")
+WHATSAPP_CONFIGURATION_ID = os.environ.get("WHATSAPP_CONFIGURATION_ID", "")
+WHATSAPP_CLOUD_EXTENDED_CREDIT_ID = os.environ.get("WHATSAPP_CLOUD_EXTENDED_CREDIT_ID", "")
 
 # IP Addresses
 # These are the externally accessible IP addresses of the servers running RapidPro.

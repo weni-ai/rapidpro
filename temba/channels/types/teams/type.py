@@ -2,7 +2,7 @@ from django.utils.translation import gettext_lazy as _
 
 from temba.contacts.models import URN
 
-from ...models import ChannelType
+from ...models import Channel, ChannelType
 from .views import ClaimView
 
 
@@ -20,7 +20,6 @@ class TeamsType(ChannelType):
     code = "TM"
     category = ChannelType.Category.SOCIAL_MEDIA
     name = "Teams"
-    icon = "icon-power-cord"
     schemes = [URN.TEAMS_SCHEME]
     attachment_support = True
 
@@ -30,3 +29,9 @@ class TeamsType(ChannelType):
         "link": '<a href="https://teams.microsoft.com">Microsoft Teams</a>'
     }
     claim_view = ClaimView
+
+    def get_redact_values(self, channel) -> tuple:
+        return (
+            channel.config.get(Channel.CONFIG_AUTH_TOKEN, ""),
+            channel.config.get(self.CONFIG_TEAMS_APPLICATION_PASSWORD, ""),
+        )

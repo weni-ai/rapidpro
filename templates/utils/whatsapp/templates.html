@@ -5,7 +5,7 @@
 {% block fields %}
 {% endblock fields %}
 {% block subtitle %}
-  {{ object.get_channel_type_display }}
+  {{ object.type.name }}
   {% trans "Templates are synced from your account every 15 minutes." %}
 {% endblock subtitle %}
 {% block content %}
