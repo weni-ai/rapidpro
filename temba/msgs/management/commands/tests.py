@@ -112,7 +112,10 @@ class RepairMsgHistoryTest(TembaTest):
         self.assertIn(f"evt#{other_msg.uuid}", sks)
 
         # for the scoped contact every event is now time-ordered (v7) and sorts chronologically
-        contact_events = sorted(i for i in items if i["PK"] == f"con#{contact.uuid}" and "#" not in i["SK"][4:])
+        contact_events = sorted(
+            (i for i in items if i["PK"] == f"con#{contact.uuid}" and "#" not in i["SK"][4:]),
+            key=lambda i: i["SK"],
+        )
         for e in contact_events:
             self.assertTrue(is_uuid7(e["SK"][4:40]))
         self.assertEqual(
