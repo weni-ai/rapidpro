@@ -1,15 +1,19 @@
 """
-Repair logic for contact history message events written with non-time-ordered UUIDs.
+Repair logic for contact history events written with non-time-ordered UUIDs.
 
-Migration 0299_backfill_msg_events wrote each message's history event to DynamoDB using the raw `msg.uuid` as the sort
-key (`evt#<uuid>`). Contact history is ordered *only* by that sort key, so it assumes UUIDs are time-ordered (v7).
-Messages created before the switch to v7 UUIDs still have random v4 UUIDs, whose sort keys land in an arbitrary
-position - almost always *above* the v7 keys - making an old message show up as the most recent one.
+Contact history in DynamoDB is ordered only by the sort key `evt#<uuid>`, which assumes UUIDs are time-ordered (v7).
+Legacy events used random v4 UUIDs in that key, so old messages can appear at the top of the chat.
 
-This module re-keys those events using a v7 UUID derived from the message's `created_on` (matching every other history
-backfill, e.g. flows/0395) and removes the old randomly-ordered items. It does NOT touch `msg.uuid` in Postgres, since
-that value is exposed through the public API and may be referenced externally.
+Two sources of bad keys:
+- Migration 0299_backfill_msg_events used `evt#<msg.uuid>` when msg.uuid was still v4.
+- Live mailroom also writes `evt#<event_uuid>` where event_uuid is a separate v4, not necessarily equal to msg.uuid
+  in Postgres — so a Postgres-based lookup of `evt#<msg.uuid>` misses most production cases.
+
+This module re-keys those events using a v7 UUID derived from the event's `created_on`. It does NOT touch `msg.uuid`
+in Postgres, since that value is exposed through the public API and may be referenced externally.
 """
+
+import iso8601
 
 from uuid import UUID
 
@@ -128,6 +132,96 @@ def event_items(msg) -> list[tuple[str, dict]]:
                 items.append(("#sts", data))
 
     return items
+
+
+def _item_data(item: dict) -> dict:
+    data = item.get("Data", {})
+    if dataGZ := item.get("DataGZ"):
+        data |= dynamo.load_jsongz(dataGZ)
+    return data
+
+
+def _parse_event_sk(sk: str) -> tuple[str, str] | None:
+    """
+    Parses evt#<uuid> or evt#<uuid>#<tag> into (event_uuid, suffix).
+    """
+    if not sk.startswith("evt#"):
+        return None
+
+    rest = sk[4:]
+    if "#" in rest:
+        event_uuid, tag = rest.split("#", 1)
+        return event_uuid, f"#{tag}"
+    return rest, ""
+
+
+def _query_partition(pk: str) -> list[dict]:
+    items = []
+    last_sk = None
+
+    while True:
+        kwargs = dict(
+            KeyConditionExpression="PK = :pk",
+            ExpressionAttributeValues={":pk": pk},
+        )
+        if last_sk:
+            kwargs["ExclusiveStartKey"] = {"PK": pk, "SK": last_sk}
+
+        response = dynamo.HISTORY.query(**kwargs)
+        items.extend(response.get("Items", []))
+
+        last_sk = response.get("LastEvaluatedKey", {}).get("SK")
+        if not last_sk:
+            break
+
+    return items
+
+
+def repair_contact_partition(pk: str, *, dry_run: bool = False) -> int:
+    """
+    Repairs all history events in a contact's DynamoDB partition whose sort-key UUID is not v7.
+
+    Scans the partition directly so it works whether the bad key came from migration 0299 (`evt#<msg.uuid>`) or from
+    live mailroom (`evt#<event_uuid>` where event_uuid != msg.uuid). Returns the number of event groups repaired.
+
+    Idempotent and resumable: only groups whose base item still uses a non-v7 UUID are touched, corrected items are
+    written before the old ones are removed, and stable_uuid7 makes re-runs deterministic.
+    """
+    groups: dict[str, list[dict]] = {}
+    for item in _query_partition(pk):
+        if parsed := _parse_event_sk(item["SK"]):
+            event_uuid, _ = parsed
+            groups.setdefault(event_uuid, []).append(item)
+
+    num_repaired = 0
+
+    for event_uuid, group_items in groups.items():
+        if is_uuid7(event_uuid):
+            continue
+
+        base_item = next((i for i in group_items if _parse_event_sk(i["SK"])[1] == ""), None)
+        if not base_item:
+            continue
+
+        created_on_str = _item_data(base_item).get("created_on")
+        if not created_on_str:
+            continue
+
+        new_uuid = str(stable_uuid7(iso8601.parse_date(created_on_str), UUID(event_uuid)))
+
+        if not dry_run:
+            with dynamo.HISTORY.batch_writer() as writer:
+                for item in group_items:
+                    _, suffix = _parse_event_sk(item["SK"])
+                    writer.put_item({**item, "SK": f"evt#{new_uuid}{suffix}"})
+
+            with dynamo.HISTORY.batch_writer() as writer:
+                for item in group_items:
+                    writer.delete_item(Key={"PK": pk, "SK": item["SK"]})
+
+        num_repaired += 1
+
+    return num_repaired
 
 
 def repair_msgs(msgs, *, dry_run: bool = False, batch_size: int = 100) -> int:

@@ -91,13 +91,13 @@ class RepairMsgHistoryTest(TembaTest):
         # dry run scoped to one contact reports but writes nothing
         out = StringIO()
         call_command("repair_msg_history", org_id=self.org.id, contact_uuid=str(contact.uuid), dry_run=True, stdout=out)
-        self.assertIn("2 legacy msg events would be repaired", out.getvalue())
+        self.assertIn("2 legacy history event groups would be repaired", out.getvalue())
         self.assertIn(f"evt#{msg_in.uuid}", {i["SK"] for i in dynamo_scan_all(dynamo.HISTORY)})
 
         # real run scoped to a single contact
         out = StringIO()
         call_command("repair_msg_history", org_id=self.org.id, contact_uuid=str(contact.uuid), stdout=out)
-        self.assertIn("2 legacy msg events repaired", out.getvalue())
+        self.assertIn("2 legacy history event groups repaired", out.getvalue())
 
         items = dynamo_scan_all(dynamo.HISTORY)
         sks = {i["SK"] for i in items}
@@ -126,4 +126,36 @@ class RepairMsgHistoryTest(TembaTest):
         # re-running is idempotent - nothing left to repair
         out = StringIO()
         call_command("repair_msg_history", org_id=self.org.id, contact_uuid=str(contact.uuid), stdout=out)
-        self.assertIn("0 legacy msg events repaired", out.getvalue())
+        self.assertIn("0 legacy history event groups repaired", out.getvalue())
+
+    @cleanup(dynamodb=True)
+    def test_command_mailroom_event_uuid(self):
+        """
+        Mailroom writes evt#<event_uuid> where event_uuid can differ from msg.uuid in Postgres, so repair must scan
+        the DynamoDB partition rather than look up evt#<msg.uuid>.
+        """
+        contact = self.create_contact("Ann", phone="+16305550123")
+
+        msg = self.create_incoming_msg(
+            contact, "old message", created_on=datetime(2025, 6, 5, 7, 15, 8, tzinfo=tzone.utc)
+        )
+        msg.uuid = uuid4()
+        msg.save(update_fields=["uuid"])
+
+        event_uuid = uuid4()  # different from msg.uuid, as mailroom does in production
+        dynamo.HISTORY.put_item(
+            Item={
+                "PK": f"con#{contact.uuid}",
+                "SK": f"evt#{event_uuid}",
+                "OrgID": self.org.id,
+                "Data": {"type": "msg_received", "created_on": "2025-06-05T07:15:08+00:00", "msg": {"text": "old message"}},
+            }
+        )
+
+        out = StringIO()
+        call_command("repair_msg_history", org_id=self.org.id, contact_uuid=str(contact.uuid), stdout=out)
+        self.assertIn("1 legacy history event groups repaired", out.getvalue())
+
+        sks = {i["SK"] for i in dynamo_scan_all(dynamo.HISTORY)}
+        self.assertNotIn(f"evt#{event_uuid}", sks)
+        self.assertTrue(all(is_uuid7(sk[4:40]) for sk in sks if sk.startswith("evt#") and "#" not in sk[4:]))
