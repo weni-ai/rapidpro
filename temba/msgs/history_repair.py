@@ -13,9 +13,9 @@ This module re-keys those events using a v7 UUID derived from the event's `creat
 in Postgres, since that value is exposed through the public API and may be referenced externally.
 """
 
-import iso8601
-
 from uuid import UUID
+
+import iso8601
 
 from temba.utils import dynamo
 from temba.utils.uuid import is_uuid7
