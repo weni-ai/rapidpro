@@ -148,7 +148,11 @@ class RepairMsgHistoryTest(TembaTest):
                 "PK": f"con#{contact.uuid}",
                 "SK": f"evt#{event_uuid}",
                 "OrgID": self.org.id,
-                "Data": {"type": "msg_received", "created_on": "2025-06-05T07:15:08+00:00", "msg": {"text": "old message"}},
+                "Data": {
+                    "type": "msg_received",
+                    "created_on": "2025-06-05T07:15:08+00:00",
+                    "msg": {"text": "old message"},
+                },
             }
         )
 
