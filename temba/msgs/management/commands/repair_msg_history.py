@@ -1,15 +1,13 @@
 from django.core.management.base import BaseCommand, CommandError
-from django.db.models import Prefetch
 
 from temba.contacts.models import Contact
-from temba.msgs.history_repair import repair_msgs
-from temba.msgs.models import Msg
+from temba.msgs.history_repair import repair_contact_partition
 from temba.orgs.models import Org
 
 
 class Command(BaseCommand):
     help = (
-        "Repairs contact history message events that were written with non-time-ordered (v4) UUIDs, which makes an "
+        "Repairs contact history events that were written with non-time-ordered (v4) UUIDs, which makes an "
         "old message show up as the most recent one. Scoped to a single org, and optionally a single contact."
     )
 
@@ -28,17 +26,13 @@ class Command(BaseCommand):
         if not org:
             raise CommandError(f"no active org with id {org_id}")
 
-        msgs = (
-            Msg.objects.filter(org=org, contact__is_active=True)
-            .select_related("channel", "contact_urn")
-            .prefetch_related(Prefetch("contact", Contact.objects.only("uuid")))
-        )
+        contacts = org.contacts.filter(is_active=True)
 
         if contact_uuid:
-            contact = org.contacts.filter(uuid=contact_uuid, is_active=True).first()
+            contact = contacts.filter(uuid=contact_uuid).first()
             if not contact:
                 raise CommandError(f"no active contact with uuid {contact_uuid} in org #{org.id}")
-            msgs = msgs.filter(contact=contact)
+            contacts = contacts.filter(id=contact.id)
             scope = f"contact {contact_uuid}"
         else:
             scope = "all contacts"
@@ -46,7 +40,11 @@ class Command(BaseCommand):
         mode = "DRY RUN - " if dry_run else ""
         self.stdout.write(f"{mode}Repairing msg history for '{org.name}' (#{org.id}), {scope}...")
 
-        num_repaired = repair_msgs(msgs, dry_run=dry_run)
+        num_repaired = 0
+        for i, contact in enumerate(contacts.iterator(), 1):
+            num_repaired += repair_contact_partition(f"con#{contact.uuid}", dry_run=dry_run)
+            if i % 100 == 0:
+                self.stdout.write(f"  ... {i} contacts processed, {num_repaired:,} event groups so far")
 
         verb = "would be repaired" if dry_run else "repaired"
-        self.stdout.write(f"Done. {num_repaired:,} legacy msg events {verb}.")
+        self.stdout.write(f"Done. {num_repaired:,} legacy history event groups {verb}.")
