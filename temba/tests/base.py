@@ -2,11 +2,13 @@ import copy
 import shutil
 from datetime import datetime
 from functools import wraps
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from django_redis import get_redis_connection
+from PIL import Image, ImageDraw
 from smartmin.tests import SmartminTest
 
 from django.conf import settings
@@ -20,17 +22,24 @@ from django.utils import timezone
 
 from temba.archives.models import Archive
 from temba.channels.models import Channel, ChannelEvent, ChannelLog
-from temba.contacts.models import URN, Contact, ContactField, ContactGroup, ContactImport, ContactURN
+from temba.contacts.models import URN, Contact, ContactField, ContactGroup, ContactImport
 from temba.flows.models import Flow, FlowRun, FlowSession
 from temba.ivr.models import Call
 from temba.locations.models import AdminBoundary, BoundaryAlias
 from temba.msgs.models import Broadcast, Label, Msg, OptIn
 from temba.orgs.models import Org, OrgRole, User
+from temba.templates.models import Template
 from temba.tickets.models import Ticket, TicketEvent
 from temba.utils import json
 from temba.utils.uuid import UUID, uuid4
 
-from .mailroom import create_contact_locally, update_field_locally
+from .mailroom import (
+    contact_urn_lookup,
+    create_broadcast,
+    create_contact_locally,
+    resolve_destination,
+    update_field_locally,
+)
 from .s3 import jsonlgz_encode
 
 
@@ -133,6 +142,7 @@ class TembaTest(SmartminTest):
         self.ward3 = AdminBoundary.create(osm_id="VMN.49.1_1", name="Bukure", level=3, parent=self.district4)
 
         BoundaryAlias.create(self.org, self.admin, self.state1, "Kigari")
+        BoundaryAlias.create(self.org2, self.admin2, self.state1, "Chigali")
 
         self.country.update_path()
 
@@ -202,6 +212,7 @@ class TembaTest(SmartminTest):
         user = User.objects.create_user(username=email, email=email, **kwargs)
         user.set_password(self.default_password)
         user.save()
+
         for group in group_names:
             user.groups.add(Group.objects.get(name=group))
         return user
@@ -291,7 +302,6 @@ class TembaTest(SmartminTest):
         created_on=None,
         external_id=None,
         voice=False,
-        surveyor=False,
         flow=None,
         logs=None,
     ):
@@ -307,7 +317,6 @@ class TembaTest(SmartminTest):
             created_on=created_on,
             visibility=visibility,
             external_id=external_id,
-            surveyor=surveyor,
             flow=flow,
             logs=logs,
         )
@@ -329,13 +338,15 @@ class TembaTest(SmartminTest):
         sent_on=None,
         high_priority=False,
         voice=False,
-        surveyor=False,
         next_attempt=None,
         failed_reason=None,
         flow=None,
         ticket=None,
         logs=None,
     ):
+        if failed_reason:
+            status = Msg.STATUS_FAILED
+
         if status in (Msg.STATUS_WIRED, Msg.STATUS_SENT, Msg.STATUS_DELIVERED) and not sent_on:
             sent_on = timezone.now()
 
@@ -356,7 +367,6 @@ class TembaTest(SmartminTest):
             created_by=created_by,
             sent_on=sent_on,
             high_priority=high_priority,
-            surveyor=surveyor,
             flow=flow,
             ticket=ticket,
             metadata=metadata,
@@ -399,7 +409,6 @@ class TembaTest(SmartminTest):
         visibility=Msg.VISIBILITY_VISIBLE,
         external_id=None,
         high_priority=False,
-        surveyor=False,
         flow=None,
         ticket=None,
         broadcast=None,
@@ -410,22 +419,17 @@ class TembaTest(SmartminTest):
         failed_reason=None,
         logs=None,
     ):
-        assert not (surveyor and channel), "surveyor messages don't have channels"
         assert not channel or channel.org == contact.org, "channel belong to different org than contact"
 
         org = contact.org
 
-        if surveyor:
-            contact_urn = None
+        if failed_reason == Msg.FAILED_NO_DESTINATION:
             channel = None
+            contact_urn = None
         else:
-            # a simplified version of how channels are chosen
-            contact_urn = contact.get_urn()
-            if not channel:
-                if contact_urn and contact_urn.channel:
-                    channel = contact_urn.channel
-                else:
-                    channel = org.channels.filter(is_active=True, schemes__contains=[contact_urn.scheme]).first()
+            channel, contact_urn = resolve_destination(org, contact, channel)
+
+            assert channel and contact_urn, "messages require a channel and contact URN, except for failed_reason=D"
 
         return Msg.objects.create(
             org=org,
@@ -440,10 +444,12 @@ class TembaTest(SmartminTest):
             status=status or (Msg.STATUS_PENDING if direction == Msg.DIRECTION_IN else Msg.STATUS_INITIALIZING),
             msg_type=msg_type,
             visibility=visibility,
+            is_android=channel and channel.is_android,
             external_id=external_id,
             high_priority=high_priority,
             created_on=created_on or timezone.now(),
             created_by=created_by,
+            modified_on=timezone.now(),
             sent_on=sent_on,
             broadcast=broadcast,
             optin=optin,
@@ -455,26 +461,15 @@ class TembaTest(SmartminTest):
             log_uuids=[l.uuid for l in logs or []],
         )
 
-    def create_translations(self, text="", attachments=[], lang="und", optin=None):
-        translations = {
-            lang: {
-                "text": text,
-                "attachments": attachments,
-                "quick_replies": [],
-            }
-        }
-
-        if optin:
-            translations[lang]["optin"] = {"uuid": str(optin.uuid), "name": optin.name} if optin else None
-        return translations
-
     def create_broadcast(
         self,
         user,
-        translations: dict[str, list] | str,
-        contacts=(),
+        translations: dict[str, dict],
         groups=(),
+        contacts=(),
+        urns=(),
         optin=None,
+        exclude=None,
         status=Broadcast.STATUS_SENT,
         msg_status=Msg.STATUS_SENT,
         parent=None,
@@ -482,27 +477,43 @@ class TembaTest(SmartminTest):
         created_on=None,
         org=None,
     ):
-        if isinstance(translations, str):
-            translations = self.create_translations(translations)
-
-        bcast = Broadcast.create(
+        bcast = create_broadcast(
             org or self.org,
             user,
             translations=translations,
-            contacts=contacts,
+            base_language=next(iter(translations)),
             groups=groups,
+            contacts=contacts,
+            urns=urns,
+            query=None,
+            node_uuid=None,
+            exclude=exclude,
             optin=optin,
-            parent=parent,
+            template=None,
+            template_variables=None,
             schedule=schedule,
-            created_on=created_on or timezone.now(),
-            status=status,
         )
+
+        update_fields = []
+
+        if bcast.status != status:
+            bcast.status = status
+            update_fields.append("status")
+        if parent:
+            bcast.parent = parent
+            update_fields.append("parent")
+        if created_on:
+            bcast.created_on = created_on
+            update_fields.append("created_on")
+
+        if update_fields:
+            bcast.save(update_fields=update_fields)
 
         contacts = set(bcast.contacts.all())
         for group in bcast.groups.all():
             contacts.update(group.contacts.all())
 
-        if not schedule:
+        if not schedule and status != Broadcast.STATUS_QUEUED:
             for contact in contacts:
                 translation = bcast.get_translation(contact)
                 self._create_msg(
@@ -617,6 +628,7 @@ class TembaTest(SmartminTest):
             msg_type=Msg.TYPE_VOICE,
             sent_on=timezone.now(),
             created_on=timezone.now(),
+            modified_on=timezone.now(),
         )
 
         return call
@@ -693,7 +705,7 @@ class TembaTest(SmartminTest):
         )
 
     def create_channel_event(self, channel, urn, event_type, occurred_on=None, optin=None, extra=None):
-        urn_obj = ContactURN.lookup(channel.org, urn, country_code=channel.country)
+        urn_obj = contact_urn_lookup(channel.org, urn)
         if urn_obj:
             contact = urn_obj.contact
         else:
@@ -710,6 +722,22 @@ class TembaTest(SmartminTest):
             optin=optin,
             extra=extra,
         )
+
+    def create_template(self, name: str, translations: list, org=None, uuid=None):
+        template = Template.objects.create(
+            uuid=uuid or uuid4(),
+            org=org or self.org,
+            name=name,
+            created_by=self.admin,
+            modified_by=self.admin,
+        )
+        for trans in translations:
+            trans.template = template
+            trans.save()
+
+        template.update_base()
+
+        return template
 
     def create_ticket(
         self,
@@ -764,6 +792,13 @@ class TembaTest(SmartminTest):
 
     def set_contact_field(self, contact, key, value):
         update_field_locally(self.admin, contact, key, value)
+
+    def assertToast(self, response, level, text):
+        toasts = json.loads(response.get("X-Temba-Toasts", []))
+        for toast in toasts:
+            if toast["level"] == level and toast["text"] == text:
+                return
+        self.fail(f"Toast '{text}'@{level} not found: {toasts}")
 
     def assertOutbox(self, outbox_index, from_email, subject, body, recipients):
         self.assertEqual(len(mail.outbox), outbox_index + 1)
@@ -849,6 +884,16 @@ class TembaTest(SmartminTest):
 
     def mockReadOnly(self, assert_models: set = None):
         return MockReadOnly(self, assert_models=assert_models)
+
+    def getMockImageUpload(self, filename="test.png", width=100, height=100, type="png"):
+        f = BytesIO()
+        image = Image.new("RGB", (width, height), color="white")
+        draw = ImageDraw.Draw(image)
+        draw.text((10, 10), filename, fill="black")
+        image.save(f, type)
+        f.seek(0)
+
+        return SimpleUploadedFile(filename, content=f.read(), content_type="image/png")
 
 
 class AnonymousOrg:

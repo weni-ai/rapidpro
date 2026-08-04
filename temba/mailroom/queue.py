@@ -13,92 +13,14 @@ DEFAULT_PRIORITY = 0
 QUEUE_PATTERN = "%s:%d"
 ACTIVE_PATTERN = "%s:active"
 
-# task queues
-CONTACT_QUEUE = "c:%d:%d"
-BATCH_QUEUE = "batch"
-HANDLER_QUEUE = "handler"
-
-
-class HandlerTask(Enum):
-    CONTACT_EVENT = "handle_contact_event"
-
-
-class ContactEvent(Enum):
-    MSG = "msg_event"
-    MO_MISS = "mo_miss"
-
 
 class BatchTask(Enum):
     START_FLOW = "start_flow"
-    SEND_BROADCAST = "send_broadcast"
     INTERRUPT_SESSIONS = "interrupt_sessions"
     POPULATE_DYNAMIC_GROUP = "populate_dynamic_group"
     SCHEDULE_CAMPAIGN_EVENT = "schedule_campaign_event"
     IMPORT_CONTACT_BATCH = "import_contact_batch"
     INTERRUPT_CHANNEL = "interrupt_channel"
-
-
-def queue_msg_handling(msg):
-    """
-    Queues the passed in message for handling in mailroom
-    """
-
-    msg_task = {
-        "org_id": msg.org_id,
-        "channel_id": msg.channel.id,
-        "contact_id": msg.contact_id,
-        "msg_id": msg.id,
-        "msg_uuid": str(msg.uuid),
-        "msg_external_id": msg.external_id,
-        "urn": str(msg.contact_urn),
-        "urn_id": msg.contact_urn_id,
-        "text": msg.text,
-        "attachments": msg.attachments,
-        "new_contact": False,  # only used by courier
-    }
-
-    _queue_handler_task(msg.org_id, msg.contact_id, ContactEvent.MSG, msg_task)
-
-
-def queue_mo_miss_event(event):
-    """
-    Queues the passed in channel event to mailroom for handling
-    """
-
-    event_task = {
-        "id": event.id,
-        "event_type": ContactEvent.MO_MISS.value,
-        "org_id": event.org_id,
-        "channel_id": event.channel_id,
-        "contact_id": event.contact_id,
-        "urn_id": event.contact_urn_id,
-        "extra": event.extra,
-        "occurred_on": event.occurred_on,
-        "new_contact": False,  # only used by courier
-    }
-
-    _queue_handler_task(event.org_id, event.contact_id, ContactEvent.MO_MISS, event_task)
-
-
-def queue_broadcast(broadcast):
-    """
-    Queues the passed in broadcast for sending by mailroom
-    """
-
-    task = {
-        "translations": broadcast.translations,
-        "template_state": "unevaluated",
-        "base_language": broadcast.base_language,
-        "optin_id": broadcast.optin_id,
-        "urns": broadcast.urns or [],
-        "contact_ids": list(broadcast.contacts.values_list("id", flat=True)),
-        "group_ids": list(broadcast.groups.values_list("id", flat=True)),
-        "broadcast_id": broadcast.id,
-        "org_id": broadcast.org_id,
-        "created_by_id": broadcast.created_by_id,
-    }
-
-    _queue_batch_task(broadcast.org_id, BatchTask.SEND_BROADCAST, task, HIGH_PRIORITY)
 
 
 def queue_populate_dynamic_group(group):
@@ -190,27 +112,7 @@ def _queue_batch_task(org_id, task_type, task, priority):
 
     r = get_redis_connection("default")
     pipe = r.pipeline()
-    _queue_task(pipe, org_id, BATCH_QUEUE, task_type, task, priority)
-    pipe.execute()
-
-
-def _queue_handler_task(org_id, contact_id, task_type, task):
-    """
-    Adds the passed in task to the contact's queue for mailroom to process
-    """
-
-    contact_queue = CONTACT_QUEUE % (org_id, contact_id)
-    contact_task = _create_mailroom_task(org_id, task_type, task)
-
-    r = get_redis_connection("default")
-    pipe = r.pipeline()
-
-    # push our concrete task to the contact's queue
-    pipe.rpush(contact_queue, json.dumps(contact_task))
-
-    # then push a contact handling event to the org queue
-    event_task = {"contact_id": contact_id}
-    _queue_task(pipe, org_id, HANDLER_QUEUE, HandlerTask.CONTACT_EVENT, event_task, HIGH_PRIORITY)
+    _queue_task(pipe, org_id, "batch", task_type, task, priority)
     pipe.execute()
 
 
@@ -232,7 +134,7 @@ def _queue_task(pipe, org_id, queue, task_type, task, priority):
     score = int(round(time.time() * 1000)) + priority
 
     # create our payload
-    payload = _create_mailroom_task(org_id, task_type, task)
+    payload = _create_mailroom_task(task_type, task)
 
     org_queue = QUEUE_PATTERN % (queue, org_id)
     active_queue = ACTIVE_PATTERN % queue
@@ -244,8 +146,8 @@ def _queue_task(pipe, org_id, queue, task_type, task, priority):
     pipe.zincrby(active_queue, 0, org_id)
 
 
-def _create_mailroom_task(org_id, task_type, task):
+def _create_mailroom_task(task_type, task):
     """
     Returns a mailroom format task job based on the task type and passed in task
     """
-    return {"type": task_type.value, "org_id": org_id, "task": task, "queued_on": timezone.now()}
+    return {"type": task_type.value, "task": task, "queued_on": timezone.now()}

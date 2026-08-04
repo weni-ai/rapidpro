@@ -4,11 +4,10 @@ from django.db.models import QuerySet
 from django.forms import model_to_dict
 from django.urls import reverse
 
+from temba.orgs.models import User
+
 
 class CRUDLTestMixin:
-    def get_test_users(self):
-        return self.user, self.editor, self.agent, self.admin, self.admin2
-
     def requestView(self, url, user, *, post_data=None, checks=(), choose_org=None, **kwargs):
         """
         Requests the given URL as a specific user and runs a set of checks
@@ -48,231 +47,144 @@ class CRUDLTestMixin:
                 return response
         return response
 
-    def assertReadFetch(
-        self, url, *, allow_viewers, allow_editors, allow_agents=False, context_object=None, status=200
-    ):
+    def assertRequestDisallowed(self, url, users: list):
         """
-        Fetches a read view as different users
+        Asserts that the given users cannot fetch the given URL
         """
-        viewer, editor, agent, admin, org2_admin = self.get_test_users()
 
-        def as_user(user, allowed):
-            if allowed:
-                checks = [StatusCode(status)]
-                if context_object:
-                    checks.append(ContextObject(context_object))
-            else:
-                checks = [LoginRedirectOr404()]
+        for user in users:
+            self.requestView(url, user, checks=[LoginRedirectOr404()])
 
-            return self.requestView(url, user, checks=checks, choose_org=self.org)
+    def assertReadFetch(self, url, users: list, *, context_object=None, status=200, choose_org=None):
+        """
+        Asserts that the given users can fetch the given read page
+        """
 
-        as_user(None, allowed=False)
-        as_user(viewer, allowed=allow_viewers)
-        as_user(editor, allowed=allow_editors)
-        as_user(agent, allowed=allow_agents)
-        as_user(org2_admin, allowed=False)
-        return as_user(admin, allowed=True)
+        checks = [StatusCode(status)]
+        if context_object:
+            checks.append(ContextObject(context_object))
+
+        response = None
+        for user in users:
+            response = self.requestView(url, user, checks=checks, choose_org=choose_org)
+
+        return response
 
     def assertListFetch(
-        self,
-        url,
-        *,
-        allow_viewers,
-        allow_editors,
-        allow_agents=False,
-        allow_org2=True,  # by default list view URLs are not org specific
-        context_objects=None,
-        context_object_count=None,
-        status=200,
+        self, url, users, *, context_objects=None, context_object_count=None, status=200, choose_org=None
     ):
-        viewer, editor, agent, admin, org2_admin = self.get_test_users()
+        checks = [StatusCode(status)]
+        if context_objects is not None:
+            checks.append(ContextObjectList(context_objects))
+        elif context_object_count is not None:
+            checks.append(ContextObjectCount(context_object_count))
 
-        def as_user(user, allowed):
-            if allowed:
-                checks = [StatusCode(status)]
-                if user != org2_admin:
-                    if context_objects is not None:
-                        checks.append(ContextObjectList(context_objects))
-                    elif context_object_count is not None:
-                        checks.append(ContextObjectCount(context_object_count))
-            else:
-                checks = [LoginRedirect()]
+        response = None
+        for user in users:
+            response = self.requestView(url, user, checks=checks, choose_org=choose_org)
 
-            return self.requestView(url, user, checks=checks, choose_org=self.org)
+        return response
 
-        as_user(None, allowed=False)
-        as_user(viewer, allowed=allow_viewers)
-        as_user(editor, allowed=allow_editors)
-        as_user(agent, allowed=allow_agents)
-        as_user(org2_admin, allowed=allow_org2)
-        return as_user(admin, allowed=True)
+    def assertCreateFetch(self, url, users, *, form_fields=(), status=200, choose_org=None):
+        checks = [StatusCode(status), FormFields(form_fields)]
+        if isinstance(form_fields, dict):
+            checks.append(FormInitialValues(form_fields))
 
-    def assertCreateFetch(
-        self, url, *, allow_viewers, allow_editors, allow_agents=False, allow_org2=True, form_fields=(), status=200
-    ):
-        viewer, editor, agent, admin, org2_admin = self.get_test_users()
+        response = None
+        for user in users:
+            response = self.requestView(url, user, checks=checks, choose_org=choose_org)
 
-        def as_user(user, allowed, check_fields=True):
-            if allowed:
-                checks = [StatusCode(status)]
-                if check_fields:
-                    checks.append(FormFields(form_fields))
-                    if isinstance(form_fields, dict):
-                        checks.append(FormInitialValues(form_fields))
-            else:
-                checks = [LoginRedirect()]
+        return response
 
-            return self.requestView(url, user, checks=checks, choose_org=self.org)
-
-        as_user(None, allowed=False)
-        as_user(viewer, allowed=allow_viewers)
-        as_user(editor, allowed=allow_editors)
-        as_user(agent, allowed=allow_agents)
-        as_user(org2_admin, allowed=allow_org2, check_fields=False)
-        return as_user(admin, allowed=True)
-
-    def assertCreateSubmit(self, url, data, *, form_errors=None, new_obj_query=None, success_status=302):
+    def assertCreateSubmit(self, url, user, data, *, form_errors=None, new_obj_query=None, success_status=302):
         assert form_errors or new_obj_query is not None, "must specify form_errors or new_obj_query"
 
-        viewer, editor, agent, admin, org2_admin = self.get_test_users()
+        if form_errors:
+            checks = [StatusCode(200), FormErrors(form_errors)]
+            if new_obj_query:
+                checks.append(ObjectNotCreated(new_obj_query))
+        else:
+            checks = [StatusCode(success_status), NoFormErrors(), ObjectCreated(new_obj_query)]
 
-        def as_user(user, allowed):
-            if allowed:
-                if form_errors:
-                    checks = [StatusCode(200), FormErrors(form_errors)]
-                    if new_obj_query:
-                        checks.append(ObjectNotCreated(new_obj_query))
-                else:
-                    checks = [StatusCode(success_status), NoFormErrors(), ObjectCreated(new_obj_query)]
-            else:
-                checks = [LoginRedirect()]
+        return self.requestView(url, user, post_data=data, checks=checks, choose_org=self.org)
 
-            return self.requestView(url, user, post_data=data, checks=checks, choose_org=self.org)
+    def assertUpdateFetch(self, url, users, *, form_fields=(), status=200, choose_org=None):
+        checks = [StatusCode(status), FormFields(form_fields)]
+        if isinstance(form_fields, dict):
+            checks.append(FormInitialValues(form_fields))
 
-        as_user(None, allowed=False)
-        return as_user(admin, allowed=True)
+        response = None
+        for user in users:
+            response = self.requestView(url, user, checks=checks, choose_org=choose_org)
 
-    def assertUpdateFetch(
-        self, url, *, allow_viewers, allow_editors, allow_agents=False, allow_org2=False, form_fields=(), status=200
-    ):
-        viewer, editor, agent, admin, org2_admin = self.get_test_users()
+        return response
 
-        def as_user(user, allowed):
-            if allowed:
-                checks = [StatusCode(status), FormFields(form_fields)]
-                if isinstance(form_fields, dict):
-                    checks.append(FormInitialValues(form_fields))
-            else:
-                checks = [LoginRedirect()]
-
-            return self.requestView(url, user, checks=checks)
-
-        as_user(None, allowed=False)
-        as_user(viewer, allowed=allow_viewers)
-        as_user(editor, allowed=allow_editors)
-        as_user(agent, allowed=allow_agents)
-        as_user(org2_admin, allowed=allow_org2)
-        return as_user(admin, allowed=True)
-
-    def assertUpdateSubmit(self, url, data, *, form_errors=None, object_unchanged=None, success_status=302):
+    def assertUpdateSubmit(self, url, user, data, *, form_errors=None, object_unchanged=None, success_status=302):
         assert not form_errors or object_unchanged, "if form_errors specified, must also specify object_unchanged"
 
-        viewer, editor, agent, admin, org2_admin = self.get_test_users()
+        if form_errors:
+            checks = [StatusCode(200), FormErrors(form_errors), ObjectUnchanged(object_unchanged)]
+        else:
+            checks = [StatusCode(success_status), NoFormErrors()]
 
-        def as_user(user, allowed):
-            if allowed:
-                if form_errors:
-                    checks = [StatusCode(200), FormErrors(form_errors), ObjectUnchanged(object_unchanged)]
-                else:
-                    checks = [StatusCode(success_status), NoFormErrors()]
-            else:
-                checks = [LoginRedirect()]
+        return self.requestView(url, user, post_data=data, checks=checks, choose_org=self.org)
 
-            return self.requestView(url, user, post_data=data, checks=checks, choose_org=self.org)
+    def assertDeleteFetch(self, url, users, *, status=200, as_modal=False, choose_org=None):
+        checks = [StatusCode(status)]
+        kwargs = {"HTTP_X_PJAX": True} if as_modal else {}
 
-        as_user(None, allowed=False)
-        return as_user(admin, allowed=True)
+        response = None
+        for user in users:
+            response = self.requestView(url, user, checks=checks, choose_org=choose_org, **kwargs)
 
-    def assertDeleteFetch(
-        self, url, *, allow_viewers=False, allow_editors=False, allow_agents=False, status=200, as_modal=False
-    ):
-        viewer, editor, agent, admin, org2_admin = self.get_test_users()
-
-        def as_user(user, allowed):
-            if allowed:
-                checks = [StatusCode(status)]
-            else:
-                checks = [LoginRedirect()]
-
-            if as_modal:
-                return self.requestView(url, user, checks=checks, choose_org=self.org, HTTP_X_PJAX=True)
-            else:
-                return self.requestView(url, user, checks=checks, choose_org=self.org)
-
-        as_user(None, allowed=False)
-        as_user(viewer, allowed=allow_viewers)
-        as_user(editor, allowed=allow_editors)
-        as_user(agent, allowed=allow_agents)
-        as_user(org2_admin, allowed=False)
-        return as_user(admin, allowed=True)
+        return response
 
     def assertDeleteSubmit(
-        self, url, *, object_unchanged=None, object_deleted=None, object_deactivated=None, success_status=302
+        self, url, user, *, object_unchanged=None, object_deleted=None, object_deactivated=None, success_status=302
     ):
         assert (
             object_unchanged or object_deleted or object_deactivated
         ), "must specify object_unchanged or object_deleted or object_deactivated"
 
-        viewer, editor, agent, admin, org2_admin = self.get_test_users()
+        if object_unchanged:
+            checks = [ObjectUnchanged(object_unchanged)]
+        elif object_deleted:
+            checks = [StatusCode(success_status), ObjectDeleted(object_deleted)]
+        else:
+            checks = [StatusCode(success_status), ObjectDeactivated(object_deactivated)]
 
-        def as_user(user, allowed):
-            if allowed:
-                if object_unchanged:
-                    checks = [ObjectUnchanged(object_unchanged)]
-                elif object_deleted:
-                    checks = [StatusCode(success_status), ObjectDeleted(object_deleted)]
-                else:
-                    checks = [StatusCode(success_status), ObjectDeactivated(object_deactivated)]
-            else:
-                checks = [LoginRedirect()]
+        return self.requestView(url, user, post_data={}, checks=checks)
 
-            return self.requestView(url, user, post_data={}, checks=checks)
+    def assertStaffOnly(self, url: str, choose_org=None):
+        self.requestView(url, None, checks=[LoginRedirect()], choose_org=choose_org)
+        self.requestView(url, self.agent, checks=[LoginRedirect()], choose_org=choose_org)
+        self.requestView(url, self.user, checks=[LoginRedirect()], choose_org=choose_org)
+        self.requestView(url, self.editor, checks=[LoginRedirect()], choose_org=choose_org)
+        self.requestView(url, self.admin, checks=[LoginRedirect()], choose_org=choose_org)
 
-        as_user(None, allowed=False)
-        as_user(org2_admin, allowed=False)
-        return as_user(admin, allowed=True)
+        return self.requestView(url, self.customer_support, checks=[StatusCode(200)], choose_org=choose_org)
 
-    def assertStaffOnly(self, url: str):
-        viewer, editor, agent, admin, org2_admin = self.get_test_users()
+    def assertPageMenu(self, url, user, items: list, *, choose_org=None):
+        response = self.requestView(
+            url, user, checks=[StatusCode(200), ContentType("application/json")], choose_org=choose_org
+        )
 
-        self.requestView(url, None, checks=[LoginRedirect()])
-        self.requestView(url, agent, checks=[LoginRedirect()])
-        self.requestView(url, viewer, checks=[LoginRedirect()])
-        self.requestView(url, editor, checks=[LoginRedirect()])
-        self.requestView(url, admin, checks=[LoginRedirect()])
+        def matcher(i):
+            m = i["name"]
+            if "count" in i:
+                m = f"{m} ({i['count']})"
+            if "items" in i:
+                m = (m, [matcher(c) for c in i["items"] if "name" in c])
+            return m
 
-        return self.requestView(url, self.customer_support, checks=[StatusCode(200)])
+        actual = []
+        for item in response.json()["results"]:
+            if "name" in item:
+                actual.append(matcher(item))
 
-    def assertMenu(self, url, count, contains_names=[], allow_viewers=True):
-        response = self.assertListFetch(url, allow_viewers=allow_viewers, allow_editors=True, allow_agents=True)
-        menu = response.json()["results"]
-        self.assertEqual(count, len(menu))
+        self.assertEqual(items, actual)
 
-        # check the content if we have them
-        if contains_names:
-            for name in contains_names:
-                steps = name.split("/")
-                while steps:
-                    step = steps.pop(0)
-                    menu_names = [m["name"] for m in menu if "name" in m]
-                    try:
-                        idx = menu_names.index(step)
-                        if "items" in menu[idx]:
-                            menu = menu[idx]["items"]
-                    except ValueError:
-                        self.fail(f"Couldn't find {step} in {menu_names}")
-
-    def assertContentMenu(self, url: str, user, items: list = None):
+    def assertContentMenu(self, url: str, user, items: list):
         response = self.requestView(
             url,
             user,
@@ -365,6 +277,11 @@ class ObjectUnchanged(BaseCheck):
             # don't consider list ordering as significant
             if isinstance(v, list):
                 d[k] = list(sorted(v, key=lambda x: str(x)))
+
+        # logging in to request the view changes a user object so ignore that
+        if isinstance(obj, User) and "last_login" in d:
+            del d["last_login"]
+
         return d
 
 

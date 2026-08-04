@@ -462,7 +462,6 @@ class UpdateTelChannelForm(UpdateChannelForm):
 class ChannelCRUDL(SmartCRUDL):
     model = Channel
     actions = (
-        "list",
         "chart",
         "claim",
         "claim_all",
@@ -497,6 +496,9 @@ class ChannelCRUDL(SmartCRUDL):
 
             menu.add_link(_("Logs"), reverse("channels.channellog_list", args=[obj.uuid]))
 
+            if obj.type.template_type:
+                menu.add_link(_("Template Logs"), reverse("request_logs.httplog_channel", args=[obj.uuid]))
+
             if self.has_org_perm("channels.channel_update"):
                 menu.add_modax(
                     _("Edit"),
@@ -522,7 +524,7 @@ class ChannelCRUDL(SmartCRUDL):
             context["msg_count"] = channel.get_msg_count()
             context["ivr_count"] = channel.get_ivr_count()
 
-            if channel.is_android():
+            if channel.is_android:
                 context["latest_sync_events"] = channel.sync_events.order_by("-created_on")[:10]
 
             if not channel.is_new():
@@ -731,27 +733,14 @@ class ChannelCRUDL(SmartCRUDL):
             return response
 
     class Update(OrgObjPermsMixin, ComponentFormMixin, ModalMixin, SmartUpdateView):
-        success_message = ""
-        submit_button_name = _("Save Changes")
-
         def derive_title(self):
-            return _("%s Channel") % self.object.get_channel_type_display()
+            return _("%s Channel") % self.object.type.name
 
         def derive_exclude(self):
             return [] if self.request.user.is_staff else ["log_policy"]
 
         def derive_readonly(self):
             return self.form.Meta.readonly if hasattr(self, "form") else []
-
-        def lookup_field_label(self, context, field, default=None):
-            if field in self.form.Meta.labels:
-                return self.form.Meta.labels[field]
-            return super().lookup_field_label(context, field, default=default)
-
-        def lookup_field_help(self, field, default=None):
-            if field in self.form.Meta.helps:
-                return self.form.Meta.helps[field]
-            return super().lookup_field_help(field, default=default)
 
         def get_success_url(self):
             return reverse("channels.channel_read", args=[self.object.uuid])
@@ -864,34 +853,6 @@ class ChannelCRUDL(SmartCRUDL):
             context["ip_addresses"] = settings.IP_ADDRESSES if self.object.type.config_ui.show_public_ips else None
 
             return context
-
-    class List(OrgPermsMixin, SmartListView):
-        title = _("Channels")
-        fields = ("name", "address", "last_seen")
-        search_fields = ("name", "address", "org__created_by__email")
-
-        def lookup_field_link(self, context, field, obj):
-            return reverse("channels.channel_read", args=[obj.uuid])
-
-        def get_queryset(self, **kwargs):
-            return super().get_queryset(**kwargs).filter(org=self.request.org, is_active=True)
-
-        def pre_process(self, *args, **kwargs):
-            # everybody else goes to a different page depending how many channels there are
-            channels = list(self.request.org.channels.filter(is_active=True).only("uuid"))
-
-            if len(channels) == 0:
-                return HttpResponseRedirect(reverse("channels.channel_claim"))
-            elif len(channels) == 1:
-                return HttpResponseRedirect(reverse("channels.channel_read", args=[channels[0].uuid]))
-            else:
-                return super().pre_process(*args, **kwargs)
-
-        def get_name(self, obj):
-            return obj.get_name()
-
-        def get_address(self, obj):
-            return obj.address if obj.address else _("Unknown")
 
 
 class ChannelLogCRUDL(SmartCRUDL):

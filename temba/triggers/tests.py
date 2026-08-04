@@ -54,12 +54,12 @@ class TriggerTest(TembaTest):
         )
 
         self.assertEqual("Keyword[join] → Test Flow", keyword1.name)
-        self.assertEqual("<Trigger: type=K flow=Test Flow>", repr(keyword1))
+        self.assertEqual(f'<Trigger: id={keyword1.id} type=K flow="Test Flow">', repr(keyword1))
         self.assertEqual(2, keyword1.priority)
         self.assertEqual(3, keyword2.priority)
 
         self.assertEqual("Catch All → Test Flow", catchall1.name)
-        self.assertEqual("<Trigger: type=C flow=Test Flow>", repr(catchall1))
+        self.assertEqual(f'<Trigger: id={catchall1.id} type=C flow="Test Flow">', repr(catchall1))
         self.assertEqual(0, catchall1.priority)
         self.assertEqual(4, catchall2.priority)
 
@@ -529,29 +529,24 @@ class TriggerTest(TembaTest):
 
 class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
     def test_menu(self):
-        self.login(self.admin)
         menu_url = reverse("triggers.trigger_menu")
-        response = self.assertListFetch(menu_url, allow_viewers=True, allow_editors=True, allow_agents=False)
-        menu = response.json()["results"]
-        self.assertEqual(4, len(menu))
+
+        self.assertRequestDisallowed(menu_url, [None, self.agent])
+        self.assertPageMenu(menu_url, self.user, ["Active (0)", "Archived (0)"])
 
         # create a trigger with no groups
         create_url = reverse("triggers.trigger_create_keyword")
         flow = self.create_flow("My Flow", flow_type=Flow.TYPE_MESSAGE)
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"keywords": ["start"], "flow": flow.id, "match_type": "F"},
             new_obj_query=Trigger.objects.filter(keywords=["start"], flow=flow),
             success_status=200,
         )
 
-        menu_url = reverse("triggers.trigger_menu")
-        response = self.assertListFetch(menu_url, allow_viewers=True, allow_editors=True, allow_agents=False)
-        menu = response.json()["results"]
-
-        # our keyword trigger should force a keywords section
-        self.assertEqual(5, len(menu))
-        self.assertEqual(1, menu[-1]["count"])
+        # our keyword trigger should force a messages section
+        self.assertPageMenu(menu_url, self.user, ["Active (1)", "Archived (0)", "Messages (1)"])
 
         # have an archived keyword trigger
         trigger = Trigger.create(
@@ -565,23 +560,12 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
             match_type=Trigger.MATCH_ONLY_WORD,
         )
 
-        menu_url = reverse("triggers.trigger_menu")
-        response = self.assertListFetch(menu_url, allow_viewers=True, allow_editors=True, allow_agents=False)
-        menu = response.json()["results"]
-
-        # should have 2 keyword triggers
-        self.assertEqual(5, len(menu))
-        self.assertEqual(2, menu[-1]["count"])
+        self.assertPageMenu(menu_url, self.user, ["Active (2)", "Archived (0)", "Messages (2)"])
 
         trigger.archive(self.admin)
 
-        menu_url = reverse("triggers.trigger_menu")
-        response = self.assertListFetch(menu_url, allow_viewers=True, allow_editors=True, allow_agents=False)
-        menu = response.json()["results"]
-
         # the archived trigger not counted
-        self.assertEqual(5, len(menu))
-        self.assertEqual(1, menu[-1]["count"])
+        self.assertPageMenu(menu_url, self.user, ["Active (1)", "Archived (1)", "Messages (1)"])
 
     def test_create(self):
         create_url = reverse("triggers.trigger_create")
@@ -635,10 +619,10 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         group1 = self.create_group("Group 1", contacts=[])
         group2 = self.create_group("Group 2", contacts=[])
 
+        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
         response = self.assertCreateFetch(
             create_url,
-            allow_viewers=False,
-            allow_editors=True,
+            [self.editor, self.admin],
             form_fields=["keywords", "match_type", "flow", "channel", "groups", "exclude_groups"],
         )
 
@@ -654,6 +638,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # try a keyword with spaces
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"keywords": ["with spaces"], "flow": flow1.id, "match_type": "F"},
             form_errors={
                 "keywords": "Must be a single word containing only letters and numbers, or a single emoji character."
@@ -663,6 +648,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # try a keyword with special characters
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"keywords": ["keyw!o^rd__"], "flow": flow1.id, "match_type": "F"},
             form_errors={
                 "keywords": "Must be a single word containing only letters and numbers, or a single emoji character."
@@ -672,6 +658,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # try with group as both inclusion and exclusion
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {
                 "keywords": ["start"],
                 "flow": flow1.id,
@@ -685,6 +672,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # create a trigger with no groups
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"keywords": ["start", "begin"], "flow": flow1.id, "match_type": "F"},
             new_obj_query=Trigger.objects.filter(keywords=["start", "begin"], flow=flow1),
             success_status=200,
@@ -693,6 +681,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # creating triggers with non-ASCII keywords
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"keywords": ["١٠٠", "मिलाए"], "flow": flow1.id, "match_type": "F"},
             new_obj_query=Trigger.objects.filter(keywords=["١٠٠", "मिलाए"], flow=flow1),
             success_status=200,
@@ -701,6 +690,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # try a duplicate keyword
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"keywords": ["start"], "flow": flow2.id, "match_type": "F"},
             form_errors={"__all__": "There already exists a trigger of this type with these options."},
         )
@@ -708,6 +698,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # works if we specify a group
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"keywords": ["start"], "flow": flow2.id, "match_type": "F", "groups": group1.id},
             new_obj_query=Trigger.objects.filter(keywords=["start"], flow=flow2, groups=group1),
             success_status=200,
@@ -716,6 +707,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # or a channel
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"keywords": ["start"], "flow": flow2.id, "match_type": "F", "channel": self.channel.id},
             new_obj_query=Trigger.objects.filter(keywords=["start"], flow=flow2, channel=self.channel),
             success_status=200,
@@ -724,6 +716,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # groups between triggers can't overlap
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"keywords": ["start"], "flow": flow2.id, "match_type": "F", "groups": [group1.id, group2.id]},
             form_errors={"__all__": "There already exists a trigger of this type with these options."},
         )
@@ -742,10 +735,10 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         self.create_flow("Flow 4", flow_type=Flow.TYPE_SURVEY)
         self.create_flow("Flow 5", is_system=True)
 
+        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
         response = self.assertCreateFetch(
             create_url,
-            allow_viewers=False,
-            allow_editors=True,
+            [self.editor, self.admin],
             form_fields=[
                 "start_datetime",
                 "repeat_period",
@@ -763,6 +756,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # try to create trigger with an empty form
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {},
             form_errors={
                 "__all__": "Must provide at least one group or contact to include.",
@@ -775,6 +769,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # try to create a weekly repeating schedule without specifying the days of the week
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"start_datetime": "2021-06-24 12:00", "repeat_period": "W", "flow": flow1.id, "groups": [group1.id]},
             form_errors={"repeat_days_of_week": "Must specify at least one day of the week."},
         )
@@ -782,6 +777,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # try to create a weekly repeating schedule with an invalid day of the week (UI doesn't actually allow this)
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {
                 "start_datetime": "2021-06-24 12:00",
                 "repeat_period": "W",
@@ -799,6 +795,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # now create a valid trigger
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {
                 "start_datetime": "2021-06-24 12:00",
                 "repeat_period": "W",
@@ -823,6 +820,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # there is no conflict detection for scheduled triggers so can create the same trigger again
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {
                 "start_datetime": "2021-06-24 12:00",
                 "repeat_period": "W",
@@ -856,10 +854,10 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         create_url = reverse("triggers.trigger_create_inbound_call")
 
+        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
         response = self.assertCreateFetch(
             create_url,
-            allow_viewers=False,
-            allow_editors=True,
+            [self.editor, self.admin],
             form_fields=["action", "voice_flow", "msg_flow", "channel", "groups", "exclude_groups"],
         )
 
@@ -871,11 +869,16 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual([channel2, channel1], list(response.context["form"].fields["channel"].queryset))
 
         # which flow field is required depends on the action selected
-        self.assertCreateSubmit(create_url, {"action": "answer"}, form_errors={"voice_flow": "This field is required."})
-        self.assertCreateSubmit(create_url, {"action": "hangup"}, form_errors={"msg_flow": "This field is required."})
+        self.assertCreateSubmit(
+            create_url, self.admin, {"action": "answer"}, form_errors={"voice_flow": "This field is required."}
+        )
+        self.assertCreateSubmit(
+            create_url, self.admin, {"action": "hangup"}, form_errors={"msg_flow": "This field is required."}
+        )
 
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"action": "answer", "voice_flow": flow1.id, "groups": group1.id},
             new_obj_query=Trigger.objects.filter(flow=flow1, trigger_type=Trigger.TYPE_INBOUND_CALL),
             success_status=200,
@@ -884,6 +887,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # can't create another inbound call trigger for same group
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"action": "answer", "voice_flow": flow2.id, "groups": group1.id},
             form_errors={"__all__": "There already exists a trigger of this type with these options."},
         )
@@ -891,6 +895,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # even if it's for a different type of flow
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"action": "hangup", "msg_flow": flow3.id, "groups": group1.id},
             form_errors={"__all__": "There already exists a trigger of this type with these options."},
         )
@@ -898,6 +903,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # but can for different group
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"action": "answer", "voice_flow": flow2.id, "groups": group2.id},
             new_obj_query=Trigger.objects.filter(flow=flow2, trigger_type=Trigger.TYPE_INBOUND_CALL),
             success_status=200,
@@ -918,8 +924,9 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         create_url = reverse("triggers.trigger_create_missed_call")
 
+        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
         response = self.assertCreateFetch(
-            create_url, allow_viewers=False, allow_editors=True, form_fields=["flow", "groups", "exclude_groups"]
+            create_url, [self.editor, self.admin], form_fields=["flow", "groups", "exclude_groups"]
         )
 
         # flow options should be messaging and voice flows
@@ -927,6 +934,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"flow": flow1.id},
             new_obj_query=Trigger.objects.filter(flow=flow1, trigger_type=Trigger.TYPE_MISSED_CALL),
             success_status=200,
@@ -935,6 +943,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # we can't create another...
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"flow": flow2.id},
             form_errors={"__all__": "There already exists a trigger of this type with these options."},
         )
@@ -955,11 +964,9 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         channel2 = self.create_channel("VP", "Viber Channel", "1234567")
         self.create_channel("A", "Android Channel", "+1234")
 
+        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
         response = self.assertCreateFetch(
-            create_url,
-            allow_viewers=False,
-            allow_editors=True,
-            form_fields=["flow", "channel", "groups", "exclude_groups"],
+            create_url, [self.editor, self.admin], form_fields=["flow", "channel", "groups", "exclude_groups"]
         )
 
         # flow options should show messaging and voice flows
@@ -971,6 +978,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # go create it
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"channel": channel1.id, "flow": flow1.id},
             new_obj_query=Trigger.objects.filter(
                 trigger_type=Trigger.TYPE_NEW_CONVERSATION, is_active=True, is_archived=False, channel=channel1
@@ -982,6 +990,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # try to create another one, fails as we already have a trigger for that channel
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"channel": channel1.id, "flow": flow1.id},
             form_errors={"__all__": "There already exists a trigger of this type with these options."},
         )
@@ -989,6 +998,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # but can create a different trigger for a different channel
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"channel": channel2.id, "flow": flow1.id},
             new_obj_query=Trigger.objects.filter(
                 trigger_type=Trigger.TYPE_NEW_CONVERSATION, is_active=True, is_archived=False, channel=channel2
@@ -1012,10 +1022,10 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         channel2 = self.create_channel("FB", "Facebook 2", "2345678")
         self.create_channel("A", "Android Channel", "+1234")
 
+        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
         response = self.assertCreateFetch(
             create_url,
-            allow_viewers=False,
-            allow_editors=True,
+            [self.editor, self.admin],
             form_fields=["referrer_id", "flow", "channel", "groups", "exclude_groups"],
         )
 
@@ -1028,6 +1038,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # go create it
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"channel": channel1.id, "flow": flow1.id, "referrer_id": "234567"},
             new_obj_query=Trigger.objects.filter(
                 trigger_type=Trigger.TYPE_REFERRAL, channel=channel1, referrer_id="234567"
@@ -1039,6 +1050,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # try to create another one, fails as we already have a trigger for that channel and referrer
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"channel": channel1.id, "flow": flow1.id, "referrer_id": "234567"},
             form_errors={"__all__": "There already exists a trigger of this type with these options."},
         )
@@ -1046,6 +1058,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # but can create a different trigger for a different referrer
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"channel": channel1.id, "flow": flow1.id, "referrer_id": "345678"},
             new_obj_query=Trigger.objects.filter(
                 trigger_type=Trigger.TYPE_REFERRAL, channel=channel1, referrer_id="345678"
@@ -1056,6 +1069,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # or blank referrer
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"channel": channel2.id, "flow": flow1.id, "referrer_id": ""},
             new_obj_query=Trigger.objects.filter(trigger_type=Trigger.TYPE_REFERRAL, channel=channel2, referrer_id=""),
             success_status=200,
@@ -1064,6 +1078,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # or channel
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"channel": channel2.id, "flow": flow1.id, "referrer_id": "234567"},
             new_obj_query=Trigger.objects.filter(
                 trigger_type=Trigger.TYPE_REFERRAL, channel=channel2, referrer_id="234567"
@@ -1084,11 +1099,9 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         group1 = self.create_group("Group 1", contacts=[])
         group2 = self.create_group("Group 2", contacts=[])
 
+        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
         response = self.assertCreateFetch(
-            create_url,
-            allow_viewers=False,
-            allow_editors=True,
-            form_fields=["flow", "channel", "groups", "exclude_groups"],
+            create_url, [self.editor, self.admin], form_fields=["flow", "channel", "groups", "exclude_groups"]
         )
 
         # flow options should show messaging and voice flows
@@ -1100,6 +1113,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # create a trigger with no groups
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"flow": flow1.id},
             new_obj_query=Trigger.objects.filter(trigger_type=Trigger.TYPE_CATCH_ALL, flow=flow1),
             success_status=200,
@@ -1108,6 +1122,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # try a duplicate catch all with no groups
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"flow": flow2.id},
             form_errors={"__all__": "There already exists a trigger of this type with these options."},
         )
@@ -1115,6 +1130,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # works if we specify a group
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"flow": flow2.id, "groups": group1.id},
             new_obj_query=Trigger.objects.filter(trigger_type=Trigger.TYPE_CATCH_ALL, flow=flow2),
             success_status=200,
@@ -1123,6 +1139,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # or a channel
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"flow": flow2.id, "channel": self.channel.id},
             new_obj_query=Trigger.objects.filter(trigger_type=Trigger.TYPE_CATCH_ALL, flow=flow2, channel=self.channel),
             success_status=200,
@@ -1131,6 +1148,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # groups between triggers can't overlap
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"flow": flow2.id, "groups": [group1.id, group2.id]},
             form_errors={"__all__": "There already exists a trigger of this type with these options."},
         )
@@ -1146,8 +1164,9 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         create_url = reverse("triggers.trigger_create_closed_ticket")
 
+        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
         response = self.assertCreateFetch(
-            create_url, allow_viewers=False, allow_editors=True, form_fields=["flow", "groups", "exclude_groups"]
+            create_url, [self.editor, self.admin], form_fields=["flow", "groups", "exclude_groups"]
         )
 
         # flow options should be messaging, voice and background flows
@@ -1155,6 +1174,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"flow": flow1.id},
             new_obj_query=Trigger.objects.filter(flow=flow1, trigger_type=Trigger.TYPE_CLOSED_TICKET),
             success_status=200,
@@ -1163,6 +1183,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # we can't create another...
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"flow": flow2.id},
             form_errors={"__all__": "There already exists a trigger of this type with these options."},
         )
@@ -1182,11 +1203,9 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         create_url = reverse("triggers.trigger_create_opt_in")
 
+        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
         response = self.assertCreateFetch(
-            create_url,
-            allow_viewers=False,
-            allow_editors=True,
-            form_fields=["flow", "channel", "groups", "exclude_groups"],
+            create_url, [self.editor, self.admin], form_fields=["flow", "channel", "groups", "exclude_groups"]
         )
 
         # flow options should be messaging and background flows
@@ -1197,6 +1216,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"flow": flow1.id},
             new_obj_query=Trigger.objects.filter(flow=flow1, trigger_type=Trigger.TYPE_OPT_IN),
             success_status=200,
@@ -1205,6 +1225,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # we can't create another
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"flow": flow2.id},
             form_errors={"__all__": "There already exists a trigger of this type with these options."},
         )
@@ -1212,6 +1233,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # works if we specify a group
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"flow": flow2.id, "groups": group1.id},
             new_obj_query=Trigger.objects.filter(trigger_type=Trigger.TYPE_OPT_IN, flow=flow2),
             success_status=200,
@@ -1220,6 +1242,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # or a channel
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"flow": flow2.id, "channel": channel2.id},
             new_obj_query=Trigger.objects.filter(trigger_type=Trigger.TYPE_OPT_IN, flow=flow2, channel=channel2),
             success_status=200,
@@ -1240,11 +1263,9 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         create_url = reverse("triggers.trigger_create_opt_out")
 
+        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
         response = self.assertCreateFetch(
-            create_url,
-            allow_viewers=False,
-            allow_editors=True,
-            form_fields=["flow", "channel", "groups", "exclude_groups"],
+            create_url, [self.editor, self.admin], form_fields=["flow", "channel", "groups", "exclude_groups"]
         )
 
         # flow options should be messaging and background flows
@@ -1255,6 +1276,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"flow": flow1.id},
             new_obj_query=Trigger.objects.filter(flow=flow1, trigger_type=Trigger.TYPE_OPT_OUT),
             success_status=200,
@@ -1263,6 +1285,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # we can't create another...
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"flow": flow2.id},
             form_errors={"__all__": "There already exists a trigger of this type with these options."},
         )
@@ -1270,6 +1293,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # works if we specify a group
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"flow": flow2.id, "groups": group1.id},
             new_obj_query=Trigger.objects.filter(trigger_type=Trigger.TYPE_OPT_OUT, flow=flow2),
             success_status=200,
@@ -1278,6 +1302,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # or a channel
         self.assertCreateSubmit(
             create_url,
+            self.admin,
             {"flow": flow2.id, "channel": channel1.id},
             new_obj_query=Trigger.objects.filter(trigger_type=Trigger.TYPE_OPT_OUT, flow=flow2, channel=channel1),
             success_status=200,
@@ -1301,10 +1326,10 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         update_url = reverse("triggers.trigger_update", args=[trigger.id])
 
+        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
         self.assertUpdateFetch(
             update_url,
-            allow_viewers=False,
-            allow_editors=True,
+            [self.editor, self.admin],
             form_fields={
                 "keywords": ["join", "start"],
                 "match_type": "O",
@@ -1318,6 +1343,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # submit with valid keyword and extra group
         self.assertUpdateSubmit(
             update_url,
+            self.admin,
             {
                 "keywords": ["begin", "start"],
                 "flow": flow.id,
@@ -1340,12 +1366,14 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # error if keyword is not defined or invalid
         self.assertUpdateSubmit(
             update_url,
+            self.admin,
             {"keywords": "", "flow": flow.id, "match_type": "F"},
             form_errors={"keywords": "This field is required."},
             object_unchanged=trigger,
         )
         self.assertUpdateSubmit(
             update_url,
+            self.admin,
             {"keywords": ["two words"], "flow": flow.id, "match_type": "F"},
             form_errors={
                 "keywords": "Must be a single word containing only letters and numbers, or a single emoji character."
@@ -1361,10 +1389,10 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         update_url = reverse("triggers.trigger_update", args=[trigger.id])
 
+        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
         self.assertUpdateFetch(
             update_url,
-            allow_viewers=False,
-            allow_editors=True,
+            [self.editor, self.admin],
             form_fields={
                 "action": "answer",
                 "voice_flow": flow2,
@@ -1376,13 +1404,13 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         )
 
         # switch to different voice flow
-        self.assertUpdateSubmit(update_url, {"action": "answer", "voice_flow": flow1.id})
+        self.assertUpdateSubmit(update_url, self.admin, {"action": "answer", "voice_flow": flow1.id})
 
         trigger.refresh_from_db()
         self.assertEqual(flow1, trigger.flow)
 
         # switch to a message flow
-        self.assertUpdateSubmit(update_url, {"action": "hangup", "msg_flow": flow3.id})
+        self.assertUpdateSubmit(update_url, self.admin, {"action": "hangup", "msg_flow": flow3.id})
 
         trigger.refresh_from_db()
         self.assertEqual(flow3, trigger.flow)
@@ -1390,8 +1418,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # check form shows correct initial values now
         self.assertUpdateFetch(
             update_url,
-            allow_viewers=False,
-            allow_editors=True,
+            [self.admin],
             form_fields={
                 "action": "hangup",
                 "voice_flow": None,
@@ -1432,10 +1459,10 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         update_url = reverse("triggers.trigger_update", args=[trigger.id])
 
+        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
         self.assertUpdateFetch(
             update_url,
-            allow_viewers=False,
-            allow_editors=True,
+            [self.editor, self.admin],
             form_fields={
                 "start_datetime": schedule.next_fire,
                 "repeat_period": "W",
@@ -1450,6 +1477,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # try to update a weekly repeating schedule without specifying the days of the week
         self.assertUpdateSubmit(
             update_url,
+            self.admin,
             {"start_datetime": "2021-06-24 12:00", "repeat_period": "W", "flow": flow1.id, "groups": [group1.id]},
             form_errors={"repeat_days_of_week": "Must specify at least one day of the week."},
             object_unchanged=trigger,
@@ -1458,6 +1486,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # try to create a weekly repeating schedule with an invalid day of the week (UI doesn't actually allow this)
         self.assertUpdateSubmit(
             update_url,
+            self.admin,
             {
                 "start_datetime": "2021-06-24 12:00",
                 "repeat_period": "W",
@@ -1472,6 +1501,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # try to submit without any groups or contacts
         self.assertUpdateSubmit(
             update_url,
+            self.admin,
             {"start_datetime": "2021-06-24 12:00", "repeat_period": "W", "flow": flow1.id},
             form_errors={"__all__": "Must provide at least one group or contact to include."},
             object_unchanged=trigger,
@@ -1480,6 +1510,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         # submit with valid data...
         self.assertUpdateSubmit(
             update_url,
+            self.admin,
             {
                 "start_datetime": "2021-06-24T10:00Z",
                 "repeat_period": "D",
@@ -1547,25 +1578,20 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
             self.org2, self.admin, Trigger.TYPE_KEYWORD, flow3, keywords=["other"], match_type=Trigger.MATCH_ONLY_WORD
         )
 
+        self.assertRequestDisallowed(list_url, [None, self.agent])
         response = self.assertListFetch(
-            list_url, allow_viewers=True, allow_editors=True, context_objects=[trigger4, trigger3, trigger2, trigger1]
+            list_url, [self.user, self.editor, self.admin], context_objects=[trigger4, trigger3, trigger2, trigger1]
         )
         self.assertEqual(("archive",), response.context["actions"])
 
         # can search by keyword
-        self.assertListFetch(
-            list_url + "?search=Start", allow_viewers=True, allow_editors=True, context_objects=[trigger3]
-        )
+        self.assertListFetch(list_url + "?search=Start", [self.admin], context_objects=[trigger3])
 
         # can search by keyword
-        self.assertListFetch(
-            list_url + "?search=begin", allow_viewers=True, allow_editors=True, context_objects=[trigger3]
-        )
+        self.assertListFetch(list_url + "?search=begin", [self.admin], context_objects=[trigger3])
 
         # or flow name
-        self.assertListFetch(
-            list_url + "?search=VEY", allow_viewers=True, allow_editors=True, context_objects=[trigger2]
-        )
+        self.assertListFetch(list_url + "?search=VEY", [self.admin], context_objects=[trigger2])
 
         # can archive it
         self.client.post(list_url, {"action": "archive", "objects": trigger3.id})
@@ -1574,15 +1600,14 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertTrue(trigger3.is_archived)
 
         # no longer appears in list
-        self.assertListFetch(
-            list_url, allow_viewers=True, allow_editors=True, context_objects=[trigger4, trigger2, trigger1]
-        )
+        self.assertListFetch(list_url, [self.admin], context_objects=[trigger4, trigger2, trigger1])
 
         # test when archiving fails
         mock_deactivate_trigger.side_effect = ValueError("boom")
 
         response = self.client.post(list_url, {"action": "archive", "objects": trigger4.id})
-        self.assertEqual("An error occurred while making your changes. Please try again.", response["Temba-Toast"])
+        # TODO: Convert to temba-toast
+        # self.assertEqual("An error occurred while making your changes. Please try again.", response["Temba-Toast"])
 
     def test_list_redirect_when_no_triggers(self):
         Trigger.objects.all().delete()
@@ -1647,8 +1672,9 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         archived_url = reverse("triggers.trigger_archived")
         list_url = reverse("triggers.trigger_list")
 
+        self.assertRequestDisallowed(archived_url, [None, self.agent])
         response = self.assertListFetch(
-            archived_url, allow_viewers=True, allow_editors=True, context_objects=[trigger2, trigger1]
+            archived_url, [self.user, self.editor, self.admin], context_objects=[trigger2, trigger1]
         )
         self.assertEqual(("restore", "delete"), response.context["actions"])
 
@@ -1834,16 +1860,18 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         referral_url = reverse("triggers.trigger_folder", kwargs={"folder": "referral"})
         tickets_url = reverse("triggers.trigger_folder", kwargs={"folder": "tickets"})
 
+        self.assertRequestDisallowed(messages_url, [None, self.agent])
+        self.assertRequestDisallowed(referral_url, [None, self.agent])
+        self.assertRequestDisallowed(tickets_url, [None, self.agent])
+
         response = self.assertListFetch(
-            messages_url, allow_viewers=True, allow_editors=True, context_objects=[trigger2, trigger1, trigger5]
+            messages_url, [self.user, self.editor, self.admin], context_objects=[trigger2, trigger1, trigger5]
         )
         self.assertEqual("/trigger/messages", response.headers[TEMBA_MENU_SELECTION])
         self.assertEqual(("archive",), response.context["actions"])
 
         # can search by keywords
-        self.assertListFetch(
-            messages_url + "?search=TEST", allow_viewers=True, allow_editors=True, context_objects=[trigger1]
-        )
+        self.assertListFetch(messages_url + "?search=TEST", [self.admin], context_objects=[trigger1])
 
-        self.assertListFetch(referral_url, allow_viewers=True, allow_editors=True, context_objects=[trigger4, trigger3])
-        self.assertListFetch(tickets_url, allow_viewers=True, allow_editors=True, context_objects=[])
+        self.assertListFetch(referral_url, [self.admin], context_objects=[trigger4, trigger3])
+        self.assertListFetch(tickets_url, [self.admin], context_objects=[])

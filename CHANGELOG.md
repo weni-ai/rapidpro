@@ -1,3 +1,951 @@
+v9.2.0 (2024-07-17)
+-------------------------
+ * Simplify permissions in flows app
+ * Tweak menu items for msg views and flow results
+
+v9.1.198 (2024-07-17)
+-------------------------
+ * Allow template image variables to be text with expressions
+
+v9.1.196 (2024-07-16)
+-------------------------
+ * Add __repr__ to more models and tweak existing ones for consistency
+ * Fix rendering of flow starts for deleted flows
+ * Add data migration to trim old broadcasts to nodes that resulted in very large contact lists
+
+v9.1.195 (2024-07-16)
+-------------------------
+ * Remove special error handling for broadcast to node that resolves to no recipients
+ * Fix setting a template on a new broadcast
+ * Fix query broadcast creation and update
+ * Add rendering of exclusions on broadcasts
+ * Fix not showing query on broadcast recipients list and add node_uuid
+
+v9.1.194 (2024-07-15)
+-------------------------
+ * Add Broadcast.node_uuid field
+ * Remove old code for getting message created_by from broadcasts
+ * Make some exception clauses more specific
+
+v9.1.193 (2024-07-15)
+-------------------------
+ * Replace TemplateTranslation.STATUS_UNSUPPORTED completely
+
+v9.1.192 (2024-07-15)
+-------------------------
+ * Add new template statuses and stop using fake "unsupported" status
+
+v9.1.191 (2024-07-15)
+-------------------------
+ * Fix deactivating a legacy WhatsApp channel
+ * Update format of templates on API endpoint
+ * Show template translation problems as errors on template read page
+
+v9.1.190 (2024-07-12)
+-------------------------
+ * Fix padding for broadcast schedule update
+
+v9.1.189 (2024-07-12)
+-------------------------
+ * Fix mailroom_db
+ * Data migration to populate TemplateTranslation.is_supported and is_compatible
+
+v9.1.188 (2024-07-12)
+-------------------------
+ * Add new boolean fields to TemplateTranslation model to determine whether it's usable
+
+v9.1.187 (2024-07-12)
+-------------------------
+ * Add templates to broadcasts
+
+v9.1.186 (2024-07-11)
+-------------------------
+ * Fix handling of POSTs to API docs
+ * Exclude empty templates from list, and show base translation apart on read page
+ * Ensure we choose a new base for a template whenever an existing base translation is deleted
+
+v9.1.185 (2024-07-11)
+-------------------------
+ * Update deps
+ * Replace telegram library by requests use
+ * Fix dashboard menu link permission
+ * Expose Template.base_translation on API endpoint
+
+v9.1.184 (2024-07-11)
+-------------------------
+ * Use dropdowns for location fields
+
+v9.1.183 (2024-07-11)
+-------------------------
+ * Use dropdowns for location fields
+
+v9.1.182 (2024-07-10)
+-------------------------
+ * Locations API endpoint should allow searching on the path
+ * Fix template syncing when channel gives us invalid template data
+
+v9.1.181 (2024-07-10)
+-------------------------
+ * Add Template.base_translation
+ * Fix dashboard workspace data
+ * Allow creation of contacts with non-active statuses
+
+v9.1.180 (2024-07-10)
+-------------------------
+ * Drop no longer used is_active field from TemplateTranslation
+ * Tweak wording on template list page
+ * Add db constraint to ensure contact status is valid
+
+v9.1.179 (2024-07-10)
+-------------------------
+ * Keep FCM ID in channel config when soft deleting the channel
+ * Stop using TemplateTranslation.is_active and make nullable
+
+v9.1.178 (2024-07-09)
+-------------------------
+ * Allow broadcast creation with zero matches
+
+v9.1.177 (2024-07-08)
+-------------------------
+ * Hard delete remaining soft-deleted template translations
+
+v9.1.176 (2024-07-08)
+-------------------------
+ * Update Template to a TembaModel
+ * Hard delete template translations that no longer exist on the channel side
+
+v9.1.175 (2024-07-05)
+-------------------------
+ * Make send_when optional when updating broadcasts
+
+v9.1.174 (2024-07-05)
+-------------------------
+ * Fix updating scheduled broadcasts
+ * Remove old unused code for queueing broadcasts
+
+v9.1.173 (2024-07-05)
+-------------------------
+ * Add Msg.is_android field
+ * Add internal API endpoint for searching locations by level and name
+ * Remove option to send now on broadcast update
+
+v9.1.172 (2024-07-04)
+-------------------------
+ * Add templates to broadcasts (hidden for now)
+ * Remove deprecated broadcast.template_state field on mailroom queue payload
+
+v9.1.171 (2024-07-03)
+-------------------------
+ * Update payload for queueing a bradocast
+
+v9.1.170 (2024-07-03)
+-------------------------
+ * Remove no longer needed task to sync stale Android relayers
+ * Don't allow template localization
+ * Update dependencies
+
+v9.1.169 (2024-07-02)
+-------------------------
+ * Use python 3.11.x
+ * Add Broadcast.template_variables
+ * Add new template list and read pages and remove old channel specific ones
+ * Fix globals list template
+
+v9.1.168 (2024-06-28)
+-------------------------
+ * Don't sync classifiers in suspended orgs
+ * Fix empty contact search with query present
+
+v9.1.167 (2024-06-28)
+-------------------------
+ * Disallow empty recipient targeting
+ * Fix external links within spa container
+
+v9.1.166 (2024-06-27)
+-------------------------
+ * Tweak logging for failure during classifier syncing
+ * Switch broadcast tests to use contact search
+
+v9.1.165 (2024-06-27)
+-------------------------
+ * Rework remaining mailroom client methods
+ * Add unique constraint on template translations
+
+v9.1.164 (2024-06-27)
+-------------------------
+ * Add data migration to remove duplicate template translations
+
+v9.1.163 (2024-06-27)
+-------------------------
+ * Change template translation syncing to enforce uniqueness over channel+locale
+
+v9.1.162 (2024-06-27)
+-------------------------
+ * Make templatetranslation locale non-null
+ * Add migration to release translations for released channels
+
+v9.1.161 (2024-06-27)
+-------------------------
+ * Fix not releasing template translations when channel released
+
+v9.1.160 (2024-06-27)
+-------------------------
+ * Fix creating scheduled broadcasts
+ * Tweak menu on campaign read page
+ * Update to latest smartmin
+
+v9.1.159 (2024-06-26)
+-------------------------
+ * Simplify some button labels and make edit a button on contact read page
+ * Don't show empty contact filter list
+ * Rework more mailroom client methods to use models instead of primitives
+
+v9.1.158 (2024-06-26)
+-------------------------
+ * Add day selection when doing flow start search
+ * Tweak mailroom_db to run on different port
+
+v9.1.157 (2024-06-25)
+-------------------------
+ * Reorg of mailroom client
+ * Add Broadcast.exclusions
+
+v9.1.156 (2024-06-24)
+-------------------------
+ * Change broadcast creation from UI to use mailroom
+
+v9.1.155 (2024-06-24)
+-------------------------
+ * Fix WAC to addEventListener in OnSpload
+ * Fix horizontal scrolling for contacts list
+ * Add Broadcast.template
+
+v9.1.154 (2024-06-21)
+-------------------------
+ * Fix z-index issue properly
+
+v9.1.153 (2024-06-21)
+-------------------------
+ * Fix z-index issue with content menu and chat
+
+v9.1.152 (2024-06-21)
+-------------------------
+ * Fix ticket switching bug
+
+v9.1.151 (2024-06-21)
+-------------------------
+ * Update chat rendering
+
+v9.1.148 (2024-06-20)
+-------------------------
+ * Fix Broadcast.create
+
+v9.1.147 (2024-06-20)
+-------------------------
+ * Use mailroom to create broadcasts from API calls
+ * Use mailroom to send broadcasts to flow nodes
+
+v9.1.146 (2024-06-17)
+-------------------------
+ * Don't clip footer when ticket history grows
+ * Fix migration to add uuid field to airtime transfers
+
+v9.1.145 (2024-06-17)
+-------------------------
+ * Don't send forgot password email if one was sent in last 5 minutes
+ * Delete failed login records on successful password reset
+ * Make transer UUID unique field, use TembaUUIDMixin on model
+
+v9.1.144 (2024-06-14)
+-------------------------
+ * Add pagination on channel templates page
+ * Add settings config for Android clients FCM config
+ * Remove pyfcm and use google auth library to send sync messages for FCM
+ * Create our own password recovery view
+
+v9.1.143 (2024-06-12)
+-------------------------
+ * Update smartmin
+ * Delete recovery tokens when new ones are created or email changed
+ * Populate airtime transfer uuids
+
+v9.1.142 (2024-06-12)
+-------------------------
+ * Add AirtimeTransfer.external_id
+ * Add data migration to cleanup template translations
+
+v9.1.141 (2024-06-12)
+-------------------------
+ * Update to latest smartmin
+ * Add uuid field to airtime transfer model
+
+v9.1.140 (2024-06-12)
+-------------------------
+ * Really actually fix template attachments for real
+
+v9.1.139 (2024-06-11)
+-------------------------
+ * Fix split issue for template editor
+
+v9.1.138 (2024-06-10)
+-------------------------
+ * Template editor fix for empty content
+ * Tweak component types to be header/*, body/* etc
+ * Support Twilio media in templates
+
+v9.1.137 (2024-06-10)
+-------------------------
+ * Support WhatsApp templates with header images
+ * Remove no longer used URN related code
+ * Generate email verification secret when account created, change when email changed
+
+v9.1.136 (2024-06-07)
+-------------------------
+ * Add spa mixin to transfer logs views
+ * Allow editing TWA messaging service SID
+ * Lean on mailroom for URN validation during contact update
+ * Some tidy up of the update contact form
+
+v9.1.135 (2024-06-05)
+-------------------------
+ * Fix login error message styling 
+ * Remove unused JS libs
+
+v9.1.134 (2024-06-05)
+-------------------------
+ * Contact API endpoint should let mailroom decide if a URN is taken
+ * Revert "Remove csrf token hidden element not under a form"
+
+v9.1.133 (2024-06-05)
+-------------------------
+ * Fix API explorer POSTs
+ * Make CSRF cookie age 2 weeks and remove non-form hidden CSRF hidden elements
+
+v9.1.132 (2024-06-04)
+-------------------------
+ * Make sure the CSRF element is present for all page header blocks
+
+v9.1.131 (2024-05-31)
+-------------------------
+ * Fix DT One submit buttons
+
+v9.1.130 (2024-05-31)
+-------------------------
+ * Fix flow and msgs unlabel action
+ * Remove no longer used params field on synched whatsapp type templates
+
+v9.1.129 (2024-05-29)
+-------------------------
+ * Increase DATA_UPLOAD_MAX_NUMBER_FIELDS to 2500
+ * Fix FB and IG claim getFBpages
+
+v9.1.128 (2024-05-27)
+-------------------------
+ * Lean on mailroom for validation of phone numbers from android events / messages
+
+v9.1.127 (2024-05-27)
+-------------------------
+ * Rework contact create view to let mailroom do URN validation
+
+v9.1.126 (2024-05-24)
+-------------------------
+ * Mailroom client should use content-type header on responses to know whether to parse as JSON
+ * Ensure anon users can access API docs
+
+v9.1.125 (2024-05-23)
+-------------------------
+ * Add csrf on hidden element
+
+v9.1.124 (2024-05-22)
+-------------------------
+ * Rework handling of errors from mailroom client
+ * Update test db flows
+
+v9.1.123 (2024-05-20)
+-------------------------
+ * Replace django messages rendering with toasts
+
+v9.1.121 (2024-05-16)
+-------------------------
+ * Fix action to remove from group.  
+ * Report bulk action errors to users with django messages
+
+v9.1.120 (2024-05-16)
+-------------------------
+ * Remove old unused ES sorting code
+ * Update to latest smartmin and disable auto success messages
+ * Add data migration to fix system fields for existing orgs and start using is_proxy
+ * Reduce reserved keys for fields to bare minimum
+
+v9.1.119 (2024-05-16)
+-------------------------
+ * Add ContactField.is_proxy and reduce SYSTEM_FIELDS to the two proxy date fields
+ * Don't use error level alerts for form errors
+
+v9.1.118 (2024-05-15)
+-------------------------
+ * Remove unused args from MailroomClient.parse_query
+ * Re-add search errors to contact list views
+
+v9.1.117 (2024-05-15)
+-------------------------
+ * Add support for unknown_property_type search errors
+ * Add support for twilio card type content templates
+ * Add way to view webhook logs errors only
+
+v9.1.116 (2024-05-14)
+-------------------------
+ * Fix issues with twilio templates sync
+
+v9.1.115 (2024-05-10)
+-------------------------
+ * Fix Twilio template type slug and register its template type
+
+v9.1.114 (2024-05-10)
+-------------------------
+ * Add message templates menu for TWA channels
+ * Activate Twilio Whatsapp to sync templates with twilio type
+ * Update to allow matching sender ID as valid phones
+
+v9.1.113 (2024-05-09)
+-------------------------
+ * Fix gaps it contact history
+
+v9.1.112 (2024-05-09)
+-------------------------
+ * Ignore android msg/event cmds with non numeric phones
+
+v9.1.111 (2024-05-08)
+-------------------------
+ * Send phone instead of urn to mailroom android endpoints
+ * Add Twilio content template type, and TWA fetch_templates
+
+v9.1.110 (2024-05-08)
+-------------------------
+ * Remove messages block that duplicates alert-messages
+ * Tweak DefinitionExport.name for consistency
+
+v9.1.109 (2024-05-07)
+-------------------------
+ * Tweak export finished emails so they don't say Excel
+
+v9.1.108 (2024-05-07)
+-------------------------
+ * Update temba-components to 0.86.1
+ * Change flow definitions export to be async, use new export type
+
+v9.1.107 (2024-05-07)
+-------------------------
+ * Fix variable name in http log read page
+ * Fix claiming instagram
+
+v9.1.106 (2024-05-06)
+-------------------------
+ * Fix globals API endpoint
+
+v9.1.105 (2024-05-03)
+-------------------------
+ * Fix race condition on editor load
+
+v9.1.104 (2024-05-03)
+-------------------------
+ * Fix template bug and loading error for editor
+
+v9.1.103 (2024-05-02)
+-------------------------
+ * Fix contact field selection
+
+v9.1.102 (2024-05-02)
+-------------------------
+ * Delete all sessions and runs in org deletion in batches
+ * Tiny style change for loader wrapping on editor
+
+v9.1.101 (2024-05-01)
+-------------------------
+ * Update editor and flow spec version
+
+v9.1.100 (2024-04-29)
+-------------------------
+ * Tweak time limit for sessions to 89 days so things are always interrupted before archiver gets to them
+ * Cleanup API endpoint docs
+
+v9.1.99 (2024-04-26)
+-------------------------
+ * Remove elastic search
+ * Add support for read msg status
+
+v9.1.98 (2024-04-25)
+-------------------------
+ * Fix ticket status selection
+
+v9.1.97 (2024-04-25)
+-------------------------
+ * Include url for org chooser
+
+v9.1.96 (2024-04-25)
+-------------------------
+ * Remove jQuery
+
+v9.1.95 (2024-04-25)
+-------------------------
+ * Change ordering of non-search based exports to be id to match search based
+ * Use mailroom endpoint for search based contact exports
+ * Remove cancel button from contact import page and remove duplicate styles
+ * Tweak layout of user edit form
+ * Email notification that account email has changed should include the new email address
+
+v9.1.94 (2024-04-24)
+-------------------------
+ * Fix changing password so user isn't logged out
+ * Fix user edit form allowing insecure passwords
+
+v9.1.93 (2024-04-24)
+-------------------------
+ * Add notification types for when email or password is changed
+ * Expire unaccepted invitations after 30 days
+ * Move invitation form into modal
+
+v9.1.92 (2024-04-23)
+-------------------------
+ * Remove start url for surveyors and instead do login redirect
+ * Fix to disallow content type vs extension mismatching for media uploads
+ * Fix to limit sending user verification email to 1 per 10 minutes
+ * Remove warning for flows that don't specify Facebook topic
+
+v9.1.91 (2024-04-18)
+-------------------------
+ * Fix select race
+ * Fix header matching
+ * Simplify URL for template list page
+
+v9.1.90 (2024-04-16)
+-------------------------
+ * Fix race on initial load for select and tabs
+
+v9.1.89 (2024-04-16)
+-------------------------
+ * Fix API docs scrolling
+ * Fix mailroom_db data file
+ * Simplify channel claim page styling and remove unused styles
+ * Add Msg.templating
+
+v9.1.88 (2024-04-15)
+-------------------------
+ * Drop FlowRun.submitted_by and cleanup superfulous constants
+ * Make whatsapp template type an actual package
+ * Simplify page titles so section isn't repeated in title
+
+v9.1.87 (2024-04-12)
+-------------------------
+ * Add inline attachment style and wrapping on logs
+ * Don't re-release released triggers
+
+v9.1.86 (2024-04-12)
+-------------------------
+ * Prune unnecessary styles, move to heavier fonts
+
+v9.1.85 (2024-04-12)
+-------------------------
+ * Drop support for Submitted By in results exports
+ * Add constraint to limit Msg.DIRECTION to I or O
+ * Add constraint to incoming messages have channel and URN
+
+v9.1.83 (2024-04-11)
+-------------------------
+ * Add TemplateType and rework whatsapp to be a type
+ * Remove special treatment for exports of surveyor flows
+ * Add TemplateTranslation.variables
+
+v9.1.82 (2024-04-10)
+-------------------------
+ * Unpublicize the channel events API endpoint
+ * Drop unused Msg.queued_on field
+
+v9.1.81 (2024-04-10)
+-------------------------
+ * Update temba-components
+
+v9.1.80 (2024-04-10)
+-------------------------
+ * Assume js is pre-minified
+
+v9.1.79 (2024-04-09)
+-------------------------
+ * Update flow editor
+
+v9.1.78 (2024-04-09)
+-------------------------
+ * Use new components bundle
+
+v9.1.77 (2024-04-09)
+-------------------------
+ * Deprecate Msg.queued_on as it isn't used and make Msg.modified_on non-null
+
+v9.1.76 (2024-04-08)
+-------------------------
+ * Add data migration to backfill missing user settings
+ * Add signal receiver to ensure new users always have settings
+
+v9.1.75 (2024-04-04)
+-------------------------
+ * Add data migration to archive campaigns with deleted groups
+ * Fix rendering of campaigns with deleted groups
+ * Improve styling on template list page
+
+v9.1.74 (2024-04-04)
+-------------------------
+ * Update temba-components
+ * Use timedate formatting for last_seen_on / created_on on contact list pages
+ * Remove unused BRAND properties
+ * Cleanup displaying of channel name, address and type
+
+v9.1.73 (2024-04-03)
+-------------------------
+ * Make Channel.name non-null and remove unused channel list view
+ * Replace format_datetime and short_datetime tags with day or datetime filters
+
+v9.1.72 (2024-04-03)
+-------------------------
+ * Update temba-components
+ * Add data migration to backfill empty channel names
+ * Ensure Android channels get a default name when registering
+
+v9.1.71 (2024-04-03)
+-------------------------
+ * Ignore empty messages from Android relayers
+
+v9.1.70 (2024-04-03)
+-------------------------
+ * Update flow editor
+ * Remove unused option on assets endpoint to return environment
+
+v9.1.69 (2024-04-02)
+-------------------------
+ * Remove no longer used template tag as_icon
+ * Fix export blocking due to multiple users exporting at same time
+ * Switch formax to expand vertically
+ * Add ChannelEvent.status field and prevent creating channel events of unknown types from Android syncs
+
+v9.1.68 (2024-04-02)
+-------------------------
+ * Use mailroom endpoints to create messages and events during Android syncing
+ * Drop support for returning template components as dict
+
+v9.1.67 (2024-04-01)
+-------------------------
+ * Update template editor to work with comps as list
+ * Add task to trim old channel events
+
+v9.1.66 (2024-03-28)
+-------------------------
+ * Update format of tasks queued to mailroom
+
+v9.1.65 (2024-03-28)
+-------------------------
+ * Update to django 5.0 and DRF 3.15.1
+
+v9.1.64 (2024-03-25)
+-------------------------
+ * Tweak menu styling
+
+v9.1.63 (2024-03-22)
+-------------------------
+ * Add open tab event
+
+v9.1.62 (2024-03-22)
+-------------------------
+ * Make workspace selection use common event pattern
+ * Truncate long template name to not break the page
+ * Replace iso630 with iso639-lang package
+ * Fix non Django 5 compatible code
+
+v9.1.61 (2024-03-21)
+-------------------------
+ * Support for menu events
+
+v9.1.60 (2024-03-21)
+-------------------------
+ * Update to latest ruff, isort and djlint
+ * Drop TemplateTranslation.comps_as_dict
+ * Get rid of channel typed owned sync log views and use new channel view on HTTP log CRUDL
+ * Convert templates views to actual CRUDL and fix permissions
+
+v9.1.59 (2024-03-21)
+-------------------------
+ * Move template code into templates app
+ * Stop writing TemplateTranslation.comps_as_dict
+
+v9.1.58 (2024-03-20)
+-------------------------
+ * Some fixes for on-device mobile issues
+ * Allow returning of components in list format from API endpoint
+ * Update to latest black
+ * Don't try to extract parameters from template url button component display values
+
+v9.1.57 (2024-03-20)
+-------------------------
+ * Add name field also to template components
+ * Tweak template list page to use components list instead of comps_as_dict
+
+v9.1.56 (2024-03-19)
+-------------------------
+ * Save TemplateTranslation.components as list, use comps_as_dict for API endpoint
+
+v9.1.55 (2024-03-19)
+-------------------------
+ * Add temporary TemplateTranslation.comps_as_dict field
+
+v9.1.54 (2024-03-19)
+-------------------------
+ * Add type to template components
+ * Remove deprecated fields from template translations
+
+v9.1.53 (2024-03-18)
+-------------------------
+ * Fix mobile notice
+
+v9.1.52 (2024-03-18)
+-------------------------
+ * Don't migrate flows when listing campaign events
+
+v9.1.51 (2024-03-17)
+-------------------------
+ * Tweaks to make the interface more mobile friendly
+
+v9.1.50 (2024-03-17)
+-------------------------
+ * Better feedback when editing contact fields
+
+v9.1.49 (2024-03-15)
+-------------------------
+ * Add url param type for buttons with URLs
+
+v9.1.48 (2024-03-14)
+-------------------------
+ * Show more components for WA templates list
+ * Add display to WA templates button components
+
+v9.1.47 (2024-03-14)
+-------------------------
+ * Remove old templates API endpoint
+ * Update flow version for campaigns events single message flows
+
+v9.1.46 (2024-03-13)
+-------------------------
+ * Reduce WA template sync error logging to ignore those in http logs
+
+v9.1.45 (2024-03-12)
+-------------------------
+ * Fix the size limit for contact exports
+
+v9.1.44 (2024-03-12)
+-------------------------
+ * Drop old export models and assets app
+
+v9.1.43 (2024-03-11)
+-------------------------
+ * Data migration to delete old flow results exports
+ * Data migration to delete old msgs exports
+
+v9.1.42 (2024-03-11)
+-------------------------
+ * Data migration to delete old contacts exports
+
+v9.1.41 (2024-03-11)
+-------------------------
+ * Mark templates with button URLs and attachment in header not supported
+ * Convert exports to use shared export modal view
+
+v9.1.40 (2024-03-08)
+-------------------------
+ * Allow more WhatsApp templates to be usable in the flows
+
+v9.1.39 (2024-03-07)
+-------------------------
+ * Updated editor with sendmsg update fix
+ * Improve contact export modal and use mailroom endpoint to know how many contacts will be exported
+
+v9.1.38 (2024-03-07)
+-------------------------
+ * Updated component button rendering
+
+v9.1.37 (2024-03-07)
+-------------------------
+ * Do not sync templates for channels on suspended orgs or inactive orgs
+ * Redact WA password config in HTTP logs
+
+v9.1.36 (2024-03-06)
+-------------------------
+ * Bump spec version to 13.4
+ * Update editor to support template components
+
+v9.1.35 (2024-03-06)
+-------------------------
+ * Restrict exports of contact groups that are too big
+ * Redact auth tokens from http logs when fetching whatsapp templates
+ * Cleanup code for fetching whatsapp templates and only create incidents after 5 failures
+ * Add data migration to delete old ticket exports
+
+v9.1.34 (2024-03-04)
+-------------------------
+ * Update floweditor
+
+v9.1.33 (2024-03-04)
+-------------------------
+ * Bump current flow spec version to 13.3
+ * Ensure incidents are ended when releasing a channel
+
+v9.1.32 (2024-03-04)
+-------------------------
+ * Update temba-components
+ * Always send verification email with branding of current org
+ * Add incident for WhatsApp templates sync failed
+
+v9.1.31 (2024-02-28)
+-------------------------
+ * Fix editing user when language is not an option
+
+v9.1.30 (2024-02-28)
+-------------------------
+ * Hide UI language options when there aren't any
+ * Update test_db templates
+
+v9.1.29 (2024-02-27)
+-------------------------
+ * Remove DS from available channel and only accessible to beta group
+ * Prevent further creation of surveyor users since that functionality no longer works
+
+v9.1.28 (2024-02-22)
+-------------------------
+ * Store servicing flag in session to avoid needing user orgs in context processor
+ * Add select_related to user loading for sessions and API tokens
+ * Bump cryptography from 42.0.2 to 42.0.4
+
+v9.1.27 (2024-02-21)
+-------------------------
+ * Update floweditor
+
+v9.1.26 (2024-02-18)
+-------------------------
+ * Bump cryptography from 42.0.0 to 42.0.2
+ * Improve the form for setting flow SMTP and make reusable
+
+v9.1.25 (2024-02-14)
+-------------------------
+ * Update temba-components
+
+v9.1.24 (2024-02-12)
+-------------------------
+ * Use dict for flow type icons instead of nested if elses
+ * Simplify export finished notification emails
+ * Use Org.Export for flows results exports
+
+v9.1.23 (2024-02-09)
+-------------------------
+ * Fix org avatar scale for menu
+ * Fix widget for user avatar
+
+v9.1.22 (2024-02-08)
+-------------------------
+ * Fix croppie dependency
+ * Prefetch user settings on users endpoint
+
+v9.1.21 (2024-02-08)
+-------------------------
+ * Make user settings one to one
+
+v9.1.20 (2024-02-08)
+-------------------------
+ * Use orgs.Export for messages exports
+ * Simplify sending template emails
+ * Add new endpoint to internal API for templates
+ * Trim old export and notifications
+ * Add support for user avatars
+
+v9.1.19 (2024-02-07)
+-------------------------
+ * Save transformed components for WA templates
+
+v9.1.18 (2024-02-06)
+-------------------------
+ * Cleanup flow SMTP formax and show parent settings as default to match mailroom changes
+ * Remove old code for saving SMTP into org config
+
+v9.1.17 (2024-02-06)
+-------------------------
+ * Data migration to backfill Org.flow_smtp
+
+v9.1.16 (2024-02-06)
+-------------------------
+ * Add new dedicated Org.flow_smtp field for email settings
+
+v9.1.15 (2024-02-06)
+-------------------------
+ * Bump cryptography from 41.0.7 to 42.0.0
+ * Simplify getting default flow email address
+
+v9.1.14 (2024-01-30)
+-------------------------
+ * Remove using readonly DB connection for fetching groups and fields
+
+v9.1.13 (2024-01-29)
+-------------------------
+ * Simplify how we check for existing running exports
+ * Dta migration to mark old notifications as seen
+ * Improve export download page
+ * Allow marking all notifications as read by DELETE request to notifications endpoint
+ * Use orgs.Export for contact exports
+
+v9.1.12 (2024-01-23)
+-------------------------
+ * Tweak mailgun channel claiming
+
+v9.1.11 (2024-01-18)
+-------------------------
+ * Some cleanup to new exports framework
+
+v9.1.10 (2024-01-18)
+-------------------------
+ * Add skeleton staff only mailgun channel type
+ * Add export download view
+
+v9.1.7 (2024-01-18)
+-------------------------
+ * Update temba-components
+ * Save storage path on exports and fix ticket exports not having a download URL
+
+v9.1.6 (2024-01-18)
+-------------------------
+ * Add new generic orgs.Export model and replace ExportTicketsTask
+ * Simplify messaging when export is started
+
+v9.1.5 (2024-01-15)
+-------------------------
+ * Allow webchat channels to have new convo triggers
+ * Finished exports should record number of items exported
+
+v9.1.4 (2024-01-12)
+-------------------------
+ * Add skeleton temba chat channel type
+
+v9.1.3 (2024-01-12)
+-------------------------
+ * Add notification for flow exports
+
+v9.1.2 (2024-01-11)
+-------------------------
+ * Fix issue with completion input focus
+
+v9.1.1 (2024-01-11)
+-------------------------
+ * Update notification text
+
+v9.1.0 (2024-01-11)
+-------------------------
+ * Add notifications to UI
+ * Fix test_db command
+ * Update stable versions in README
+
 v9.0.0 (2024-01-05)
 -------------------------
  * Test against mailroom v9

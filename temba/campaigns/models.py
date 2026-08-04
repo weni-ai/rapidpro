@@ -229,11 +229,7 @@ class Campaign(TembaModel):
         """
         events = list(self.events.filter(is_active=True))
 
-        for evt in events:
-            if evt.flow.is_system:
-                evt.flow.ensure_current_version()
-
-        return sorted(events, key=lambda e: e.relative_to.pk * 100_000 + e.minute_offset())
+        return sorted(events, key=lambda e: (e.relative_to.id, e.minute_offset()))
 
     def delete(self):
         """
@@ -518,7 +514,7 @@ class CampaignEvent(TembaUUIDMixin, SmartModel):
         super().delete()
 
     def __repr__(self):
-        return f'<Event: relative_to={self.relative_to.key} offset={self.offset} flow="{self.flow.name}">'
+        return f'<Event: id={self.id} relative_to={self.relative_to.key} offset={self.offset} flow="{self.flow.name}">'
 
     class Meta:
         verbose_name = _("Campaign Event")

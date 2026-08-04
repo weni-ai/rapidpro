@@ -2,7 +2,6 @@ from django.core.management.base import BaseCommand
 
 from temba import mailroom
 from temba.flows.models import Flow
-from temba.mailroom.client import FlowValidationException
 
 
 class Command(BaseCommand):
@@ -27,8 +26,8 @@ class Command(BaseCommand):
                 continue
 
             try:
-                flow_info = client.flow_inspect(flow.org_id, definition)
-            except FlowValidationException:
+                flow_info = client.flow_inspect(flow.org, definition)
+            except mailroom.FlowValidationException:
                 self.stdout.write(f" > flow {flow.uuid} doesn't have a valid definition")
                 num_invalid += 1
                 continue

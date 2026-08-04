@@ -1,7 +1,7 @@
 from django.urls import reverse
 
 from temba.airtime.models import AirtimeTransfer
-from temba.tests import CRUDLTestMixin, TembaTest
+from temba.tests import CRUDLTestMixin, MigrationTest, TembaTest
 
 
 class AirtimeCRUDLTest(TembaTest, CRUDLTestMixin):
@@ -44,8 +44,9 @@ class AirtimeCRUDLTest(TembaTest, CRUDLTestMixin):
     def test_list(self):
         list_url = reverse("airtime.airtimetransfer_list")
 
+        self.assertRequestDisallowed(list_url, [None, self.user, self.agent])
         response = self.assertListFetch(
-            list_url, allow_viewers=False, allow_editors=True, context_objects=[self.transfer2, self.transfer1]
+            list_url, [self.editor, self.admin], context_objects=[self.transfer2, self.transfer1]
         )
         self.assertContains(response, "Ben Haggerty")
         self.assertContains(response, "+250 700 000 003")
@@ -59,9 +60,8 @@ class AirtimeCRUDLTest(TembaTest, CRUDLTestMixin):
     def test_read(self):
         read_url = reverse("airtime.airtimetransfer_read", args=[self.transfer1.id])
 
-        response = self.assertReadFetch(
-            read_url, allow_viewers=False, allow_editors=True, context_object=self.transfer1
-        )
+        self.assertRequestDisallowed(read_url, [None, self.user, self.agent, self.admin2])
+        response = self.assertReadFetch(read_url, [self.editor, self.admin], context_object=self.transfer1)
         self.assertContains(response, "Ben Haggerty")
         self.assertContains(response, "+250 700 000 003")
         self.assertTrue(response.context["show_logs"])
@@ -72,3 +72,28 @@ class AirtimeCRUDLTest(TembaTest, CRUDLTestMixin):
             self.assertContains(response, "Ben Haggerty")
             self.assertNotContains(response, "+250 700 000 003")
             self.assertFalse(response.context["show_logs"])
+
+
+class AirtimeUUIDTest(MigrationTest):
+    app = "airtime"
+    migrate_from = "0029_airtimetransfer_external_id"
+    migrate_to = "0030_populate_uuid"
+
+    def setUpBeforeMigration(self, apps):
+        contact = self.create_contact("Eric", phone="+250788382382")
+        self.airtime1 = AirtimeTransfer.objects.create(
+            uuid=None,
+            org=self.org,
+            status="S",
+            contact=contact,
+            recipient="tel:+250788382382",
+            desired_amount=1.00,
+            actual_amount=1.00,
+        )
+
+        self.assertIsNone(self.airtime1.uuid)
+
+    def test_migration(self):
+        self.airtime1.refresh_from_db()
+
+        self.assertIsNotNone(self.airtime1.uuid)

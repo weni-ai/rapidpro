@@ -8,13 +8,11 @@ from fnmatch import fnmatch
 from urllib.parse import unquote, urlparse
 
 import iso8601
-from xlsxlite.writer import XLSXBook
 
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.contrib.postgres.fields import ArrayField
 from django.core.files.storage import default_storage
-from django.core.files.temp import NamedTemporaryFile
 from django.db import models
 from django.db.models import Prefetch, Q, Sum
 from django.db.models.functions import Lower
@@ -22,14 +20,12 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from temba import mailroom
-from temba.assets.models import register_asset_store
 from temba.channels.models import Channel, ChannelLog
-from temba.contacts import search
 from temba.contacts.models import Contact, ContactGroup, ContactURN
-from temba.orgs.models import DependencyMixin, Org
+from temba.orgs.models import DependencyMixin, Export, ExportType, Org
 from temba.schedules.models import Schedule
-from temba.utils import chunk_list, on_transaction_commit
-from temba.utils.export import BaseExportAssetStore, BaseItemWithContactExport
+from temba.utils import chunk_list, languages, on_transaction_commit
+from temba.utils.export.models import MultiSheetExporter
 from temba.utils.models import JSONAsTextField, SquashableModel, TembaModel
 from temba.utils.s3 import public_file_storage
 from temba.utils.uuid import uuid4
@@ -42,7 +38,17 @@ class Media(models.Model):
     An uploaded media file that can be used as an attachment on messages.
     """
 
-    ALLOWED_CONTENT_TYPES = ("image/*", "audio/*", "video/*", "application/pdf")
+    ALLOWED_CONTENT_TYPES = (
+        "image/apng",
+        "image/avif",
+        "image/gif",
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "audio/*",
+        "video/*",
+        "application/pdf",
+    )
     MAX_UPLOAD_SIZE = 1024 * 1024 * 25  # 25MB
 
     STATUS_PENDING = "P"
@@ -190,11 +196,15 @@ class Broadcast(models.Model):
     contacts = models.ManyToManyField(Contact, related_name="addressed_broadcasts")
     urns = ArrayField(models.TextField(), null=True)
     query = models.TextField(null=True)
+    node_uuid = models.UUIDField(null=True)
+    exclusions = models.JSONField(default=dict, null=True)
 
-    # message content in different languages, e.g. {"eng": {"text": "Hello", "attachments": [...]}, "spa": ...}
-    translations = models.JSONField()
+    # message content
+    translations = models.JSONField()  # text, attachments and quick replies by language
     base_language = models.CharField(max_length=3)  # ISO-639-3
     optin = models.ForeignKey("msgs.OptIn", null=True, on_delete=models.PROTECT)
+    template = models.ForeignKey("templates.Template", null=True, on_delete=models.PROTECT)
+    template_variables = ArrayField(models.TextField(), null=True)
 
     status = models.CharField(max_length=1, choices=STATUS_CHOICES, default=STATUS_QUEUED)
     created_by = models.ForeignKey(User, null=True, on_delete=models.PROTECT, related_name="broadcast_creations")
@@ -212,36 +222,40 @@ class Broadcast(models.Model):
         cls,
         org,
         user,
-        translations: dict[str, dict] = None,
+        translations: dict[str, dict],
         *,
-        base_language: str = None,
-        groups=None,
-        contacts=None,
-        urns: list[str] = None,
-        contact_ids: list[int] = None,
-        **kwargs,
+        base_language: str,
+        groups=(),
+        contacts=(),
+        urns=(),
+        query=None,
+        node_uuid=None,
+        exclude=None,
+        optin=None,
+        template=None,
+        template_variables=(),
+        schedule=None,
     ):
-        assert groups or contacts or contact_ids or urns, "can't create broadcast without recipients"
-
-        # if base language is not provided
-        if not base_language:
-            base_language = next(iter(translations))
-
+        assert groups or contacts or urns or query or node_uuid, "can't create broadcast without recipients"
+        assert base_language and languages.get_name(base_language), f"{base_language} is not a valid language code"
         assert base_language in translations, "no translation for base language"
 
-        broadcast = cls.objects.create(
-            org=org,
+        return mailroom.get_client().msg_broadcast(
+            org,
+            user,
             translations=translations,
             base_language=base_language,
-            created_by=user,
-            modified_by=user,
-            **kwargs,
+            groups=groups,
+            contacts=contacts,
+            urns=urns,
+            query=query,
+            node_uuid=node_uuid,
+            exclude=exclude,
+            optin=optin,
+            template=template,
+            template_variables=template_variables,
+            schedule=schedule,
         )
-
-        # set our recipients
-        broadcast._set_recipients(groups=groups, contacts=contacts, urns=urns, contact_ids=contact_ids)
-
-        return broadcast
 
     @classmethod
     def get_queued(cls, org):
@@ -256,15 +270,9 @@ class Broadcast(models.Model):
         Requests a preview of the recipients of a broadcast created with the given inclusions/exclusions, returning a
         tuple of the canonical query and the total count of contacts.
         """
-        preview = search.preview_broadcast(org, include=include, exclude=exclude)
+        preview = mailroom.get_client().msg_broadcast_preview(org, include=include, exclude=exclude)
 
         return preview.query, preview.total
-
-    def send_async(self):
-        """
-        Queues this broadcast for sending by mailroom
-        """
-        mailroom.queue_broadcast(self)
 
     def has_pending_fire(self):  # pragma: needs cover
         return self.schedule and self.schedule.next_fire is not None
@@ -282,7 +290,8 @@ class Broadcast(models.Model):
         """
 
         def trans(d):
-            return {"text": "", "attachments": [], "quick_replies": []} | d  # ensure we always have text+attachments
+            # ensure that we have all fields
+            return {"text": "", "attachments": [], "quick_replies": []} | d
 
         if contact and contact.language and contact.language in self.org.flow_languages:  # try contact language
             if contact.language in self.translations:
@@ -319,7 +328,7 @@ class Broadcast(models.Model):
             if self.schedule:
                 self.schedule.delete()
 
-    def update_recipients(self, *, groups=None, contacts=None, urns: list[str] = None):
+    def update_recipients(self, *, groups=None, contacts=None):
         """
         Only used to update recipients for scheduled / repeating broadcasts
         """
@@ -327,27 +336,11 @@ class Broadcast(models.Model):
         self.groups.clear()
         self.contacts.clear()
 
-        self._set_recipients(groups=groups, contacts=contacts, urns=urns)
-
-    def _set_recipients(self, *, groups=None, contacts=None, urns: list[str] = None, contact_ids=None):
-        """
-        Sets the recipients which may be contact groups, contacts or contact URNs.
-        """
-        if groups:
+        if groups:  # pragma: no cover
             self.groups.add(*groups)
 
         if contacts:
             self.contacts.add(*contacts)
-
-        if urns:
-            self.urns = urns
-            self.save(update_fields=("urns",))
-
-        if contact_ids:
-            RelatedModel = self.contacts.through
-            for chunk in chunk_list(contact_ids, 1000):
-                bulk_contacts = [RelatedModel(contact_id=id, broadcast_id=self.id) for id in chunk]
-                RelatedModel.objects.bulk_create(bulk_contacts)
 
     def __repr__(self):
         return f'<Broadcast: id={self.id} text="{self.get_translation()["text"]}">'
@@ -437,6 +430,7 @@ class Msg(models.Model):
     STATUS_WIRED = "W"  # outgoing msg requested to be sent via channel
     STATUS_SENT = "S"  # outgoing msg having received sent confirmation from channel
     STATUS_DELIVERED = "D"  # outgoing msg having received delivery confirmation from channel
+    STATUS_READ = "R"  # outgoing msg having received read confirmation from channel
     STATUS_ERRORED = "E"  # outgoing msg which has errored and will be retried
     STATUS_FAILED = "F"  # outgoing msg which has failed permanently
     STATUS_CHOICES = (
@@ -447,6 +441,7 @@ class Msg(models.Model):
         (STATUS_WIRED, _("Wired")),
         (STATUS_SENT, _("Sent")),
         (STATUS_DELIVERED, _("Delivered")),
+        (STATUS_READ, _("Read")),
         (STATUS_ERRORED, _("Error")),
         (STATUS_FAILED, _("Failed")),
     )
@@ -520,17 +515,17 @@ class Msg(models.Model):
     quick_replies = ArrayField(models.CharField(max_length=64), null=True)
     optin = models.ForeignKey("msgs.OptIn", on_delete=models.DO_NOTHING, null=True, db_index=False, db_constraint=False)
     locale = models.CharField(max_length=6, null=True)  # eng, eng-US, por-BR, und etc
+    templating = models.JSONField(null=True)
 
-    created_on = models.DateTimeField(db_index=True)
-    modified_on = models.DateTimeField(null=True, blank=True, auto_now=True)
+    created_on = models.DateTimeField(db_index=True)  # for flow messages this uses event time to keep histories ordered
+    modified_on = models.DateTimeField()
     sent_on = models.DateTimeField(null=True)
-    queued_on = models.DateTimeField(null=True)
 
     msg_type = models.CharField(max_length=1, choices=TYPE_CHOICES)
     direction = models.CharField(max_length=1, choices=DIRECTION_CHOICES)
     status = models.CharField(max_length=1, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
     visibility = models.CharField(max_length=1, choices=VISIBILITY_CHOICES, default=VISIBILITY_VISIBLE)
-
+    is_android = models.BooleanField(null=True)
     labels = models.ManyToManyField("Label", related_name="msgs")
 
     # the number of actual messages the channel sent this as (outgoing only)
@@ -545,8 +540,10 @@ class Msg(models.Model):
     # the id of this message on the other side of its channel
     external_id = models.CharField(max_length=255, null=True)
 
-    metadata = JSONAsTextField(null=True, default=dict)
     log_uuids = ArrayField(models.UUIDField(), null=True)
+
+    # deprecated - only used now for Facebook topic
+    metadata = JSONAsTextField(null=True, default=dict)
 
     def as_archive_json(self):
         """
@@ -582,12 +579,12 @@ class Msg(models.Model):
     def get_logs(self) -> list:
         return ChannelLog.get_logs(self.channel, self.log_uuids or [])
 
-    def handle(self):
+    def handle(self):  # pragma: no cover
         """
-        Queues this message to be handled
+        Queues this message to be handled. Only used for manual retries of failed handling.
         """
 
-        mailroom.queue_msg_handling(self)
+        mailroom.get_client().msg_handle(self.org, [self])
 
     def archive(self):
         """
@@ -647,7 +644,7 @@ class Msg(models.Model):
     @classmethod
     def apply_action_resend(cls, user, msgs):
         if msgs:
-            mailroom.get_client().msg_resend(msgs[0].org.id, [m.id for m in msgs])
+            mailroom.get_client().msg_resend(msgs[0].org, list(msgs))
 
     @classmethod
     def bulk_soft_delete(cls, msgs: list):
@@ -687,8 +684,8 @@ class Msg(models.Model):
 
         cls.objects.filter(id__in=[m.id for m in msgs]).delete()
 
-    def __str__(self):  # pragma: needs cover
-        return self.text
+    def __repr__(self):  # pragma: no cover
+        return f'<Msg: id={self.id} text="{self.text}">'
 
     class Meta:
         indexes = [
@@ -735,7 +732,7 @@ class Msg(models.Model):
             models.Index(
                 name="msgs_sent",
                 fields=["org", "-sent_on", "-id"],
-                condition=Q(direction="O", visibility="V", status__in=("W", "S", "D")),
+                condition=Q(direction="O", visibility="V", status__in=("W", "S", "D", "R")),
             ),
             # used for API incoming folder (unpublicized as could be dropped when CasePro is retired)
             models.Index(
@@ -743,9 +740,14 @@ class Msg(models.Model):
             ),
         ]
         constraints = [
+            models.CheckConstraint(name="direction_is_in_or_out", check=Q(direction="I") | Q(direction="O")),
+            models.CheckConstraint(
+                name="incoming_has_channel_and_urn",
+                check=Q(direction="O") | Q(channel__isnull=False, contact_urn__isnull=False),
+            ),
             models.CheckConstraint(
                 name="no_sent_status_without_sent_on",
-                check=(~Q(status__in=("W", "S", "D"), sent_on__isnull=True)),
+                check=(~Q(status__in=("W", "S", "D", "R"), sent_on__isnull=True)),
             ),
         ]
 
@@ -848,7 +850,7 @@ class SystemLabel:
             qs = Msg.objects.filter(
                 direction=Msg.DIRECTION_OUT,
                 visibility=Msg.VISIBILITY_VISIBLE,
-                status__in=(Msg.STATUS_WIRED, Msg.STATUS_SENT, Msg.STATUS_DELIVERED),
+                status__in=(Msg.STATUS_WIRED, Msg.STATUS_SENT, Msg.STATUS_DELIVERED, Msg.STATUS_READ),
             )
         elif label_type == cls.TYPE_FAILED:
             qs = Msg.objects.filter(
@@ -872,7 +874,7 @@ class SystemLabel:
         elif label_type == cls.TYPE_OUTBOX:
             return dict(direction="out", visibility="visible", status__in=("initializing", "queued", "errored"))
         elif label_type == cls.TYPE_SENT:
-            return dict(direction="out", visibility="visible", status__in=("wired", "sent", "delivered"))
+            return dict(direction="out", visibility="visible", status__in=("wired", "sent", "delivered", "read"))
         elif label_type == cls.TYPE_FAILED:
             return dict(direction="out", visibility="visible", status="failed")
 
@@ -1093,78 +1095,68 @@ class MsgIterator:
         return next(self._generator)
 
 
-class ExportMessagesTask(BaseItemWithContactExport):
+class MessageExport(ExportType):
     """
-    Wrapper for handling exports of raw messages. This will export all selected messages in
-    an Excel spreadsheet, adding sheets as necessary to fall within the guidelines of Excel 97
-    (the library we depend on requires this) which has column and row size limits.
-
-    When the export is done, we store the file on the server and send an e-mail notice with a
-    link to download the results.
+    Export of messages
     """
 
-    analytics_key = "msg_export"
-    notification_export_type = "message"
-
-    label = models.ForeignKey(Label, on_delete=models.PROTECT, null=True)
-    system_label = models.CharField(null=True, max_length=1)
-
-    # TODO backfill, for now overridden from base class to make nullable
-    start_date = models.DateField(null=True)
-    end_date = models.DateField(null=True)
+    slug = "message"
+    name = _("Messages")
+    download_prefix = "messages"
+    download_template = "msgs/export_download.html"
 
     @classmethod
     def create(cls, org, user, start_date, end_date, system_label=None, label=None, with_fields=(), with_groups=()):
-        assert not (label and system_label), "can't specify both label and system label"
-
-        export = cls.objects.create(
+        export = Export.objects.create(
             org=org,
-            system_label=system_label,
-            label=label,
+            export_type=cls.slug,
             start_date=start_date,
             end_date=end_date,
+            config={
+                "system_label": system_label,
+                "label_uuid": str(label.uuid) if label else None,
+                "with_fields": [f.id for f in with_fields],
+                "with_groups": [g.id for g in with_groups],
+            },
             created_by=user,
-            modified_by=user,
         )
-        export.with_fields.add(*with_fields)
-        export.with_groups.add(*with_groups)
         return export
 
-    def _add_msgs_sheet(self, book):
-        name = "Messages (%d)" % (book.num_msgs_sheets + 1) if book.num_msgs_sheets > 0 else "Messages"
-        sheet = book.add_sheet(name, book.num_msgs_sheets)
-        book.num_msgs_sheets += 1
+    def get_folder(self, export):
+        label_uuid = export.config.get("label_uuid")
+        system_label = export.config.get("system_label")
+        if label_uuid:
+            return None, export.org.msgs_labels.filter(uuid=label_uuid).first()
+        else:
+            return system_label, None
 
-        self.append_row(sheet, book.headers)
-        return sheet
+    def write(self, export):
+        system_label, label = self.get_folder(export)
+        start_date, end_date = export.get_date_range()
 
-    def write_export(self):
-        book = XLSXBook()
-        book.num_msgs_sheets = 0
-        book.headers = (
+        # create our exporter
+        exporter = MultiSheetExporter(
+            "Messages",
             ["Date"]
-            + self._get_contact_headers()
-            + ["Flow", "Direction", "Text", "Attachments", "Status", "Channel", "Labels"]
+            + export.get_contact_headers()
+            + ["Flow", "Direction", "Text", "Attachments", "Status", "Channel", "Labels"],
+            export.org.timezone,
         )
-        book.current_msgs_sheet = self._add_msgs_sheet(book)
+        num_records = 0
+        logger.info(f"starting msgs export #{export.id} for org #{export.org.id}")
 
-        start_date, end_date = self._get_date_range()
+        for batch in self._get_msg_batches(export, system_label, label, start_date, end_date):
+            self._write_msgs(export, exporter, batch)
 
-        logger.info(f"starting msgs export #{self.id} for org #{self.org.id}")
-
-        for batch in self._get_msg_batches(self.system_label, self.label, start_date, end_date):
-            self._write_msgs(book, batch)
+            num_records += len(batch)
 
             # update modified_on so we can see if an export hangs
-            self.modified_on = timezone.now()
-            self.save(update_fields=("modified_on",))
+            export.modified_on = timezone.now()
+            export.save(update_fields=("modified_on",))
 
-        temp = NamedTemporaryFile(delete=True, suffix=".xlsx", mode="wb+")
-        book.finalize(to_file=temp)
-        temp.flush()
-        return temp, "xlsx"
+        return *exporter.save_file(), num_records
 
-    def _get_msg_batches(self, system_label, label, start_date, end_date):
+    def _get_msg_batches(self, export, system_label, label, start_date, end_date):
         from temba.archives.models import Archive
         from temba.flows.models import Flow
 
@@ -1176,7 +1168,7 @@ class ExportMessagesTask(BaseItemWithContactExport):
         else:
             where = {"visibility": "visible"}
 
-        records = Archive.iter_all_records(self.org, Archive.TYPE_MSG, start_date, end_date, where=where)
+        records = Archive.iter_all_records(export.org, Archive.TYPE_MSG, start_date, end_date, where=where)
         last_created_on = None
 
         for record_batch in chunk_list(records, 1000):
@@ -1190,11 +1182,11 @@ class ExportMessagesTask(BaseItemWithContactExport):
             yield matching
 
         if system_label:
-            messages = SystemLabel.get_queryset(self.org, system_label)
+            messages = SystemLabel.get_queryset(export.org, system_label)
         elif label:
             messages = label.get_messages()
         else:
-            messages = self.org.msgs.filter(visibility=Msg.VISIBILITY_VISIBLE)
+            messages = export.org.msgs.filter(visibility=Msg.VISIBILITY_VISIBLE)
 
         messages = messages.filter(created_on__gte=start_date, created_on__lte=end_date)
 
@@ -1217,11 +1209,11 @@ class ExportMessagesTask(BaseItemWithContactExport):
             # convert this batch of msgs to same format as records in our archives
             yield [msg.as_archive_json() for msg in msg_batch]
 
-    def _write_msgs(self, book, msgs):
+    def _write_msgs(self, export, exporter, msgs):
         # get all the contacts referenced in this batch
         contact_uuids = {m["contact"]["uuid"] for m in msgs}
         contacts = (
-            Contact.objects.filter(org=self.org, uuid__in=contact_uuids)
+            Contact.objects.filter(org=export.org, uuid__in=contact_uuids)
             .select_related("org")
             .prefetch_related("groups")
             .using("readonly")
@@ -1232,13 +1224,9 @@ class ExportMessagesTask(BaseItemWithContactExport):
             contact = contacts_by_uuid.get(msg["contact"]["uuid"])
             flow = msg.get("flow")
 
-            if book.current_msgs_sheet.num_rows >= self.MAX_EXCEL_ROWS:  # pragma: no cover
-                book.current_msgs_sheet = self._add_msgs_sheet(book)
-
-            self.append_row(
-                book.current_msgs_sheet,
+            exporter.write_row(
                 [iso8601.parse_date(msg["created_on"])]
-                + self._get_contact_columns(contact, urn=msg["urn"])
+                + export.get_contact_columns(contact, urn=msg["urn"])
                 + [
                     flow["name"] if flow else None,
                     msg["direction"].upper() if msg["direction"] else None,
@@ -1250,11 +1238,6 @@ class ExportMessagesTask(BaseItemWithContactExport):
                 ],
             )
 
-
-@register_asset_store
-class MessageExportAssetStore(BaseExportAssetStore):
-    model = ExportMessagesTask
-    key = "message_export"
-    directory = "message_exports"
-    permission = "msgs.msg_export"
-    extensions = ("xlsx",)
+    def get_download_context(self, export) -> dict:
+        system_label, label = self.get_folder(export)
+        return {"label": label} if label else {}

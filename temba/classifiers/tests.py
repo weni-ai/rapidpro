@@ -130,20 +130,20 @@ class ClassifierCRUDLTest(TembaTest, CRUDLTestMixin):
             # request a sync
             response = self.client.post(reverse("classifiers.classifier_sync", args=[self.c1.id]), follow=True)
             self.assertEqual(200, response.status_code)
-            self.assertContains(response, "Your classifier has been synced.")
-
+            self.assertToast(response, "info", "Your classifier has been synced.")
             mock_sync.assert_called_once()
 
             mock_sync.side_effect = ValueError("BOOM")
 
             response = self.client.post(reverse("classifiers.classifier_sync", args=[self.c1.id]), follow=True)
             self.assertEqual(200, response.status_code)
-            self.assertContains(response, "Unable to sync classifier. See the log for details.")
+            self.assertToast(response, "error", "Unable to sync classifier. See the log for details.")
 
     def test_read(self):
         read_url = reverse("classifiers.classifier_read", args=[self.c1.uuid])
 
-        response = self.assertReadFetch(read_url, allow_viewers=True, allow_editors=True, context_object=self.c1)
+        self.assertRequestDisallowed(read_url, [None, self.agent, self.admin2])
+        response = self.assertReadFetch(read_url, [self.user, self.editor, self.admin], context_object=self.c1)
 
         # lists active intents
         self.assertContains(response, "book_flight")
@@ -155,11 +155,13 @@ class ClassifierCRUDLTest(TembaTest, CRUDLTestMixin):
     def test_delete(self):
         delete_url = reverse("classifiers.classifier_delete", args=[self.c2.uuid])
 
+        self.assertRequestDisallowed(delete_url, [None, self.user, self.editor, self.agent, self.admin2])
+
         # fetch delete modal
-        response = self.assertDeleteFetch(delete_url)
+        response = self.assertDeleteFetch(delete_url, [self.admin])
         self.assertContains(response, "You are about to delete")
 
-        response = self.assertDeleteSubmit(delete_url, object_deactivated=self.c2, success_status=200)
+        response = self.assertDeleteSubmit(delete_url, self.admin, object_deactivated=self.c2, success_status=200)
         self.assertEqual("/org/workspace/", response["Temba-Success"])
 
         # should see warning if global is being used
@@ -167,11 +169,11 @@ class ClassifierCRUDLTest(TembaTest, CRUDLTestMixin):
 
         self.assertFalse(self.flow.has_issues)
 
-        response = self.assertDeleteFetch(delete_url)
+        response = self.assertDeleteFetch(delete_url, [self.admin])
         self.assertContains(response, "is used by the following items but can still be deleted:")
         self.assertContains(response, "Color Flow")
 
-        response = self.assertDeleteSubmit(delete_url, object_deactivated=self.c1, success_status=200)
+        response = self.assertDeleteSubmit(delete_url, self.admin, object_deactivated=self.c1, success_status=200)
         self.assertEqual("/org/workspace/", response["Temba-Success"])
 
         self.flow.refresh_from_db()

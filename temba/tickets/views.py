@@ -3,8 +3,6 @@ from datetime import timedelta
 from smartmin.views import SmartCRUDL, SmartListView, SmartTemplateView, SmartUpdateView
 
 from django import forms
-from django.conf import settings
-from django.contrib import messages
 from django.db.models.aggregates import Max
 from django.http import Http404, JsonResponse
 from django.urls import reverse
@@ -14,28 +12,25 @@ from django.utils.translation import gettext_lazy as _
 
 from temba.msgs.models import Msg
 from temba.notifications.views import NotificationTargetMixin
-from temba.orgs.views import MenuMixin, ModalMixin, OrgObjPermsMixin, OrgPermsMixin
-from temba.utils import on_transaction_commit
+from temba.orgs.views import BaseExportView, MenuMixin, ModalMixin, OrgObjPermsMixin, OrgPermsMixin
 from temba.utils.dates import datetime_to_timestamp, timestamp_to_datetime
 from temba.utils.export import response_from_workbook
-from temba.utils.export.views import BaseExportView
 from temba.utils.fields import InputWidget
 from temba.utils.uuid import UUID_REGEX
 from temba.utils.views import ComponentFormMixin, ContentMenuMixin, SpaMixin
 
 from .models import (
     AllFolder,
-    ExportTicketsTask,
     MineFolder,
     Ticket,
     TicketCount,
+    TicketExport,
     TicketFolder,
     Topic,
     TopicFolder,
     UnassignedFolder,
     export_ticket_stats,
 )
-from .tasks import export_tickets_task
 
 
 class NoteForm(forms.ModelForm):
@@ -78,7 +73,6 @@ class TopicCRUDL(SmartCRUDL):
         success_url = "hide"
         slug_url_kwarg = "uuid"
         fields = ("name",)
-        success_message = ""
         form_class = Form
 
 
@@ -101,7 +95,6 @@ class TicketCRUDL(SmartCRUDL):
         fields = ("topic", "body")
         slug_url_kwarg = "uuid"
         success_url = "hide"
-        success_message = ""
 
     class List(SpaMixin, ContentMenuMixin, OrgPermsMixin, NotificationTargetMixin, SmartListView):
         """
@@ -354,9 +347,7 @@ class TicketCRUDL(SmartCRUDL):
             # get the last message for each contact that these tickets belong to
             contact_ids = {t.contact_id for t in tickets}
             last_msg_ids = Msg.objects.filter(contact_id__in=contact_ids).values("contact").annotate(last_msg=Max("id"))
-            last_msgs = Msg.objects.filter(id__in=[m["last_msg"] for m in last_msg_ids]).select_related(
-                "created_by", "broadcast__created_by"  # TODO remove broadcast__created_by once msgs have created_by
-            )
+            last_msgs = Msg.objects.filter(id__in=[m["last_msg"] for m in last_msg_ids]).select_related("created_by")
 
             context["last_msgs"] = {m.contact: m for m in last_msgs}
             return context
@@ -369,18 +360,12 @@ class TicketCRUDL(SmartCRUDL):
                 return {"id": u.id, "first_name": u.first_name, "last_name": u.last_name, "email": u.email}
 
             def msg_as_json(m):
-                sender = None
-                if m.created_by:
-                    sender = {"id": m.created_by.id, "email": m.created_by.email}
-                elif m.broadcast and m.broadcast.created_by:
-                    sender = {"id": m.broadcast.created_by.id, "email": m.broadcast.created_by.email}
-
                 return {
                     "text": m.text,
                     "direction": m.direction,
                     "type": m.msg_type,
                     "created_on": m.created_on,
-                    "sender": sender,
+                    "sender": {"id": m.created_by.id, "email": m.created_by.email} if m.created_by else None,
                     "attachments": m.attachments,
                 }
 
@@ -425,8 +410,6 @@ class TicketCRUDL(SmartCRUDL):
         fields = ("note",)
         success_url = "hide"
         slug_url_kwarg = "uuid"
-        success_message = ""
-        submit_button_name = _("Save")
 
         def form_valid(self, form):
             self.get_object().add_note(self.request.user, note=form.cleaned_data["note"])
@@ -443,45 +426,14 @@ class TicketCRUDL(SmartCRUDL):
             return response_from_workbook(workbook, f"ticket-stats-{timezone.now().strftime('%Y-%m-%d')}.xlsx")
 
     class Export(BaseExportView):
+        export_type = TicketExport
         success_url = "@tickets.ticket_list"
 
-        def form_valid(self, form):
-            org = self.request.org
-            user = self.request.user
-
-            # is there already an export taking place?
-            existing = ExportTicketsTask.get_recent_unfinished(org)
-            if existing:
-                messages.info(
-                    self.request,
-                    f"There is already an export in progress, started by {existing.created_by.username}. "
-                    f"You must wait for that export to complete before starting another.",
-                )
-            else:
-                start_date = form.cleaned_data["start_date"]
-                end_date = form.cleaned_data["end_date"]
-                with_fields = form.cleaned_data["with_fields"]
-                with_groups = form.cleaned_data["with_groups"]
-                export = ExportTicketsTask.create(
-                    org, user, start_date, end_date, with_fields=with_fields, with_groups=with_groups
-                )
-
-                # schedule the export job
-                on_transaction_commit(lambda: export_tickets_task.delay(export.pk))
-
-                # display progress info message to user
-                if not getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False):  # pragma: no cover
-                    messages.info(
-                        self.request,
-                        f"We are preparing your export. We will e-mail you at {self.request.user.username} when it is ready.",
-                    )
-                else:
-                    dl_url = reverse("assets.download", kwargs=dict(type="ticket_export", pk=export.pk))
-                    messages.info(
-                        self.request,
-                        f"Export complete, you can find it here: {dl_url} (production users will get an email)",
-                    )
-
-            response = self.render_modal_response(form)
-            response["REDIRECT"] = self.get_success_url()
-            return response
+        def create_export(self, org, user, form):
+            start_date = form.cleaned_data["start_date"]
+            end_date = form.cleaned_data["end_date"]
+            with_fields = form.cleaned_data["with_fields"]
+            with_groups = form.cleaned_data["with_groups"]
+            return TicketExport.create(
+                org, user, start_date, end_date, with_fields=with_fields, with_groups=with_groups
+            )

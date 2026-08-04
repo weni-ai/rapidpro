@@ -9,7 +9,6 @@ from django.utils.translation import gettext_lazy as _
 from temba.channels.types.turn.views import ClaimView
 from temba.contacts.models import URN
 from temba.request_logs.models import HTTPLog
-from temba.templates.models import TemplateTranslation
 from temba.utils.whatsapp.views import SyncLogsView, TemplatesView
 
 from ...models import ChannelType, ConfigUI
@@ -30,8 +29,6 @@ class TurnType(ChannelType):
     A Turn.io WhatsApp Channel Type
     """
 
-    extra_links = [dict(label=_("Message Templates"), view_name="channels.types.turn.templates")]
-
     code = "TRN"
     name = "Turn.io WhatsApp"
     category = ChannelType.Category.SOCIAL_MEDIA
@@ -39,11 +36,14 @@ class TurnType(ChannelType):
     courier_url = r"^trn/(?P<uuid>[a-z0-9\-]+)/(?P<action>receive)$"
     schemes = [URN.WHATSAPP_SCHEME]
     max_length = 4096
+    template_type = "whatsapp"
 
     claim_blurb = _(
         "If you have an enterprise Turn.io WhatsApp account, you can connect it to communicate with your contacts"
     )
     claim_view = ClaimView
+
+    menu_items = [dict(label=_("Message Templates"), view_name="channels.types.turn.templates")]
 
     config_ui = ConfigUI(
         blurb=_("To finish configuring this channel, you'll need Turn.io to use the following callback URL."),
@@ -63,34 +63,34 @@ class TurnType(ChannelType):
             re_path(r"^(?P<uuid>[a-z0-9\-]+)/sync_logs$", SyncLogsView.as_view(channel_type=self), name="sync_logs"),
         ]
 
-    def deactivate(self, channel):
-        TemplateTranslation.trim(channel, [])
-
-    def get_api_templates(self, channel):
+    def fetch_templates(self, channel) -> list:
         if CONFIG_FB_BUSINESS_ID not in channel.config or CONFIG_FB_ACCESS_TOKEN not in channel.config:
-            return [], False
+            raise ValueError("Channel missing Facebook Business ID or Access Token in config")
 
-        start = timezone.now()
-        try:
-            facebook_template_domain = channel.config.get(CONFIG_FB_TEMPLATE_LIST_DOMAIN, "graph.facebook.com")
-            facebook_business_id = channel.config.get(CONFIG_FB_BUSINESS_ID)
-            facebook_template_api_version = channel.config.get(CONFIG_FB_TEMPLATE_API_VERSION, "v14.0")
-            url = TEMPLATE_LIST_URL % (facebook_template_domain, facebook_template_api_version, facebook_business_id)
-            template_data = []
-            while url:
+        facebook_template_domain = channel.config.get(CONFIG_FB_TEMPLATE_LIST_DOMAIN, "graph.facebook.com")
+        facebook_business_id = channel.config.get(CONFIG_FB_BUSINESS_ID)
+        facebook_template_api_version = channel.config.get(CONFIG_FB_TEMPLATE_API_VERSION, "v14.0")
+        url = TEMPLATE_LIST_URL % (facebook_template_domain, facebook_template_api_version, facebook_business_id)
+
+        template_data = []
+        while url:
+            start = timezone.now()
+            try:
                 response = requests.get(
                     url, params={"access_token": channel.config[CONFIG_FB_ACCESS_TOKEN], "limit": 255}
                 )
+                response.raise_for_status()
                 HTTPLog.from_response(
                     HTTPLog.WHATSAPP_TEMPLATES_SYNCED, response, start, timezone.now(), channel=channel
                 )
 
-                if response.status_code != 200:
-                    return [], False
-
                 template_data.extend(response.json()["data"])
                 url = response.json().get("paging", {}).get("next", None)
-            return template_data, True
-        except requests.RequestException as e:
-            HTTPLog.from_exception(HTTPLog.WHATSAPP_TEMPLATES_SYNCED, e, start, channel=channel)
-            return [], False
+            except requests.RequestException as e:
+                HTTPLog.from_exception(HTTPLog.WHATSAPP_TEMPLATES_SYNCED, e, start, channel=channel)
+                raise e
+
+        return template_data
+
+    def get_redact_values(self, channel) -> tuple:
+        return (channel.config.get(CONFIG_FB_ACCESS_TOKEN, ""),)

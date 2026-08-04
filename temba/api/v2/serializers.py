@@ -23,9 +23,8 @@ from temba.locations.models import AdminBoundary
 from temba.mailroom import modifiers
 from temba.msgs.models import Broadcast, Label, Media, Msg, OptIn
 from temba.orgs.models import Org, OrgRole
-from temba.templates.models import Template
 from temba.tickets.models import Ticket, Topic
-from temba.utils import json, on_transaction_commit
+from temba.utils import json
 from temba.utils.fields import NameValidator
 
 from ..models import BulkActionFailure, Resthook, ResthookSubscriber, WebHookEvent
@@ -251,19 +250,18 @@ class BroadcastWriteSerializer(WriteSerializer):
                 # TODO update broadcast sending to allow media objects to stay as UUIDs for longer
                 translations[lang]["attachments"] = [str(m) for m in atts]
 
-        broadcast = Broadcast.create(
+        if not base_language:
+            base_language = next(iter(translations))
+
+        return Broadcast.create(
             self.context["org"],
             self.context["user"],
-            translations=translations,
+            translations,
             base_language=base_language,
             groups=self.validated_data.get("groups", []),
             contacts=self.validated_data.get("contacts", []),
             urns=self.validated_data.get("urns", []),
         )
-
-        on_transaction_commit(lambda: broadcast.send_async())
-
-        return broadcast
 
 
 class ChannelEventReadSerializer(ReadSerializer):
@@ -473,7 +471,7 @@ class ChannelReadSerializer(ReadSerializer):
         return str(obj.country) if obj.country else None
 
     def get_device(self, obj):
-        if not obj.is_android():
+        if not obj.is_android:
             return None
 
         return {
@@ -602,6 +600,8 @@ class ContactWriteSerializer(WriteSerializer):
         required=False, child=serializers.CharField(allow_blank=True, allow_null=True), max_length=100
     )
 
+    urn_errors = {"invalid": "URN is not valid.", "taken": "URN is in use by another contact."}
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -644,12 +644,6 @@ class ContactWriteSerializer(WriteSerializer):
         # or for updates by anonymous organizations (we do allow creation of contacts with URNs)
         if org.is_anon and self.instance:
             raise serializers.ValidationError("Updating URNs not allowed for anonymous organizations")
-
-        # if creating a contact, URNs can't belong to other contacts
-        if not self.instance:
-            for urn in value:
-                if Contact.from_urn(org, urn):
-                    raise serializers.ValidationError("URN belongs to another contact: %s" % urn)
 
         return value
 
@@ -704,14 +698,18 @@ class ContactWriteSerializer(WriteSerializer):
             self.instance = Contact.create(
                 self.context["org"],
                 self.context["user"],
-                name,
-                language,
-                urns or [],
-                custom_fields or {},
-                groups or [],
+                name=name,
+                language=language,
+                status=Contact.STATUS_ACTIVE,
+                urns=urns or [],
+                fields=custom_fields or {},
+                groups=groups or [],
             )
 
         return self.instance
+
+    def urn_exception(self, ex):
+        return {"urns": {ex.index: [self.urn_errors[ex.code]]}}
 
 
 class ContactFieldReadSerializer(ReadSerializer):
@@ -1018,21 +1016,20 @@ class FlowRunReadSerializer(ReadSerializer):
             return None
 
         def convert_step(step):
-            arrived_on = iso8601.parse_date(step[FlowRun.PATH_ARRIVED_ON])
-            return {"node": step[FlowRun.PATH_NODE_UUID], "time": format_datetime(arrived_on)}
+            arrived_on = iso8601.parse_date(step["arrived_on"])
+            return {"node": step["node_uuid"], "time": format_datetime(arrived_on)}
 
         return [convert_step(s) for s in obj.path]
 
     def get_values(self, obj):
         def convert_result(result):
-            created_on = iso8601.parse_date(result[FlowRun.RESULT_CREATED_ON])
             return {
-                "value": result[FlowRun.RESULT_VALUE],
-                "category": result.get(FlowRun.RESULT_CATEGORY),
-                "node": result[FlowRun.RESULT_NODE_UUID],
-                "time": format_datetime(created_on),
-                "input": result.get(FlowRun.RESULT_INPUT),
-                "name": result.get(FlowRun.RESULT_NAME),
+                "value": result["value"],
+                "category": result.get("category"),
+                "node": result["node_uuid"],
+                "time": format_datetime(iso8601.parse_date(result["created_on"])),
+                "input": result.get("input"),
+                "name": result.get("name"),
             }
 
         return {k: convert_result(r) for k, r in obj.results.items()}
@@ -1267,6 +1264,7 @@ class MsgReadSerializer(ReadSerializer):
         Msg.STATUS_WIRED: "wired",
         Msg.STATUS_SENT: "sent",
         Msg.STATUS_DELIVERED: "delivered",
+        Msg.STATUS_READ: "read",
         Msg.STATUS_ERRORED: "errored",
         Msg.STATUS_FAILED: "failed",
     }
@@ -1367,9 +1365,7 @@ class MsgWriteSerializer(WriteSerializer):
         attachments = [str(m) for m in self.validated_data.get("attachments", [])]
         ticket = self.validated_data.get("ticket")
 
-        resp = mailroom.get_client().msg_send(
-            org.id, user.id, contact.id, text or "", attachments, ticket.id if ticket else None
-        )
+        resp = mailroom.get_client().msg_send(org, user, contact, text or "", attachments, ticket)
 
         # to avoid fetching the new msg from the database, construct transient instances to pass to the serializer
         channel = Channel(uuid=resp["channel"]["uuid"], name=resp["channel"]["name"]) if resp.get("channel") else None
@@ -1569,33 +1565,6 @@ class WebHookEventReadSerializer(ReadSerializer):
         fields = ("resthook", "data", "created_on")
 
 
-class TemplateReadSerializer(ReadSerializer):
-    translations = serializers.SerializerMethodField()
-    modified_on = serializers.DateTimeField(default_timezone=tzone.utc)
-    created_on = serializers.DateTimeField(default_timezone=tzone.utc)
-
-    def get_translations(self, obj):
-        translations = []
-        for translation in obj.translations.all():
-            translations.append(
-                {
-                    "language": translation.locale[:3],
-                    "locale": translation.locale,
-                    "content": translation.content,
-                    "namespace": translation.namespace,
-                    "variable_count": translation.variable_count,
-                    "status": translation.get_status_display(),
-                    "channel": {"uuid": translation.channel.uuid, "name": translation.channel.name},
-                }
-            )
-
-        return translations
-
-    class Meta:
-        model = Template
-        fields = ("uuid", "name", "translations", "created_on", "modified_on")
-
-
 class TicketReadSerializer(ReadSerializer):
     STATUSES = {Ticket.STATUS_OPEN: "open", Ticket.STATUS_CLOSED: "closed"}
 
@@ -1722,8 +1691,13 @@ class UserReadSerializer(ReadSerializer):
         OrgRole.SURVEYOR: "surveyor",
     }
 
+    avatar = serializers.SerializerMethodField()
     role = serializers.SerializerMethodField()
     created_on = serializers.DateTimeField(default_timezone=tzone.utc, source="date_joined")
+
+    def get_avatar(self, obj):
+        settings = obj.settings
+        return settings.avatar.url if settings and settings.avatar else None
 
     def get_role(self, obj):
         role = self.context["user_roles"][obj]
@@ -1731,7 +1705,7 @@ class UserReadSerializer(ReadSerializer):
 
     class Meta:
         model = User
-        fields = ("email", "first_name", "last_name", "role", "created_on")
+        fields = ("email", "first_name", "last_name", "role", "created_on", "avatar")
 
 
 class WorkspaceReadSerializer(ReadSerializer):

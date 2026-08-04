@@ -6,15 +6,11 @@ from django.db import models
 from django.db.models import Q
 from django.urls import reverse
 from django.utils import timezone
-from django.utils.functional import cached_property
 
 from temba.channels.models import Channel
-from temba.contacts.models import ContactImport, ExportContactsTask
-from temba.flows.models import ExportFlowResultsTask
-from temba.msgs.models import ExportMessagesTask
-from temba.orgs.models import Org
-from temba.tickets.models import ExportTicketsTask
-from temba.utils.email import send_template_email
+from temba.contacts.models import ContactImport
+from temba.orgs.models import Export, Org
+from temba.utils.email import EmailSender
 from temba.utils.models import SquashableModel
 
 logger = logging.getLogger(__name__)
@@ -46,7 +42,7 @@ class Incident(models.Model):
 
     id = models.BigAutoField(primary_key=True)
     org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="incidents")
-    incident_type = models.CharField(max_length=20)
+    incident_type = models.CharField(max_length=32)
 
     # The scope is what we maintain uniqueness of ongoing incidents for within an org. For incident types with an
     # associated object, this will be the UUID of the object.
@@ -135,11 +131,10 @@ class NotificationType:
         """
         return ""
 
-    def get_email_context(self, notification):
+    def get_email_context(self, notification, branding: dict):
         return {
-            "org": notification.org,
-            "user": notification.user,
-            "target_url": self.get_target_url(notification),
+            "notification": notification,
+            "target_url": f"https://{branding['domain']}{self.get_target_url(notification)}",
         }
 
     def as_json(self, notification) -> dict:
@@ -180,51 +175,35 @@ class Notification(models.Model):
 
     user = models.ForeignKey(User, on_delete=models.PROTECT, related_name="notifications")
     is_seen = models.BooleanField(default=False)
+    email_address = models.EmailField(null=True)  # only used when dest email != current user email
     email_status = models.CharField(choices=EMAIL_STATUS_CHOICES, max_length=1, default=EMAIL_STATUS_NONE)
     created_on = models.DateTimeField(default=timezone.now)
 
-    contact_export = models.ForeignKey(
-        ExportContactsTask, null=True, on_delete=models.PROTECT, related_name="notifications"
-    )
-    message_export = models.ForeignKey(
-        ExportMessagesTask, null=True, on_delete=models.PROTECT, related_name="notifications"
-    )
-    results_export = models.ForeignKey(
-        ExportFlowResultsTask, null=True, on_delete=models.PROTECT, related_name="notifications"
-    )
-    ticket_export = models.ForeignKey(
-        ExportTicketsTask, null=True, on_delete=models.PROTECT, related_name="notifications"
-    )
-
+    export = models.ForeignKey(Export, null=True, on_delete=models.PROTECT, related_name="notifications")
     contact_import = models.ForeignKey(ContactImport, null=True, on_delete=models.PROTECT, related_name="notifications")
-
     incident = models.ForeignKey(Incident, null=True, on_delete=models.PROTECT, related_name="notifications")
 
     @classmethod
-    def create_all(cls, org, notification_type: str, *, scope: str, users, **kwargs):
+    def create_all(cls, org, notification_type: str, *, scope: str, users, medium: str = MEDIUM_UI, **kwargs):
         for user in users:
             cls.objects.get_or_create(
                 org=org,
                 notification_type=notification_type,
                 scope=scope,
                 user=user,
-                is_seen=False,
+                is_seen=cls.MEDIUM_UI not in medium,
+                medium=medium,
                 defaults=kwargs,
             )
 
     def send_email(self):
         subject = self.type.get_email_subject(self)
         template = self.type.get_email_template(self)
-        context = self.type.get_email_context(self)
+        context = self.type.get_email_context(self, self.org.branding)
 
         if subject and template:
-            send_template_email(
-                self.user.email,
-                f"[{self.org.name}] {subject}",
-                template,
-                context,
-                self.org.branding,
-            )
+            sender = EmailSender.from_email_type(self.org.branding, "notifications")
+            sender.send([self.email_address or self.user.email], f"[{self.org.name}] {subject}", template, context)
         else:  # pragma: no cover
             logger.error(f"pending emails for notification type {self.type.slug} not configured for email")
 
@@ -232,9 +211,11 @@ class Notification(models.Model):
         self.save(update_fields=("email_status",))
 
     @classmethod
-    def mark_seen(cls, org, notification_type: str, *, scope: str, user):
-        notifications = cls.objects.filter(org_id=org.id, notification_type=notification_type, user=user, is_seen=False)
+    def mark_seen(cls, org, user, notification_type: str = None, *, scope: str = None):
+        notifications = cls.objects.filter(org_id=org.id, user=user, is_seen=False)
 
+        if notification_type:
+            notifications = notifications.filter(notification_type=notification_type)
         if scope is not None:
             notifications = notifications.filter(scope=scope)
 
@@ -243,10 +224,6 @@ class Notification(models.Model):
     @classmethod
     def get_unseen_count(cls, org: Org, user: User) -> int:
         return NotificationCount.get_total(org, user)
-
-    @cached_property
-    def export(self):
-        return self.contact_export or self.message_export or self.results_export or self.ticket_export
 
     @property
     def type(self):

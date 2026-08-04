@@ -16,6 +16,7 @@
   }
 </style>
 {% block page-header %}
+  {% csrf_token %}
   <div class="mb-4">
     <div class="no-menu flex items-center">
       <div class="text-container text-2xl text-gray-700">
@@ -49,13 +50,6 @@
 {% block alert-messages %}
   {% if user_org.is_suspended %}
     {% include "org_suspended_include.html" %}
-  {% endif %}
-  {% if messages %}
-    {% for msg in messages %}
-      <temba-alert class="mb-3">
-        {{ msg }}
-      </temba-alert>
-    {% endfor %}
   {% endif %}
 {% endblock alert-messages %}
 {% block page-container %}

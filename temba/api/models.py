@@ -60,37 +60,37 @@ class APIPermission(BasePermission):
         }
 
     def has_permission(self, request, view):
+        # viewing docs is always allowed
+        if view.is_docs():
+            return request.method == "GET"
+
         permission = self.get_required_permission(request, view)
 
-        if permission:
-            # no anon access to API endpoints
-            if request.user.is_anonymous:
+        # no anon access to API endpoints
+        if request.user.is_anonymous:
+            return False
+
+        org = request.org
+
+        if request.auth:
+            # check that user is still allowed to use the token's role
+            if not request.auth.is_valid():
                 return False
 
-            org = request.org
+            role = OrgRole.from_group(request.auth.role)
+        elif org:
+            # user may not have used token authentication
+            role = org.get_user_role(request.user)
+        else:
+            return False
 
-            if request.auth:
-                # check that user is still allowed to use the token's role
-                if not request.auth.is_valid():
-                    return False
+        has_perm = role.has_api_perm(permission)
 
-                role = OrgRole.from_group(request.auth.role)
-            elif org:
-                # user may not have used token authentication
-                role = org.get_user_role(request.user)
-            else:
-                return False
+        # viewers can only ever get from the API
+        if role == OrgRole.VIEWER:
+            return has_perm and request.method == "GET"
 
-            has_perm = role.has_api_perm(permission)
-
-            # viewers can only ever get from the API
-            if role == OrgRole.VIEWER:
-                return has_perm and request.method == "GET"
-
-            return has_perm
-
-        else:  # pragma: no cover
-            return True
+        return has_perm
 
 
 class SSLPermission(BasePermission):  # pragma: no cover
@@ -252,14 +252,6 @@ class APIToken(models.Model):
             return cls.objects.create(user=user, org=org, role=role_group)
         else:
             return tokens.first()
-
-    @classmethod
-    def get_orgs_for_role(cls, request, role: OrgRole):
-        """
-        Gets all the orgs the user can access the API with the given role
-        """
-        granting_roles = cls.GROUP_GRANTED_TO.get(role.group.name, [])
-        return User.get_orgs_for_request(request, roles=granting_roles) if granting_roles else Org.objects.none()
 
     @classmethod
     def get_default_role(cls, org, user):

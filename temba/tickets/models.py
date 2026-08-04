@@ -12,12 +12,11 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from temba import mailroom
-from temba.assets.models import register_asset_store
 from temba.contacts.models import Contact
-from temba.orgs.models import DependencyMixin, Org, User, UserSettings
+from temba.orgs.models import DependencyMixin, Export, ExportType, Org, User, UserSettings
 from temba.utils import chunk_list
 from temba.utils.dates import date_range
-from temba.utils.export import BaseExportAssetStore, BaseItemWithContactExport, MultiSheetExporter
+from temba.utils.export import MultiSheetExporter
 from temba.utils.models import DailyCountModel, DailyTimingModel, SquashableModel, TembaModel
 from temba.utils.uuid import uuid4
 
@@ -119,29 +118,23 @@ class Ticket(models.Model):
 
     @classmethod
     def bulk_assign(cls, org, user: User, tickets: list, assignee: User):
-        ticket_ids = [t.id for t in tickets]
-        assignee_id = assignee.id if assignee else None
-        return mailroom.get_client().ticket_assign(org.id, user.id, ticket_ids, assignee_id)
+        return mailroom.get_client().ticket_assign(org, user, tickets, assignee)
 
     @classmethod
     def bulk_add_note(cls, org, user: User, tickets: list, note: str):
-        ticket_ids = [t.id for t in tickets]
-        return mailroom.get_client().ticket_add_note(org.id, user.id, ticket_ids, note)
+        return mailroom.get_client().ticket_add_note(org, user, tickets, note)
 
     @classmethod
     def bulk_change_topic(cls, org, user: User, tickets: list, topic: Topic):
-        ticket_ids = [t.id for t in tickets]
-        return mailroom.get_client().ticket_change_topic(org.id, user.id, ticket_ids, topic.id)
+        return mailroom.get_client().ticket_change_topic(org, user, tickets, topic)
 
     @classmethod
     def bulk_close(cls, org, user, tickets, *, force: bool = False):
-        ticket_ids = [t.id for t in tickets]
-        return mailroom.get_client().ticket_close(org.id, user.id, ticket_ids, force=force)
+        return mailroom.get_client().ticket_close(org, user, tickets, force=force)
 
     @classmethod
     def bulk_reopen(cls, org, user, tickets):
-        ticket_ids = [t.id for t in tickets]
-        return mailroom.get_client().ticket_reopen(org.id, user.id, ticket_ids)
+        return mailroom.get_client().ticket_reopen(org, user, tickets)
 
     @classmethod
     def get_allowed_assignees(cls, org):
@@ -403,7 +396,7 @@ class Team(TembaModel):
         return org.teams.create(name=name, created_by=user, modified_by=user)
 
     def get_users(self):
-        return User.objects.filter(usersettings__team=self)
+        return User.objects.filter(settings__team=self)
 
     def release(self, user):
         # remove all users from this team
@@ -534,31 +527,40 @@ def export_ticket_stats(org: Org, since: date, until: date) -> openpyxl.Workbook
     return workbook
 
 
-class ExportTicketsTask(BaseItemWithContactExport):
-    analytics_key = "ticket_export"
-    notification_export_type = "ticket"
+class TicketExport(ExportType):
+    """
+    Export of tickets
+    """
+
+    slug = "ticket"
+    name = _("Tickets")
+    download_prefix = "tickets"
 
     @classmethod
     def create(cls, org, user, start_date, end_date, with_fields=(), with_groups=()):
-        export = cls.objects.create(
-            org=org, start_date=start_date, end_date=end_date, created_by=user, modified_by=user
+        return Export.objects.create(
+            org=org,
+            export_type=cls.slug,
+            start_date=start_date,
+            end_date=end_date,
+            config={"with_fields": [f.id for f in with_fields], "with_groups": [g.id for g in with_groups]},
+            created_by=user,
         )
-        export.with_fields.add(*with_fields)
-        export.with_groups.add(*with_groups)
-        return export
 
-    def write_export(self):
-        headers = ["UUID", "Opened On", "Closed On", "Topic", "Assigned To"] + self._get_contact_headers()
-        start_date, end_date = self._get_date_range()
+    def write(self, export):
+        headers = ["UUID", "Opened On", "Closed On", "Topic", "Assigned To"] + export.get_contact_headers()
+        start_date, end_date = export.get_date_range()
 
         # get the ticket ids, filtered and ordered by opened on
         ticket_ids = (
-            self.org.tickets.filter(opened_on__gte=start_date, opened_on__lte=end_date)
+            Ticket.objects.filter(org=export.org, opened_on__gte=start_date, opened_on__lte=end_date)
             .order_by("opened_on")
             .values_list("id", flat=True)
+            .using("readonly")
         )
 
-        exporter = MultiSheetExporter("Tickets", headers, self.org.timezone)
+        exporter = MultiSheetExporter("Tickets", headers, export.org.timezone)
+        num_records = 0
 
         # add tickets to the export in batches of 1k to limit memory usage
         for batch_ids in chunk_list(ticket_ids, 1000):
@@ -579,20 +581,13 @@ class ExportTicketsTask(BaseItemWithContactExport):
                     ticket.topic.name,
                     ticket.assignee.email if ticket.assignee else None,
                 ]
-                values += self._get_contact_columns(ticket.contact)
+                values += export.get_contact_columns(ticket.contact)
 
                 exporter.write_row(values)
 
-            self.modified_on = timezone.now()
-            self.save(update_fields=("modified_on",))
+            num_records += len(tickets)
 
-        return exporter.save_file()
+            export.modified_on = timezone.now()
+            export.save(update_fields=("modified_on",))
 
-
-@register_asset_store
-class TicketExportAssetStore(BaseExportAssetStore):
-    model = ExportTicketsTask
-    key = "ticket_export"
-    directory = "ticket_exports"
-    permission = "tickets.ticket_export"
-    extensions = ("xlsx",)
+        return *exporter.save_file(), num_records

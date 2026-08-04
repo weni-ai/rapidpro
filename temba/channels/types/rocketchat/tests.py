@@ -8,7 +8,7 @@ from requests.exceptions import Timeout
 from django.urls import reverse
 
 from temba.channels.models import Channel
-from temba.tests import MockResponse, TembaTest
+from temba.tests import MockJsonResponse, MockResponse, TembaTest
 
 from .client import Client, ClientError
 from .type import RocketChatType
@@ -62,7 +62,7 @@ class RocketChatMixin(TembaTest):
 class ClientTest(RocketChatMixin):
     @patch("requests.put")
     def test_settings_success(self, mock_request):
-        mock_request.return_value = MockResponse(204, {})
+        mock_request.return_value = MockJsonResponse(204, {})
         try:
             Client(self.secure_url, self.secret).settings("http://temba.io/c/1234-5678", "test-bot")
         except ClientError:
@@ -171,68 +171,70 @@ class RocketChatViewTest(RocketChatMixin):
         response = self.submit_form(data)
         # retry with same base_url
         response = self.submit_form(data)
-        self.assertFormError(response, "form", "base_url", "There is already a channel configured for this URL.")
+        self.assertFormError(
+            response.context["form"], "base_url", "There is already a channel configured for this URL."
+        )
 
         data.pop("base_url")
         response = self.submit_form(data)
-        self.assertFormError(response, "form", "base_url", "This field is required.")
+        self.assertFormError(response.context["form"], "base_url", "This field is required.")
 
         data["base_url"] = ""
         response = self.submit_form(data)
-        self.assertFormError(response, "form", "base_url", "This field is required.")
+        self.assertFormError(response.context["form"], "base_url", "This field is required.")
 
         data["base_url"] = "domain"
         response = self.submit_form(data)
-        self.assertFormError(response, "form", "base_url", "Enter a valid URL.")
+        self.assertFormError(response.context["form"], "base_url", "Enter a valid URL.")
 
         data["base_url"] = "http://domain.com/x"
         response = self.submit_form(data)
-        self.assertFormError(response, "form", "base_url", "Invalid URL http://domain.com/x")
+        self.assertFormError(response.context["form"], "base_url", "Invalid URL http://domain.com/x")
 
     def test_form_invalid_secret(self):
         data = self.new_form_data()
 
         data.pop("secret")
         response = self.submit_form(data)
-        self.assertFormError(response, "form", None, "Invalid secret code.")
+        self.assertFormError(response.context["form"], None, "Invalid secret code.")
 
         data["secret"] = ""
         response = self.submit_form(data)
-        self.assertFormError(response, "form", None, "Invalid secret code.")
+        self.assertFormError(response.context["form"], None, "Invalid secret code.")
 
         data["secret"] = self.secret2
         response = self.submit_form(data)
-        self.assertFormError(response, "form", None, "Secret code change detected.")
+        self.assertFormError(response.context["form"], None, "Secret code change detected.")
 
     def test_form_invalid_bot_username(self):
         data = self.new_form_data()
 
         data.pop("bot_username")
         response = self.submit_form(data)
-        self.assertFormError(response, "form", "bot_username", "This field is required.")
+        self.assertFormError(response.context["form"], "bot_username", "This field is required.")
 
         data["bot_username"] = ""
         response = self.submit_form(data)
-        self.assertFormError(response, "form", "bot_username", "This field is required.")
+        self.assertFormError(response.context["form"], "bot_username", "This field is required.")
 
     def test_form_invalid_admin_auth_token(self):
         data = self.new_form_data()
 
         data.pop("admin_auth_token")
         response = self.submit_form(data)
-        self.assertFormError(response, "form", "admin_auth_token", "This field is required.")
+        self.assertFormError(response.context["form"], "admin_auth_token", "This field is required.")
 
         data["admin_auth_token"] = ""
         response = self.submit_form(data)
-        self.assertFormError(response, "form", "admin_auth_token", "This field is required.")
+        self.assertFormError(response.context["form"], "admin_auth_token", "This field is required.")
 
     def test_form_invalid_admin_user_id(self):
         data = self.new_form_data()
 
         data.pop("admin_user_id")
         response = self.submit_form(data)
-        self.assertFormError(response, "form", "admin_user_id", "This field is required.")
+        self.assertFormError(response.context["form"], "admin_user_id", "This field is required.")
 
         data["admin_user_id"] = ""
         response = self.submit_form(data)
-        self.assertFormError(response, "form", "admin_user_id", "This field is required.")
+        self.assertFormError(response.context["form"], "admin_user_id", "This field is required.")

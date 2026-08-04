@@ -1,14 +1,22 @@
 {% extends "smartmin/form.html" %}
 {% load smartmin i18n %}
 
+{% block extra-style %}
+  {{ block.super }}
+{% endblock extra-style %}
 {% block fields %}
   <div class="mb-4">
-    <div class="field formax-vertical">{% render_field 'first_name' %}</div>
-    <div class="field formax-vertical">{% render_field 'last_name' %}</div>
-    <div class="field formax-vertical">{% render_field 'language' %}</div>
-    <div class="field formax-vertical">{% render_field 'email' %}</div>
-    <div class="field formax-vertical">{% render_field 'new_password' %}</div>
-    <div class="field formax-vertical p-4 bg-gray-100 rounded-lg mt-4 hidden" id="current-password">
+    <div class="flex">
+      <div class="flex-auto mr-4">{% render_field 'first_name' %}</div>
+      <div class="flex-auto">{% render_field 'last_name' %}</div>
+    </div>
+    <div class="field">{% render_field 'avatar' %}</div>
+    {% if form.fields.language %}
+      <div class="field">{% render_field 'language' %}</div>
+    {% endif %}
+    <div class="field">{% render_field 'email' %}</div>
+    <div class="field">{% render_field 'new_password' %}</div>
+    <div class="field p-4 bg-gray-100 rounded-lg mt-4 hidden" id="current-password">
       <div class="mb-2">
         {% blocktrans trimmed %}
           Confirm your current password to save these changes
@@ -35,8 +43,10 @@
   </div>
 {% endblock summary %}
 {% block extra-script %}
+  {{ block.super }}
   <script type="text/javascript">
-    function wireHandlers() {
+    onSpload(function() {
+
       // hide our password field by default
       var passwordContainer = document.getElementById("current-password");
       var passwordField = passwordContainer.querySelector(".field_current_password");
@@ -59,15 +69,6 @@
         email.addEventListener("change", listener);
         newPw.addEventListener("change", listener);
       }, 0);
-
-    }
-
-    onSpload(function() {
-      wireHandlers();
-      // also wire them if our formax submits
-      document.addEventListener("temba-formax-ready", function() {
-        wireHandlers();
-      });
-    })
+    });
   </script>
 {% endblock extra-script %}

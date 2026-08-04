@@ -1,5 +1,5 @@
 from datetime import date, datetime, timedelta, timezone as tzone
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from openpyxl import load_workbook
 
@@ -9,18 +9,19 @@ from django.urls import reverse
 from django.utils import timezone
 
 from temba.contacts.models import Contact, ContactField, ContactURN
+from temba.orgs.models import Export
 from temba.tests import CRUDLTestMixin, TembaTest, matchers, mock_mailroom
 from temba.utils.dates import datetime_to_timestamp
 from temba.utils.uuid import uuid4
 
 from .models import (
-    ExportTicketsTask,
     Team,
     Ticket,
     TicketCount,
     TicketDailyCount,
     TicketDailyTiming,
     TicketEvent,
+    TicketExport,
     Topic,
     export_ticket_stats,
 )
@@ -28,7 +29,8 @@ from .tasks import squash_ticket_counts
 
 
 class TicketTest(TembaTest):
-    def test_model(self):
+    @mock_mailroom
+    def test_model(self, mr_mocks):
         topic = Topic.create(self.org, self.admin, "Sales")
         contact = self.create_contact("Bob", urns=["twitter:bobby"])
 
@@ -43,42 +45,38 @@ class TicketTest(TembaTest):
         self.assertEqual(f"Ticket[uuid={ticket.uuid}, topic=General]", str(ticket))
 
         # test bulk assignment
-        with patch("temba.mailroom.client.MailroomClient.ticket_assign") as mock_assign:
-            Ticket.bulk_assign(self.org, self.admin, [ticket], self.agent)
-
-        mock_assign.assert_called_once_with(self.org.id, self.admin.id, [ticket.id], self.agent.id)
-        mock_assign.reset_mock()
+        Ticket.bulk_assign(self.org, self.admin, [ticket], self.agent)
 
         # test bulk un-assignment
-        with patch("temba.mailroom.client.MailroomClient.ticket_assign") as mock_assign:
-            Ticket.bulk_assign(self.org, self.admin, [ticket], None)
+        Ticket.bulk_assign(self.org, self.admin, [ticket], None)
 
-        mock_assign.assert_called_once_with(self.org.id, self.admin.id, [ticket.id], None)
-        mock_assign.reset_mock()
+        self.assertEqual(
+            [
+                call(self.org, self.admin, [ticket], self.agent),
+                call(self.org, self.admin, [ticket], None),
+            ],
+            mr_mocks.calls["ticket_assign"],
+        )
 
         # test bulk adding a note
-        with patch("temba.mailroom.client.MailroomClient.ticket_add_note") as mock_add_note:
-            Ticket.bulk_add_note(self.org, self.admin, [ticket], "please handle")
+        Ticket.bulk_add_note(self.org, self.admin, [ticket], "please handle")
 
-        mock_add_note.assert_called_once_with(self.org.id, self.admin.id, [ticket.id], "please handle")
+        self.assertEqual([call(self.org, self.admin, [ticket], "please handle")], mr_mocks.calls["ticket_add_note"])
 
         # test bulk changing topic
-        with patch("temba.mailroom.client.MailroomClient.ticket_change_topic") as mock_change_topic:
-            Ticket.bulk_change_topic(self.org, self.admin, [ticket], topic)
+        Ticket.bulk_change_topic(self.org, self.admin, [ticket], topic)
 
-        mock_change_topic.assert_called_once_with(self.org.id, self.admin.id, [ticket.id], topic.id)
+        self.assertEqual([call(self.org, self.admin, [ticket], topic)], mr_mocks.calls["ticket_change_topic"])
 
         # test bulk closing
-        with patch("temba.mailroom.client.MailroomClient.ticket_close") as mock_close:
-            Ticket.bulk_close(self.org, self.admin, [ticket], force=True)
+        Ticket.bulk_close(self.org, self.admin, [ticket], force=True)
 
-        mock_close.assert_called_once_with(self.org.id, self.admin.id, [ticket.id], force=True)
+        self.assertEqual([call(self.org, self.admin, [ticket], force=True)], mr_mocks.calls["ticket_close"])
 
         # test bulk re-opening
-        with patch("temba.mailroom.client.MailroomClient.ticket_reopen") as mock_reopen:
-            Ticket.bulk_reopen(self.org, self.admin, [ticket])
+        Ticket.bulk_reopen(self.org, self.admin, [ticket])
 
-        mock_reopen.assert_called_once_with(self.org.id, self.admin.id, [ticket.id])
+        self.assertEqual([call(self.org, self.admin, [ticket])], mr_mocks.calls["ticket_reopen"])
 
     def test_allowed_assignees(self):
         self.assertEqual({self.admin, self.editor, self.agent}, set(Ticket.get_allowed_assignees(self.org)))
@@ -251,25 +249,28 @@ class TopicCRUDLTest(TembaTest, CRUDLTestMixin):
         update_url = reverse("tickets.topic_update", args=[system_topic.uuid])
         self.assertUpdateSubmit(
             update_url,
+            self.admin,
             {"name": "My Topic"},
             form_errors={"name": "Cannot edit system topic"},
             object_unchanged=system_topic,
         )
 
+        # check permissions
+        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
+        self.assertUpdateFetch(update_url, [self.editor, self.admin], form_fields=["name"])
+
         # names must be unique
         update_url = reverse("tickets.topic_update", args=[user_topic.uuid])
         self.assertUpdateSubmit(
             update_url,
+            self.admin,
             {"name": "General"},
             form_errors={"name": "Topic already exists, please try another name"},
             object_unchanged=user_topic,
         )
 
-        # check permissions
-        self.assertUpdateFetch(update_url, allow_viewers=False, allow_editors=True, form_fields=["name"])
-
         # edit successfully
-        self.assertUpdateSubmit(update_url, {"name": "Boring Tickets"}, success_status=302)
+        self.assertUpdateSubmit(update_url, self.admin, {"name": "Boring Tickets"}, success_status=302)
 
         user_topic.refresh_from_db()
         self.assertEqual(user_topic.name, "Boring Tickets")
@@ -286,7 +287,8 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
         ticket = self.create_ticket(self.contact, "Test 1", assignee=self.admin)
 
         # just a placeholder view for frontend components
-        self.assertListFetch(list_url, allow_viewers=True, allow_editors=True, allow_agents=True, context_objects=[])
+        self.assertRequestDisallowed(list_url, [None])
+        self.assertListFetch(list_url, [self.user, self.editor, self.admin, self.agent], context_objects=[])
 
         # can hit this page with a uuid
         # TODO: work out reverse for deep link
@@ -296,9 +298,7 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
 
         deep_link = f"{list_url}all/open/{str(ticket.uuid)}/"
         self.assertContentMenu(deep_link, self.admin, ["Edit", "Add Note", "Start Flow"])
-        response = self.assertListFetch(
-            deep_link, allow_viewers=True, allow_editors=True, allow_agents=True, context_objects=[]
-        )
+        response = self.assertListFetch(deep_link, [self.user, self.editor, self.admin, self.agent], context_objects=[])
 
         # our ticket exists on the first page, so it'll get flagged to be focused
         self.assertEqual(str(ticket.uuid), response.context["nextUUID"])
@@ -346,14 +346,15 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
 
         update_url = reverse("tickets.ticket_update", args=[ticket.uuid])
 
-        self.assertUpdateFetch(
-            update_url, allow_viewers=False, allow_editors=True, allow_agents=True, form_fields=["topic", "body"]
-        )
+        self.assertRequestDisallowed(update_url, [None, self.user, self.admin2])
+        self.assertUpdateFetch(update_url, [self.agent, self.editor, self.admin], form_fields=["topic", "body"])
 
         user_topic = Topic.objects.create(org=self.org, name="Hot Topic", created_by=self.admin, modified_by=self.admin)
 
         # edit successfully
-        self.assertUpdateSubmit(update_url, {"topic": user_topic.id, "body": "This is silly"}, success_status=302)
+        self.assertUpdateSubmit(
+            update_url, self.admin, {"topic": user_topic.id, "body": "This is silly"}, success_status=302
+        )
 
         ticket.refresh_from_db()
         self.assertEqual(user_topic, ticket.topic)
@@ -367,8 +368,9 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
         self.create_ticket(self.contact, "Test 3", assignee=None)
         self.create_ticket(self.contact, "Test 4", closed_on=timezone.now())
 
-        self.assertListFetch(menu_url, allow_viewers=True, allow_editors=True, allow_agents=True)
-        self.assertMenu(menu_url, 5, ["My Tickets", "Unassigned", "All", "General"], allow_viewers=True)
+        self.assertRequestDisallowed(menu_url, [None])
+        self.assertPageMenu(menu_url, self.admin, ["My Tickets (2)", "Unassigned (1)", "All (3)", "General (3)"])
+        self.assertPageMenu(menu_url, self.agent, ["My Tickets (0)", "Unassigned (1)", "All (3)", "General (3)"])
 
     @mock_mailroom
     def test_folder(self, mr_mocks):
@@ -406,17 +408,13 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
         response = self.client.get(open_url)
         assert_tickets(response, [])
 
-        # contact 1 has two open tickets
+        # contact 1 has two open tickets and some messages
         c1_t1 = self.create_ticket(contact1, "Question 1")
         # assign it
         c1_t1.assign(self.admin, assignee=self.admin)
         c1_t2 = self.create_ticket(contact1, "Question 2")
-
-        # give contact1 and old style broadcast message that doesn't have created_by set
         self.create_incoming_msg(contact1, "I have an issue")
-        c1_msg1 = self.create_broadcast(self.admin, "We can help", contacts=[contact1]).msgs.first()
-        c1_msg1.created_by = None
-        c1_msg1.save(update_fields=("created_by",))
+        self.create_outgoing_msg(contact1, "We can help", created_by=self.admin)
 
         # contact 2 has an open ticket and a closed ticket
         c2_t1 = self.create_ticket(contact2, "Question 3")
@@ -577,15 +575,20 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
 
         update_url = reverse("tickets.ticket_note", args=[ticket.uuid])
 
-        self.assertUpdateFetch(
-            update_url, allow_viewers=False, allow_editors=True, allow_agents=True, form_fields=["note"]
+        self.assertRequestDisallowed(update_url, [None, self.user, self.admin2])
+        self.assertUpdateFetch(update_url, [self.agent, self.editor, self.admin], form_fields=["note"])
+
+        self.assertUpdateSubmit(
+            update_url,
+            self.admin,
+            {"note": ""},
+            form_errors={"note": "This field is required."},
+            object_unchanged=ticket,
         )
 
         self.assertUpdateSubmit(
-            update_url, {"note": ""}, form_errors={"note": "This field is required."}, object_unchanged=ticket
+            update_url, self.admin, {"note": "I have a bad feeling about this."}, success_status=200
         )
-
-        self.assertUpdateSubmit(update_url, {"note": "I have a bad feeling about this."}, success_status=200)
 
         self.assertEqual(1, ticket.events.filter(event_type=TicketEvent.TYPE_NOTE_ADDED).count())
 
@@ -602,35 +605,110 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
             response["Content-Disposition"],
         )
 
-    def test_export_when_export_already_in_progress(self):
-        self.clear_storage()
-        self.login(self.admin)
+    @mock_mailroom
+    def test_export(self, mr_mocks):
         export_url = reverse("tickets.ticket_export")
 
-        # create a dummy export task so that we won't be able to export
-        blocking_export = ExportTicketsTask.create(
-            self.org, self.admin, start_date=date.today() - timedelta(days=7), end_date=date.today(), with_fields=()
+        self.assertRequestDisallowed(export_url, [None, self.agent])
+        response = self.assertUpdateFetch(
+            export_url,
+            [self.user, self.editor, self.admin],
+            form_fields=("start_date", "end_date", "with_fields", "with_groups"),
         )
-        response = self.client.post(export_url, {"start_date": "2022-06-28", "end_date": "2022-09-28"})
-        self.assertModalResponse(response, redirect="/ticket/")
+        self.assertNotContains(response, "already an export in progress")
 
-        response = self.client.get("/ticket/")
+        # create a dummy export task so that we won't be able to export
+        blocking_export = TicketExport.create(
+            self.org, self.admin, start_date=date.today() - timedelta(days=7), end_date=date.today()
+        )
+
+        response = self.client.get(export_url)
         self.assertContains(response, "already an export in progress")
 
-        # ok mark that export as finished and try again
-        blocking_export.update_status(ExportTicketsTask.STATUS_COMPLETE)
-
+        # check we can't submit in case a user opens the form and whilst another user is starting an export
         response = self.client.post(export_url, {"start_date": "2022-06-28", "end_date": "2022-09-28"})
-        self.assertModalResponse(response, redirect="/ticket/")
-        self.assertEqual(2, ExportTicketsTask.objects.count())
+        self.assertContains(response, "already an export in progress")
+        self.assertEqual(1, Export.objects.count())
+
+        # mark that one as finished so it's no longer a blocker
+        blocking_export.status = Export.STATUS_COMPLETE
+        blocking_export.save(update_fields=("status",))
+
+        # try to submit with no values
+        response = self.client.post(export_url, {})
+        self.assertFormError(response.context["form"], "start_date", "This field is required.")
+        self.assertFormError(response.context["form"], "end_date", "This field is required.")
+
+        # try to submit with start date in future
+        response = self.client.post(export_url, {"start_date": "2200-01-01", "end_date": "2022-09-28"})
+        self.assertFormError(response.context["form"], None, "Start date can't be in the future.")
+
+        # try to submit with start date > end date
+        response = self.client.post(export_url, {"start_date": "2022-09-01", "end_date": "2022-03-01"})
+        self.assertFormError(response.context["form"], None, "End date can't be before start date.")
+
+        # try to submit with too many fields or groups
+        too_many_fields = [self.create_field(f"Field {i}", f"field{i}") for i in range(11)]
+        too_many_groups = [self.create_group(f"Group {i}", contacts=[]) for i in range(11)]
+
+        response = self.client.post(
+            export_url,
+            {
+                "start_date": "2022-06-28",
+                "end_date": "2022-09-28",
+                "with_fields": [cf.id for cf in too_many_fields],
+                "with_groups": [cg.id for cg in too_many_groups],
+            },
+        )
+        self.assertFormError(response.context["form"], "with_fields", "You can only include up to 10 fields.")
+        self.assertFormError(response.context["form"], "with_groups", "You can only include up to 10 groups.")
+
+        testers = self.create_group("Testers", contacts=[])
+        gender = self.create_field("gender", "Gender")
+
+        response = self.client.post(
+            export_url,
+            {
+                "start_date": "2022-06-28",
+                "end_date": "2022-09-28",
+                "with_groups": [testers.id],
+                "with_fields": [gender.id],
+            },
+        )
+        self.assertEqual(200, response.status_code)
+
+        export = Export.objects.exclude(id=blocking_export.id).get()
+        self.assertEqual("ticket", export.export_type)
+        self.assertEqual(date(2022, 6, 28), export.start_date)
+        self.assertEqual(date(2022, 9, 28), export.end_date)
+        self.assertEqual(
+            {"with_groups": [testers.id], "with_fields": [gender.id]},
+            export.config,
+        )
+
+        self.clear_storage()
+
+
+class TicketExportTest(TembaTest):
+    def _export(self, start_date: date, end_date: date, with_fields=(), with_groups=()):
+        export = TicketExport.create(
+            self.org,
+            self.admin,
+            start_date=start_date,
+            end_date=end_date,
+            with_fields=with_fields,
+            with_groups=with_groups,
+        )
+        export.perform()
+        filename = f"{settings.MEDIA_ROOT}/test_orgs/{self.org.id}/ticket_exports/{export.uuid}.xlsx"
+        workbook = load_workbook(filename=filename)
+        return workbook.worksheets, export
 
     def test_export_empty(self):
-        self.login(self.admin)
-
         # check results of sheet in workbook (no Contact ID column)
-        export = self._request_export(start_date=date.today() - timedelta(days=7), end_date=date.today())
+        sheets, export = self._export(start_date=date.today() - timedelta(days=7), end_date=date.today())
         self.assertExcelSheet(
-            export[0],
+            sheets[0],
             [
                 [
                     "UUID",
@@ -649,9 +727,9 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
 
         with self.anonymous(self.org):
             # anon org doesn't see URN value column
-            export = self._request_export(start_date=date.today() - timedelta(days=7), end_date=date.today())
+            sheets, export = self._export(start_date=date.today() - timedelta(days=7), end_date=date.today())
             self.assertExcelSheet(
-                export[0],
+                sheets[0],
                 [
                     [
                         "UUID",
@@ -671,10 +749,6 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
         self.clear_storage()
 
     def test_export(self):
-        export_url = reverse("tickets.ticket_export")
-
-        self.login(self.admin)
-
         gender = self.create_field("gender", "Gender")
         age = self.create_field("age", "Age", value_type=ContactField.TYPE_NUMBER)
 
@@ -689,19 +763,21 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
         # create a contact with no urns
         nate = self.create_contact("Nathan Shelley", fields={"gender": "Male"})
 
-        # create a contact with one set of urns
-        jamie = self.create_contact("Jamie Tartt", fields={"gender": "Male", "age": 25})
-        ContactURN.create(self.org, jamie, "twitter:jamietarttshark")
+        # create a contact with one urn
+        jamie = self.create_contact(
+            "Jamie Tartt", urns=["twitter:jamietarttshark"], fields={"gender": "Male", "age": 25}
+        )
 
         # create a contact with multiple urns that have different max priority
-        roy = self.create_contact("Roy Kent", fields={"gender": "Male", "age": 41})
-        ContactURN.create(self.org, roy, "tel:+1234567890")
-        ContactURN.create(self.org, roy, "twitter:roykent")
+        roy = self.create_contact(
+            "Roy Kent", urns=["tel:+12345678900", "twitter:roykent"], fields={"gender": "Male", "age": 41}
+        )
 
         # create a contact with multiple urns that have the same max priority
-        sam = self.create_contact("Sam Obisanya", fields={"gender": "Male", "age": 22})
-        ContactURN.create(self.org, sam, "twitter:nigerianprince", priority=50)
-        ContactURN.create(self.org, sam, "tel:+9876543210", priority=50)
+        sam = self.create_contact(
+            "Sam Obisanya", urns=["twitter:nigerianprince", "tel:+9876543210"], fields={"gender": "Male", "age": 22}
+        )
+        sam.urns.update(priority=50)
 
         testers = self.create_group("Testers", contacts=[nate, roy])
 
@@ -740,23 +816,10 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
         # create a ticket on another org for rebecca
         self.create_ticket(self.create_contact("Rebecca", urns=["twitter:rwaddingham"], org=self.org2), "Stuff")
 
-        # try to submit without specifying dates (UI doesn't actually allow this)
-        response = self.client.post(export_url, {})
-        self.assertFormError(response, "form", "start_date", "This field is required.")
-        self.assertFormError(response, "form", "end_date", "This field is required.")
-
-        # try to submit with start date in future
-        response = self.client.post(export_url, {"start_date": "2200-01-01", "end_date": "2022-09-28"})
-        self.assertFormError(response, "form", None, "Start date can't be in the future.")
-
-        # try to submit with start date > end date
-        response = self.client.post(export_url, {"start_date": "2022-09-01", "end_date": "2022-03-01"})
-        self.assertFormError(response, "form", None, "End date can't be before start date.")
-
         # check requesting export for last 90 days
         with self.mockReadOnly(assert_models={Ticket, ContactURN}):
-            with self.assertNumQueries(33):
-                export = self._request_export(start_date=today - timedelta(days=90), end_date=today)
+            with self.assertNumQueries(17):
+                sheets, export = self._export(start_date=today - timedelta(days=90), end_date=today)
 
         expected_headers = [
             "UUID",
@@ -771,7 +834,7 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
         ]
 
         self.assertExcelSheet(
-            export[0],
+            sheets[0],
             rows=[
                 expected_headers,
                 [
@@ -805,7 +868,7 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
                     ticket3.contact.uuid,
                     "Roy Kent",
                     "tel",
-                    "+1234567890",
+                    "+12345678900",
                 ],
                 [
                     ticket4.uuid,
@@ -824,10 +887,10 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # check requesting export for last 7 days
         with self.mockReadOnly(assert_models={Ticket, ContactURN}):
-            export = self._request_export(start_date=today - timedelta(days=7), end_date=today)
+            sheets, export = self._export(start_date=today - timedelta(days=7), end_date=today)
 
         self.assertExcelSheet(
-            export[0],
+            sheets[0],
             rows=[
                 expected_headers,
                 [
@@ -839,7 +902,7 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
                     ticket3.contact.uuid,
                     "Roy Kent",
                     "tel",
-                    "+1234567890",
+                    "+12345678900",
                 ],
                 [
                     ticket4.uuid,
@@ -858,12 +921,12 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # check requesting with contact fields and groups
         with self.mockReadOnly(assert_models={Ticket, ContactURN}):
-            export = self._request_export(
+            sheets, export = self._export(
                 start_date=today - timedelta(days=7), end_date=today, with_fields=(age, gender), with_groups=(testers,)
             )
 
         self.assertExcelSheet(
-            export[0],
+            sheets[0],
             rows=[
                 expected_headers + ["Field:Age", "Field:Gender", "Group:Testers"],
                 [
@@ -875,7 +938,7 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
                     ticket3.contact.uuid,
                     "Roy Kent",
                     "tel",
-                    "+1234567890",
+                    "+12345678900",
                     "41",
                     "Male",
                     True,
@@ -900,9 +963,9 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
 
         with self.anonymous(self.org):
             with self.mockReadOnly(assert_models={Ticket, ContactURN}):
-                export = self._request_export(start_date=today - timedelta(days=90), end_date=today)
+                sheets, export = self._export(start_date=today - timedelta(days=90), end_date=today)
             self.assertExcelSheet(
-                export[0],
+                sheets[0],
                 [
                     [
                         "UUID",
@@ -965,41 +1028,6 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
 
         self.clear_storage()
 
-    def test_export_with_too_many_fields_and_groups(self):
-        export_url = reverse("tickets.ticket_export")
-        today = timezone.now().astimezone(self.org.timezone).date()
-        too_many_fields = [self.create_field(f"Field {i}", f"field{i}") for i in range(11)]
-        too_many_groups = [self.create_group(f"Group {i}", contacts=[]) for i in range(11)]
-
-        self.login(self.admin)
-        response = self.client.post(
-            export_url,
-            {
-                "start_date": today - timedelta(days=7),
-                "end_date": today,
-                "with_fields": [cf.id for cf in too_many_fields],
-                "with_groups": [cg.id for cg in too_many_groups],
-            },
-        )
-        self.assertFormError(response, "form", "with_fields", "You can only include up to 10 fields.")
-        self.assertFormError(response, "form", "with_groups", "You can only include up to 10 groups.")
-
-    def _request_export(self, start_date: date, end_date: date, with_fields=(), with_groups=()):
-        export_url = reverse("tickets.ticket_export")
-        self.client.post(
-            export_url,
-            {
-                "start_date": start_date.isoformat(),
-                "end_date": end_date.isoformat(),
-                "with_fields": [cf.id for cf in with_fields],
-                "with_groups": [cf.id for cf in with_groups],
-            },
-        )
-        task = ExportTicketsTask.objects.all().order_by("-id").first()
-        filename = f"{settings.MEDIA_ROOT}/test_orgs/{self.org.id}/ticket_exports/{task.uuid}.xlsx"
-        workbook = load_workbook(filename=filename)
-        return workbook.worksheets
-
 
 class TopicTest(TembaTest):
     def test_create(self):
@@ -1007,7 +1035,7 @@ class TopicTest(TembaTest):
 
         self.assertEqual("Sales", topic1.name)
         self.assertEqual("Sales", str(topic1))
-        self.assertEqual(f'<Topic: uuid={topic1.uuid} name="Sales">', repr(topic1))
+        self.assertEqual(f'<Topic: id={topic1.id} name="Sales">', repr(topic1))
 
         # try to create with invalid name
         with self.assertRaises(AssertionError):
@@ -1142,7 +1170,7 @@ class TeamTest(TembaTest):
 
         self.assertEqual("Sales", team1.name)
         self.assertEqual("Sales", str(team1))
-        self.assertEqual(f'<Team: uuid={team1.uuid} name="Sales">', repr(team1))
+        self.assertEqual(f'<Team: id={team1.id} name="Sales">', repr(team1))
 
         self.assertEqual({self.admin, self.agent}, set(team1.get_users()))
 

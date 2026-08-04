@@ -21,7 +21,7 @@
     {{ block.super }}
   {% endblock extra-script %}
   <div class="background"></div>
-  <div class="flex flex-col h-full z-10">
+  <div class="flex flex-col h-full z-10 overflow-y-auto">
     <div class="top flex-shrink flex-grow">
       {% block top %}
       {% endblock top %}
@@ -43,6 +43,18 @@
             {% endblock top-right %}
           </div>
         </div>
+        {% block alert-messages %}
+          {% if user_org.is_suspended %}
+            {% include "org_suspended_include.html" %}
+          {% endif %}
+          {% if messages %}
+            {% for msg in messages %}
+              <temba-alert class="mb-3">
+                {{ msg }}
+              </temba-alert>
+            {% endfor %}
+          {% endif %}
+        {% endblock alert-messages %}
         {% block content %}
         {% endblock content %}
       </div>

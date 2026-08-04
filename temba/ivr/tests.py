@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as tzone
 from unittest.mock import patch
 
 from django.urls import reverse
@@ -21,10 +21,10 @@ class CallTest(TembaTest):
             contact=contact,
             contact_urn=contact.get_urn(),
             status=Call.STATUS_IN_PROGRESS,
-            started_on=datetime(2022, 9, 20, 13, 46, 30, 0, timezone.utc),
+            started_on=datetime(2022, 9, 20, 13, 46, 30, 0, tzone.utc),
         )
 
-        with patch("django.utils.timezone.now", return_value=datetime(2022, 9, 20, 13, 46, 50, 0, timezone.utc)):
+        with patch("django.utils.timezone.now", return_value=datetime(2022, 9, 20, 13, 46, 50, 0, tzone.utc)):
             self.assertEqual(timedelta(seconds=20), call.get_duration())  # calculated
             self.assertEqual("In Progress", call.status_display)
 
@@ -101,10 +101,11 @@ class CallCRUDLTest(CRUDLTestMixin, TembaTest):
 
         # check query count
         self.login(self.admin)
-        with self.assertNumQueries(11):
+        with self.assertNumQueries(10):
             self.client.get(list_url)
 
-        self.assertListFetch(list_url, allow_viewers=True, allow_editors=True, context_objects=[call2, call1])
+        self.assertRequestDisallowed(list_url, [None, self.agent])
+        self.assertListFetch(list_url, [self.user, self.editor, self.admin], context_objects=[call2, call1])
 
 
 class IVRTest(TembaTest):

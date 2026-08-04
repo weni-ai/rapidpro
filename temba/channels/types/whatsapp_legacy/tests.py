@@ -1,6 +1,6 @@
+import json
 from unittest.mock import call, patch
 
-from django_redis import get_redis_connection
 from requests import RequestException
 
 from django.forms import ValidationError
@@ -8,9 +8,9 @@ from django.urls import reverse
 
 from temba.request_logs.models import HTTPLog
 from temba.templates.models import TemplateTranslation
+from temba.templates.tasks import refresh_templates
 from temba.tests import CRUDLTestMixin, MockResponse, TembaTest
-from temba.utils.views import TEMBA_MENU_SELECTION
-from temba.utils.whatsapp.tasks import refresh_whatsapp_contacts, refresh_whatsapp_templates
+from temba.utils.whatsapp.tasks import refresh_whatsapp_contacts
 
 from ...models import Channel
 from .tasks import refresh_whatsapp_tokens
@@ -55,7 +55,7 @@ class WhatsAppLegacyTypeTest(CRUDLTestMixin, TembaTest):
 
         # will fail with invalid phone number
         response = self.client.post(url, post_data)
-        self.assertFormError(response, "form", None, ["Please enter a valid phone number"])
+        self.assertFormError(response.context["form"], None, ["Please enter a valid phone number"])
 
         # valid number
         post_data["address"] = "0788123123"
@@ -172,7 +172,7 @@ class WhatsAppLegacyTypeTest(CRUDLTestMixin, TembaTest):
         # clear our FB ids, should cause refresh to be noop (but not fail)
         del channel.config[CONFIG_FB_BUSINESS_ID]
         channel.save(update_fields=["config", "modified_on"])
-        refresh_whatsapp_templates()
+        refresh_templates()
 
         # deactivate our channel
         channel.release(self.admin)
@@ -229,7 +229,7 @@ class WhatsAppLegacyTypeTest(CRUDLTestMixin, TembaTest):
 
             response = self.client.post(url, post_data)
             self.assertEqual(200, response.status_code)
-            self.assertFormError(response, "form", None, "This channel is already connected in this workspace.")
+            self.assertFormError(response.context["form"], None, "This channel is already connected in this workspace.")
 
         channel.org = self.org2
         channel.save()
@@ -244,8 +244,7 @@ class WhatsAppLegacyTypeTest(CRUDLTestMixin, TembaTest):
             response = self.client.post(url, post_data)
             self.assertEqual(200, response.status_code)
             self.assertFormError(
-                response,
-                "form",
+                response.context["form"],
                 None,
                 "This channel is already connected in another workspace.",
             )
@@ -288,29 +287,85 @@ class WhatsAppLegacyTypeTest(CRUDLTestMixin, TembaTest):
 
         # and fetching new tokens
         with patch("requests.post") as mock_post:
-            mock_post.return_value = MockResponse(200, '{"users": [{"token": "abc345"}]}')
+            mock_post.return_value = MockResponse(
+                200,
+                '{"users": [{"token": "abc345"}]}',
+                headers={
+                    "Authorization": "Basic dGVtYmE6dGVtYmFwYXNzd2Q=",
+                    "WA-user": "temba",
+                    "WA-pass": "tembapasswd",
+                },
+            )
             self.assertFalse(channel.http_logs.filter(log_type=HTTPLog.WHATSAPP_TOKENS_SYNCED, is_error=False))
             refresh_whatsapp_tokens()
             self.assertTrue(channel.http_logs.filter(log_type=HTTPLog.WHATSAPP_TOKENS_SYNCED, is_error=False))
             channel.refresh_from_db()
             self.assertEqual("abc345", channel.config[Channel.CONFIG_AUTH_TOKEN])
+            # check channel username, password, basic auth are redacted in HTTP logs
+            for log in channel.http_logs.all():
+                self.assertIn("temba", json.dumps(log.get_display()))
+                self.assertNotIn("tembapasswd", json.dumps(log.get_display()))
+                self.assertNotIn("dGVtYmE6dGVtYmFwYXNzd2Q=", json.dumps(log.get_display()))
 
         with patch("requests.post") as mock_post:
-            mock_post.side_effect = [MockResponse(400, '{ "error": true }')]
+            mock_post.side_effect = [
+                MockResponse(
+                    400,
+                    '{ "error": true }',
+                    headers={
+                        "Authorization": "Basic dGVtYmE6dGVtYmFwYXNzd2Q=",
+                        "WA-user": "temba",
+                        "WA-pass": "tembapasswd",
+                    },
+                )
+            ]
             self.assertFalse(channel.http_logs.filter(log_type=HTTPLog.WHATSAPP_TOKENS_SYNCED, is_error=True))
             refresh_whatsapp_tokens()
             self.assertTrue(channel.http_logs.filter(log_type=HTTPLog.WHATSAPP_TOKENS_SYNCED, is_error=True))
             channel.refresh_from_db()
             self.assertEqual("abc345", channel.config[Channel.CONFIG_AUTH_TOKEN])
+            # check channel username, password, basic auth are redacted in HTTP logs
+            for log in channel.http_logs.all():
+                self.assertIn("temba", json.dumps(log.get_display()))
+                self.assertNotIn("tembapasswd", json.dumps(log.get_display()))
+                self.assertNotIn("dGVtYmE6dGVtYmFwYXNzd2Q=", json.dumps(log.get_display()))
 
         with patch("requests.post") as mock_post:
-            mock_post.side_effect = [MockResponse(200, ""), MockResponse(200, '{"users": [{"token": "abc098"}]}')]
+            mock_post.side_effect = [
+                MockResponse(
+                    200,
+                    "",
+                    headers={
+                        "Authorization": "Basic dGVtYmE6dGVtYmFwYXNzd2Q=",
+                        "WA-user": "temba",
+                        "WA-pass": "tembapasswd",
+                    },
+                ),
+                MockResponse(
+                    200,
+                    '{"users": [{"token": "abc098"}]}',
+                    headers={
+                        "Authorization": "Basic dGVtYmE6dGVtYmFwYXNzd2Q=",
+                        "WA-user": "temba",
+                        "WA-pass": "tembapasswd",
+                    },
+                ),
+            ]
             refresh_whatsapp_tokens()
 
             channel.refresh_from_db()
             channel2.refresh_from_db()
             self.assertEqual("abc345", channel.config[Channel.CONFIG_AUTH_TOKEN])
             self.assertEqual("abc098", channel2.config[Channel.CONFIG_AUTH_TOKEN])
+            # check channel username, password, basic auth are redacted in HTTP logs
+            for log in channel.http_logs.all():
+                self.assertIn("temba", json.dumps(log.get_display()))
+                self.assertNotIn("tembapasswd", json.dumps(log.get_display()))
+                self.assertNotIn("dGVtYmE6dGVtYmFwYXNzd2Q=", json.dumps(log.get_display()))
+            for log in channel2.http_logs.all():
+                self.assertIn("temba", json.dumps(log.get_display()))
+                self.assertNotIn("tembapasswd", json.dumps(log.get_display()))
+                self.assertNotIn("dGVtYmE6dGVtYmFwYXNzd2Q=", json.dumps(log.get_display()))
 
     @patch("socket.gethostbyname", return_value="123.123.123.123")
     @patch("temba.channels.types.whatsapp_legacy.WhatsAppLegacyType.check_health")
@@ -381,10 +436,7 @@ class WhatsAppLegacyTypeTest(CRUDLTestMixin, TembaTest):
         self.assertEqual(45, channel.tps)
 
     @patch("requests.get")
-    def test_get_api_templates(self, mock_get):
-        TemplateTranslation.objects.all().delete()
-        Channel.objects.all().delete()
-
+    def test_fetch_templates(self, mock_get):
         channel = self.create_channel(
             "WA",
             "WhatsApp: 1234",
@@ -412,31 +464,35 @@ class WhatsAppLegacyTypeTest(CRUDLTestMixin, TembaTest):
             MockResponse(200, '{"data": ["bar"], "paging": {"next": null} }'),
         ]
 
-        # RequestException check HTTPLog
-        templates_data, no_error = WhatsAppLegacyType().get_api_templates(channel)
-        self.assertEqual(1, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED).count())
-        self.assertFalse(no_error)
-        self.assertEqual([], templates_data)
+        with self.assertRaises(RequestException):
+            channel.type.fetch_templates(channel)
 
-        # should be empty list with an error flag if fail with API
-        templates_data, no_error = WhatsAppLegacyType().get_api_templates(channel)
-        self.assertFalse(no_error)
-        self.assertEqual([], templates_data)
+        self.assertEqual(1, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, is_error=True).count())
 
-        # success no error and list
-        templates_data, no_error = WhatsAppLegacyType().get_api_templates(channel)
-        self.assertTrue(no_error)
-        self.assertEqual(["foo", "bar"], templates_data)
+        with self.assertRaises(RequestException):
+            channel.type.fetch_templates(channel)
+
+        self.assertEqual(2, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, is_error=True).count())
+
+        # check when no next page
+        templates = channel.type.fetch_templates(channel)
+        self.assertEqual(["foo", "bar"], templates)
+
+        self.assertEqual(2, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, is_error=True).count())
+        self.assertEqual(1, HTTPLog.objects.filter(log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, is_error=False).count())
+
+        # check admin token is redacted in HTTP logs
+        for log in HTTPLog.objects.all():
+            self.assertNotIn("token123", json.dumps(log.get_display()))
 
         mock_get.assert_called_with(
             "https://graph.facebook.com/v14.0/1234/message_templates",
             params={"access_token": "token123", "limit": 255},
         )
 
-        # success no error and pagination
-        templates_data, no_error = WhatsAppLegacyType().get_api_templates(channel)
-        self.assertTrue(no_error)
-        self.assertEqual(["foo", "bar"], templates_data)
+        # check when templates across two pages
+        templates = channel.type.fetch_templates(channel)
+        self.assertEqual(["foo", "bar"], templates)
 
         mock_get.assert_has_calls(
             [
@@ -450,161 +506,6 @@ class WhatsAppLegacyTypeTest(CRUDLTestMixin, TembaTest):
                 ),
             ]
         )
-
-    @patch("temba.channels.types.whatsapp_legacy.WhatsAppLegacyType.check_health")
-    @patch("temba.utils.whatsapp.tasks.update_local_templates")
-    @patch("temba.channels.types.whatsapp_legacy.WhatsAppLegacyType.get_api_templates")
-    def test_refresh_templates_task(self, mock_get_api_templates, update_local_templates_mock, mock_health):
-        TemplateTranslation.objects.all().delete()
-        Channel.objects.all().delete()
-
-        # channel has namespace in the channel config
-        channel = self.create_channel(
-            "WA",
-            "Channel",
-            "1234",
-            config={
-                "fb_namespace": "foo_namespace",
-                Channel.CONFIG_BASE_URL: "https://nyaruka.com/whatsapp",
-            },
-        )
-
-        self.login(self.admin)
-        mock_get_api_templates.side_effect = [
-            ([], False),
-            Exception("foo"),
-            ([{"name": "hello"}], True),
-            ([{"name": "hello"}], True),
-        ]
-        mock_health.return_value = MockResponse(200, '{"meta": {"api_status": "stable", "version": "v2.35.2"}}')
-        update_local_templates_mock.return_value = None
-
-        # should skip if locked
-        r = get_redis_connection()
-        with r.lock("refresh_whatsapp_templates", timeout=1800):
-            refresh_whatsapp_templates()
-            self.assertEqual(0, mock_get_api_templates.call_count)
-            self.assertEqual(0, update_local_templates_mock.call_count)
-
-        # should skip if fail with API
-        refresh_whatsapp_templates()
-
-        mock_get_api_templates.assert_called_with(channel)
-        self.assertEqual(1, mock_get_api_templates.call_count)
-        self.assertEqual(0, update_local_templates_mock.call_count)
-        self.assertFalse(mock_health.called)
-
-        # any exception
-        refresh_whatsapp_templates()
-
-        mock_get_api_templates.assert_called_with(channel)
-        self.assertEqual(2, mock_get_api_templates.call_count)
-        self.assertEqual(0, update_local_templates_mock.call_count)
-        self.assertFalse(mock_health.called)
-
-        # now it should refresh
-        refresh_whatsapp_templates()
-
-        mock_get_api_templates.assert_called_with(channel)
-        self.assertEqual(3, mock_get_api_templates.call_count)
-        update_local_templates_mock.assert_called_once_with(channel, [{"name": "hello"}])
-        self.assertFalse(mock_health.called)
-
-        channel.config.update(version="v1.0.0")
-        channel.save()
-
-        channel.refresh_from_db()
-
-        # now it should refresh
-        refresh_whatsapp_templates()
-
-        mock_get_api_templates.assert_called_with(channel)
-        self.assertEqual(4, mock_get_api_templates.call_count)
-        self.assertTrue(mock_health.called)
-
-        channel.refresh_from_db()
-
-        self.assertEqual("v2.35.2", channel.config.get("version"))
-
-    def test_message_templates_and_logs_views(self):
-        channel = self.create_channel("WA", "Channel", "1234", config={"fb_namespace": "foo_namespace"})
-
-        TemplateTranslation.get_or_create(
-            channel,
-            "hello",
-            locale="eng-US",
-            content="Hello {{1}}",
-            variable_count=1,
-            status=TemplateTranslation.STATUS_APPROVED,
-            external_id="1234",
-            external_locale="en_US",
-            namespace="foo_namespace",
-            components=[
-                {
-                    "type": "BODY",
-                    "text": "Hello {{1}}",
-                    "example": {"body_text": [["Bob"]]},
-                },
-            ],
-            params={"body": [{"type": "text"}]},
-        )
-
-        foo = TemplateTranslation.get_or_create(
-            channel,
-            "hi",
-            locale="eng-US",
-            content="Goodbye {{1}}",
-            variable_count=1,
-            status=TemplateTranslation.STATUS_APPROVED,
-            external_id="1235",
-            external_locale="en_US",
-            namespace="foo_namespace",
-            components=[
-                {
-                    "type": "BODY",
-                    "text": "Goodbye {{1}}",
-                    "example": {"body_text": [["Bob"]]},
-                },
-            ],
-            params={"body": [{"type": "text"}]},
-        )
-
-        sync_url = reverse("channels.types.whatsapp_legacy.sync_logs", args=[channel.uuid])
-        templates_url = reverse("channels.types.whatsapp_legacy.templates", args=[channel.uuid])
-
-        self.login(self.admin)
-        response = self.client.get(templates_url)
-
-        # should have our template translations
-        self.assertContains(response, "Hello")
-        self.assertContains(response, "Goodbye")
-        # check if templates view contains the sync logs link menu item
-        self.assertContentMenu(templates_url, self.admin, ["Sync Logs"])
-
-        response = self.client.get(templates_url)
-        self.assertEqual(f"/settings/channels/{channel.uuid}", response.context[TEMBA_MENU_SELECTION])
-
-        foo.is_active = False
-        foo.save()
-        response = self.client.get(templates_url)
-
-        # should have our template translations
-        self.assertContains(response, "Hello")
-        self.assertNotContains(response, "Goodbye")
-        # check if sync_logs view contains the message templates link menu item
-        response = self.client.get(sync_url)
-        self.assertContains(response, channel.name)
-        self.assertContentMenu(sync_url, self.admin, ["Message Templates"])
-
-        response = self.client.get(sync_url)
-        self.assertEqual(f"/settings/channels/{channel.uuid}", response.context[TEMBA_MENU_SELECTION])
-
-        # sync logs and message templates not accessible by user from other org
-        self.login(self.admin2)
-        response = self.client.get(templates_url)
-        self.assertEqual(404, response.status_code)
-        response = self.client.get(sync_url)
-        self.assertEqual(404, response.status_code)
 
     def test_check_health(self):
         channel = self.create_channel(

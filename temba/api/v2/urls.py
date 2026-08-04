@@ -4,7 +4,6 @@ from django.urls import re_path
 
 from .views import (
     ArchivesEndpoint,
-    AuthenticateView,
     BoundariesEndpoint,
     BroadcastsEndpoint,
     CampaignEventsEndpoint,
@@ -31,7 +30,6 @@ from .views import (
     ResthookSubscribersEndpoint,
     RootView,
     RunsEndpoint,
-    TemplatesEndpoint,
     TicketActionsEndpoint,
     TicketsEndpoint,
     TopicsEndpoint,
@@ -42,7 +40,6 @@ from .views import (
 urlpatterns = [
     re_path(r"^$", RootView.as_view(), name="api.v2.root"),
     re_path(r"^explorer/$", ExplorerView.as_view(), name="api.v2.explorer"),
-    re_path(r"^authenticate$", AuthenticateView.as_view(), name="api.v2.authenticate"),
     # ========== endpoints A-Z ===========
     re_path(r"^archives$", ArchivesEndpoint.as_view(), name="api.v2.archives"),
     re_path(r"^boundaries$", BoundariesEndpoint.as_view(), name="api.v2.boundaries"),
@@ -70,7 +67,6 @@ urlpatterns = [
     re_path(r"^resthook_events$", ResthookEventsEndpoint.as_view(), name="api.v2.resthook_events"),
     re_path(r"^resthook_subscribers$", ResthookSubscribersEndpoint.as_view(), name="api.v2.resthook_subscribers"),
     re_path(r"^runs$", RunsEndpoint.as_view(), name="api.v2.runs"),
-    re_path(r"^templates$", TemplatesEndpoint.as_view(), name="api.v2.templates"),
     re_path(r"^tickets$", TicketsEndpoint.as_view(), name="api.v2.tickets"),
     re_path(r"^ticket_actions$", TicketActionsEndpoint.as_view(), name="api.v2.ticket_actions"),
     re_path(r"^topics$", TopicsEndpoint.as_view(), name="api.v2.topics"),

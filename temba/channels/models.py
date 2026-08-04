@@ -121,9 +121,12 @@ class ChannelType(metaclass=ABCMeta):
     # during activation. Channels should make sure their claim view is non-atomic if a callback will be involved
     async_activation = True
 
+    # used for anonymizing logs
     redact_request_keys = ()
     redact_response_keys = ()
-    redact_values = ()
+
+    # for channels that support templates this is the type slug and the channel type must define fetch_templates
+    template_type: str = None
 
     def is_available_to(self, org, user):
         """
@@ -145,6 +148,10 @@ class ChannelType(metaclass=ABCMeta):
             return org.timezone and str(org.timezone) in self.recommended_timezones
         else:
             return False
+
+    @property
+    def icon(self):
+        return f"channel_{self.code.lower()}"
 
     def get_claim_blurb(self):
         """
@@ -207,13 +214,16 @@ class ChannelType(metaclass=ABCMeta):
         """
         return {"channel": channel}
 
+    def get_redact_values(self, channel) -> tuple:
+        """
+        Gets the values to redact from logs
+        """
+        return ()
+
     def get_error_ref_url(self, channel, code: str) -> str:
         """
         Resolves an error code from a channel log into a docs URL for that error.
         """
-
-    def get_icon(self):
-        return f"channel_{self.code.lower()}"
 
     def __str__(self):
         return self.name
@@ -311,8 +321,7 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
 
     org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="channels", null=True)
     channel_type = models.CharField(max_length=3)
-    name = models.CharField(max_length=64, null=True)
-
+    name = models.CharField(max_length=64)
     address = models.CharField(
         verbose_name=_("Address"),
         max_length=255,
@@ -375,7 +384,7 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
             org=org,
             country=country,
             channel_type=channel_type.code,
-            name=name,
+            name=name or address,
             address=address,
             config=config,
             role=role,
@@ -429,6 +438,12 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
     def type(self) -> ChannelType:
         return self.get_type_from_code(self.channel_type)
 
+    @property
+    def template_type(self):
+        from temba.templates.types import TYPES
+
+        return TYPES.get(self.type.template_type)
+
     @classmethod
     def add_authenticated_external_channel(
         cls,
@@ -477,7 +492,7 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
             user,
             country,
             channel_type,
-            name=name or address,
+            name=name or address[:64],
             address=address,
             config=config,
             role=role,
@@ -495,6 +510,7 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
             code = generate_secret(length)
         return code
 
+    @property
     def is_android(self) -> bool:
         """
         Is this an Android channel
@@ -517,23 +533,6 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
 
     def supports_ivr(self):
         return Channel.ROLE_CALL in self.role or Channel.ROLE_ANSWER in self.role
-
-    def get_name(self):  # pragma: no cover
-        if self.name:
-            return self.name
-        elif self.device:
-            return self.device
-        else:
-            return _("Android Phone")
-
-    def get_channel_type_display(self):
-        return self.type.name
-
-    def get_channel_type_name(self):
-        if self.is_android():
-            return _("Android Phone")
-        else:
-            return _("%s Channel" % self.get_channel_type_display())
 
     def get_address_display(self, e164=False):
         from temba.contacts.models import URN
@@ -638,23 +637,27 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
         # delay mailroom task for 5 seconds, so mailroom assets cache expires
         interrupt_channel_task.apply_async((self.id,), countdown=5)
 
-        # save the FCM id before clearing
-        registration_id = self.config.get(Channel.CONFIG_FCM_ID)
-
         # make the channel inactive
-        self.config.pop(Channel.CONFIG_FCM_ID, None)
         self.modified_by = user
         self.is_active = False
-        self.save(update_fields=("is_active", "config", "modified_by", "modified_on"))
+        self.save(update_fields=("is_active", "modified_by", "modified_on"))
 
         # trigger the orphaned channel
-        if trigger_sync and self.is_android() and registration_id:
-            self.trigger_sync(registration_id)
+        if trigger_sync and self.is_android:
+            self.trigger_sync()
 
         # any triggers associated with our channel get archived and released
-        for trigger in self.triggers.all():
+        for trigger in self.triggers.filter(is_active=True):
             trigger.archive(user)
             trigger.release(user)
+
+        # any open incidents are ended
+        for incident in self.incidents.filter(ended_on=None):
+            incident.end()
+
+        # delete template translations for this channel
+        for trans in self.template_translations.all():
+            trans.delete()
 
     def delete(self):
         for trigger in self.triggers.all():
@@ -669,24 +672,20 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
 
         super().delete()
 
-    def trigger_sync(self, registration_id=None):  # pragma: no cover
+    def trigger_sync(self):  # pragma: no cover
         """
         Sends a FCM command to trigger a sync on the client
         """
 
-        assert self.is_android(), "can only trigger syncs on Android channels"
+        assert self.is_android, "can only trigger syncs on Android channels"
+
+        from .tasks import sync_channel_fcm_task
 
         # androids sync via FCM
         fcm_id = self.config.get(Channel.CONFIG_FCM_ID)
 
-        if fcm_id is not None:
-            if getattr(settings, "FCM_API_KEY", None):
-                from .tasks import sync_channel_fcm_task
-
-                if not registration_id:
-                    registration_id = fcm_id
-                if registration_id:
-                    on_transaction_commit(lambda: sync_channel_fcm_task.delay(registration_id, channel_id=self.pk))
+        if fcm_id and settings.ANDROID_FCM_PROJECT_ID and settings.ANDROID_FCM_SERVICE_ACCOUNT_FILE:
+            on_transaction_commit(lambda: sync_channel_fcm_task.delay(fcm_id, channel_id=self.id))
 
     @classmethod
     def replace_variables(cls, text, variables, content_type=CONTENT_TYPE_URLENCODED):
@@ -726,16 +725,6 @@ class Channel(LegacyUUIDMixin, TembaModel, DependencyMixin):
 
     def get_log_count(self):
         return self.get_count([ChannelCount.SUCCESS_LOG_TYPE, ChannelCount.ERROR_LOG_TYPE])
-
-    def __str__(self):  # pragma: no cover
-        if self.name:
-            return self.name
-        elif self.device:
-            return self.device
-        elif self.address:
-            return self.address
-        else:
-            return str(self.id)
 
     class Meta:
         ordering = ("-last_seen", "-pk")
@@ -826,7 +815,6 @@ class ChannelEvent(models.Model):
     An event other than a message that occurs between a channel and a contact. Can be used to trigger flows etc.
     """
 
-    TYPE_UNKNOWN = "unknown"
     TYPE_CALL_OUT = "mt_call"
     TYPE_CALL_OUT_MISSED = "mt_miss"
     TYPE_CALL_IN = "mo_call"
@@ -840,7 +828,6 @@ class ChannelEvent(models.Model):
 
     # single char flag, human readable name, API readable name
     TYPE_CONFIG = (
-        (TYPE_UNKNOWN, _("Unknown Call Type"), "unknown"),
         (TYPE_CALL_OUT, _("Outgoing Call"), "call-out"),
         (TYPE_CALL_OUT_MISSED, _("Missed Outgoing Call"), "call-out-missed"),
         (TYPE_CALL_IN, _("Incoming Call"), "call-in"),
@@ -855,11 +842,17 @@ class ChannelEvent(models.Model):
 
     TYPE_CHOICES = [(t[0], t[1]) for t in TYPE_CONFIG]
 
+    ALL_TYPES = {t[0] for t in TYPE_CONFIG}
     CALL_TYPES = {TYPE_CALL_OUT, TYPE_CALL_OUT_MISSED, TYPE_CALL_IN, TYPE_CALL_IN_MISSED}
+
+    STATUS_PENDING = "P"
+    STATUS_HANDLED = "H"
+    STATUS_CHOICES = ((STATUS_PENDING, "Pending"), (STATUS_HANDLED, "Handled"))
 
     org = models.ForeignKey(Org, on_delete=models.PROTECT)
     channel = models.ForeignKey(Channel, on_delete=models.PROTECT)
     event_type = models.CharField(max_length=16, choices=TYPE_CHOICES)
+    status = models.CharField(max_length=1, choices=STATUS_CHOICES, null=True)
     contact = models.ForeignKey("contacts.Contact", on_delete=models.PROTECT, related_name="channel_events")
     contact_urn = models.ForeignKey(
         "contacts.ContactURN", on_delete=models.PROTECT, null=True, related_name="channel_events"
@@ -871,8 +864,9 @@ class ChannelEvent(models.Model):
 
     log_uuids = ArrayField(models.UUIDField(), null=True)
 
-    def release(self):
-        self.delete()
+    @classmethod
+    def is_valid_type(cls, event_type: str) -> bool:
+        return event_type in cls.ALL_TYPES
 
 
 class ChannelLog(models.Model):
@@ -941,7 +935,7 @@ class ChannelLog(models.Model):
 
         # out of an abundance of caution, check that we're not returning one of our own credential values
         for log in data["http_logs"]:
-            for secret in channel.type.redact_values:
+            for secret in channel.type.get_redact_values(channel):
                 assert secret not in log["url"] and secret not in log["request"] and secret not in log["response"]
 
         return data

@@ -4,19 +4,21 @@ import hmac
 import time
 from datetime import datetime, timedelta, timezone as tzone
 
+from django.db import transaction
 from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
 from django.utils.translation import gettext_lazy as _
 from django.views.decorators.csrf import csrf_exempt
 
-from temba.contacts.models import URN
+from temba import mailroom
+from temba.channels.models import ChannelEvent
 from temba.msgs.models import Msg
 from temba.utils import analytics, json
 
 from ..models import Channel, SyncEvent
 from .claim import UnsupportedAndroidChannelError, get_or_create_channel
-from .sync import create_event, create_incoming, get_channel_commands, update_message
+from .sync import get_channel_commands, update_message
 
 
 @csrf_exempt
@@ -43,6 +45,7 @@ def register(request):
 
 
 @csrf_exempt
+@transaction.non_atomic_requests
 def sync(request, channel_id):
     start = time.time()
 
@@ -131,39 +134,42 @@ def sync(request, channel_id):
 
             # creating a new message
             elif keyword == "mo_sms":
+                text = cmd.get("msg")
                 date = datetime.fromtimestamp(int(cmd["ts"]) // 1000).replace(tzinfo=tzone.utc)
+                phone = cmd["phone"]
 
-                # it is possible to receive spam SMS messages from no number on some carriers
-                tel = cmd["phone"] if cmd["phone"] else "empty"
-                try:
-                    urn = URN.normalize(URN.from_tel(tel), channel.country.code)
-
-                    if "msg" in cmd:
-                        msg = create_incoming(channel.org, channel, urn, cmd["msg"], date)
-                        extra = dict(msg_id=msg.id)
-                except ValueError:
-                    pass
+                if phone and text:
+                    try:
+                        msg_id = mailroom.get_client().android_message(
+                            channel.org, channel, phone, text, received_on=date
+                        )
+                        extra = dict(msg_id=msg_id)
+                    except mailroom.URNValidationException:
+                        pass
 
                 handled = True
 
             # phone event
             elif keyword == "call":
-                call_tuple = (cmd["ts"], cmd["type"], cmd["phone"])
+                phone = cmd["phone"]
+                call_tuple = (cmd["ts"], cmd["type"], phone)
                 date = datetime.fromtimestamp(int(cmd["ts"]) // 1000).replace(tzinfo=tzone.utc)
-
-                duration = 0
-                if cmd["type"] != "miss":
-                    duration = cmd["dur"]
+                duration = cmd.get("dur", 0)
 
                 # Android sometimes will pass us a call from an 'unknown number', which is null
                 # ignore these events on our side as they have no purpose and break a lot of our
                 # assumptions
-                if cmd["phone"] and call_tuple not in unique_calls:
-                    urn = URN.from_tel(cmd["phone"])
+                if phone and call_tuple not in unique_calls and ChannelEvent.is_valid_type(cmd["type"]):
                     try:
-                        create_event(channel, urn, cmd["type"], date, extra={"duration": duration})
-                    except ValueError:
-                        # in some cases Android passes us invalid URNs, in those cases just ignore them
+                        mailroom.get_client().android_event(
+                            channel.org,
+                            channel,
+                            phone,
+                            cmd["type"],
+                            extra={"duration": duration},
+                            occurred_on=date,
+                        )
+                    except mailroom.URNValidationException:  # pragma: no cover
                         pass
 
                     unique_calls.add(call_tuple)
