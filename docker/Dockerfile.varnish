@@ -1,11 +1,11 @@
 FROM varnish:6.0
 
-ARG BACKEND_ADDRESS
+ARG BACKEND_HOST=127.0.0.1
+ARG BACKEND_PORT=8001
 
 COPY varnish.vcl /etc/varnish/default.vcl
 
-RUN chmod -R 755 /etc/varnish/
-
-RUN sed -i "s/BACKEND_ADDRESS/${BACKEND_ADDRESS}/g" /etc/varnish/default.vcl
+RUN chmod -R 755 /etc/varnish/ \
+  && sed -i "s/127.0.0.1/${BACKEND_HOST}/g; s/8001/${BACKEND_PORT}/g" /etc/varnish/default.vcl
 
 ENTRYPOINT ["/usr/sbin/varnishd", "-F", "-f", "/etc/varnish/default.vcl", "-p", "pipe_timeout=1200", "-p", "thread_pool_timeout=1200"]

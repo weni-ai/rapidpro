@@ -61,7 +61,7 @@ jobs:
           password: ${{ secrets.AWS_SECRET_ACCESS_KEY_SHARED }}
 
       - name: Build and push - Rapidpro in Shared Image
-        uses: docker/build-push-action@v3
+        uses: docker/build-push-action@v5
         with:
           context: .
           labels: |
@@ -71,10 +71,11 @@ jobs:
           file: docker/Dockerfile
           push: true
           tags: "${{env.IMAGE_TAG}}"
-          no-cache: true
+          cache-from: type=gha,scope=rapidpro
+          cache-to: type=gha,mode=max,scope=rapidpro
 
       - name: Build and push - Rapidpro Varnish Image in Shared
-        uses: docker/build-push-action@v3
+        uses: docker/build-push-action@v5
         with:
           context: ./docker
           labels: |
@@ -84,9 +85,11 @@ jobs:
           file: docker/Dockerfile.varnish
           push: true
           tags: "${{env.IMAGE_TAG}}-varnish"
-          no-cache: true
+          cache-from: type=gha,scope=rapidpro-varnish
+          cache-to: type=gha,mode=max,scope=rapidpro-varnish
           build-args: |
-            BACKEND_ADDRESS=rapidpro:8000
+            BACKEND_HOST=127.0.0.1
+            BACKEND_PORT=8001
       - name: Check out Kubernetes Manifests
         uses: actions/checkout@master
         with:
