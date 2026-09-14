@@ -22,7 +22,7 @@ class TopicRef:
 
 @dataclass(frozen=True)
 class UserRef:
-    email: str
+    uuid: str
     name: str
 
 

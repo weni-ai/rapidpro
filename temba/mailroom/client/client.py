@@ -6,11 +6,17 @@ import requests
 from django.conf import settings
 
 from temba.contacts.models import Contact
-from temba.msgs.models import Broadcast
+from temba.msgs.models import Broadcast, QuickReply
 from temba.utils import json
 
 from ..modifiers import Modifier
-from .exceptions import FlowValidationException, QueryValidationException, RequestException, URNValidationException
+from .exceptions import (
+    AIServiceException,
+    FlowValidationException,
+    QueryValidationException,
+    RequestException,
+    URNValidationException,
+)
 from .types import (
     ContactSpec,
     Exclusions,
@@ -69,6 +75,9 @@ class MailroomClient:
 
     def android_sync(self, channel):
         return self._request("android/sync", {"channel_id": channel.id})
+
+    def campaign_schedule(self, org, event):
+        self._request("campaign/schedule", {"org_id": org.id, "point_id": event.id})
 
     def contact_create(self, org, user, contact: ContactSpec) -> Contact:
         resp = self._request("contact/create", {"org_id": org.id, "user_id": user.id, "contact": asdict(contact)})
@@ -146,8 +155,8 @@ class MailroomClient:
     def flow_clone(self, definition: dict, dependency_mapping):
         return self._request("flow/clone", {"flow": definition, "dependency_mapping": dependency_mapping})
 
-    def flow_inspect(self, org, definition: dict):
-        payload = {"flow": definition}
+    def flow_inspect(self, org, definition: dict, is_import=False):
+        payload = {"flow": definition, "is_import": is_import}
 
         # can't do dependency checking during tests because mailroom can't see unit test data created in a transaction
         if not settings.TESTING:
@@ -178,6 +187,18 @@ class MailroomClient:
         )
 
         return RecipientsPreview(query=resp["query"], total=resp["total"])
+
+    def llm_translate(self, llm, from_language: str, to_language: str, text: str) -> dict:
+        return self._request(
+            "llm/translate",
+            {
+                "org_id": llm.org_id,
+                "llm_id": llm.id,
+                "from_language": from_language,
+                "to_language": to_language,
+                "text": text,
+            },
+        )
 
     def msg_broadcast(
         self,
@@ -236,7 +257,7 @@ class MailroomClient:
     def msg_resend(self, org, msgs):
         return self._request("msg/resend", {"org_id": org.id, "msg_ids": [m.id for m in msgs]})
 
-    def msg_send(self, org, user, contact, text: str, attachments: list[str], ticket):
+    def msg_send(self, org, user, contact, text: str, attachments: list[str], quick_replies: list[QuickReply], ticket):
         return self._request(
             "msg/send",
             {
@@ -245,6 +266,7 @@ class MailroomClient:
                 "contact_id": contact.id,
                 "text": text,
                 "attachments": attachments,
+                "quick_replies": [qr.as_json() for qr in quick_replies],
                 "ticket_id": ticket.id if ticket else None,
             },
         )
@@ -312,15 +334,10 @@ class MailroomClient:
             },
         )
 
-    def ticket_close(self, org, user, tickets, force: bool):
+    def ticket_close(self, org, user, tickets):
         return self._request(
             "ticket/close",
-            {
-                "org_id": org.id,
-                "user_id": user.id,
-                "ticket_ids": [t.id for t in tickets],
-                "force": force,
-            },
+            {"org_id": org.id, "user_id": user.id, "ticket_ids": [t.id for t in tickets]},
         )
 
     def ticket_reopen(self, org, user, tickets):
@@ -373,6 +390,8 @@ class MailroomClient:
                 raise QueryValidationException(error, code, extra)
             elif domain == "urn":
                 raise URNValidationException(error, code, extra["index"])
+            elif domain == "ai":
+                raise AIServiceException(error, code, extra["instructions"], extra["input"])
 
         elif 400 <= response.status_code < 600:
             raise RequestException(endpoint, payload, response)

@@ -23,8 +23,8 @@ class ContactsEndpointTest(APITest):
         endpoint_url = reverse("api.v2.contacts") + ".json"
 
         self.assertGetNotPermitted(endpoint_url, [None])
-        self.assertPostNotPermitted(endpoint_url, [None, self.user])
-        self.assertDeleteNotPermitted(endpoint_url, [None, self.user, self.agent])
+        self.assertPostNotPermitted(endpoint_url, [None])
+        self.assertDeleteNotPermitted(endpoint_url, [None, self.agent])
 
         # create some more contacts (in addition to Joe and Frank)
         contact1 = self.create_contact(
@@ -36,9 +36,9 @@ class ContactsEndpointTest(APITest):
             "Don", phone="0788000004", language="fra", fields={"nickname": "Donnie", "gender": "male"}
         )
 
-        contact1.stop(self.user)
-        contact2.block(self.user)
-        contact3.release(self.user)
+        contact1.stop(self.editor)
+        contact2.block(self.editor)
+        contact3.release(self.editor)
 
         # put some contacts in a group
         group = self.create_group("Customers", contacts=[self.joe, contact4])
@@ -64,7 +64,7 @@ class ContactsEndpointTest(APITest):
         # no filtering
         response = self.assertGet(
             endpoint_url,
-            [self.user, self.editor, self.admin, self.agent],
+            [self.editor, self.admin, self.agent],
             results=[contact4, self.joe, contact2, contact1, self.frank],
             num_queries=self.BASE_SESSION_QUERIES + 7,
         )
@@ -100,7 +100,7 @@ class ContactsEndpointTest(APITest):
         # with expanded URNs
         response = self.assertGet(
             endpoint_url + "?expand_urns=true",
-            [self.user],
+            [self.editor],
             results=[contact4, self.joe, contact2, contact1, self.frank],
         )
         self.assertEqual(
@@ -133,14 +133,14 @@ class ContactsEndpointTest(APITest):
         # reversed
         response = self.assertGet(
             endpoint_url + "?reverse=true",
-            [self.user],
+            [self.editor],
             results=[self.frank, contact1, contact2, self.joe, contact4],
         )
 
         with self.anonymous(self.org):
             response = self.assertGet(
                 endpoint_url,
-                [self.user, self.editor, self.admin, self.agent],
+                [self.editor, self.admin, self.agent],
                 results=[contact4, self.joe, contact2, contact1, self.frank],
                 num_queries=self.BASE_SESSION_QUERIES + 7,
             )
@@ -168,7 +168,7 @@ class ContactsEndpointTest(APITest):
             # with expanded URNs
             response = self.assertGet(
                 endpoint_url + "?expand_urns=true",
-                [self.user],
+                [self.editor],
                 results=[contact4, self.joe, contact2, contact1, self.frank],
             )
             self.assertEqual(
@@ -497,7 +497,7 @@ class ContactsEndpointTest(APITest):
         self.assertEqual(jean.urns.count(), 100)
 
         # try to move a blocked contact into a group
-        jean.block(self.user)
+        jean.block(self.editor)
         self.assertPost(
             endpoint_url + f"?uuid={jean.uuid}",
             self.editor,

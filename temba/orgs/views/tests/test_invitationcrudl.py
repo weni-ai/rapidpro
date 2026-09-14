@@ -17,7 +17,7 @@ class InvitationCRUDLTest(TembaTest, CRUDLTestMixin):
         self.org.features = [Org.FEATURE_USERS]
         self.org.save(update_fields=("features",))
 
-        self.assertRequestDisallowed(list_url, [None, self.user, self.editor, self.agent])
+        self.assertRequestDisallowed(list_url, [None, self.editor, self.agent])
 
         inv1 = Invitation.create(self.org, self.admin, "bob@textit.com", OrgRole.EDITOR)
         inv2 = Invitation.create(
@@ -43,7 +43,7 @@ class InvitationCRUDLTest(TembaTest, CRUDLTestMixin):
         self.org.features = [Org.FEATURE_CHILD_ORGS, Org.FEATURE_USERS]
         self.org.save(update_fields=("features",))
 
-        self.assertRequestDisallowed(create_url, [None, self.user, self.agent, self.editor])
+        self.assertRequestDisallowed(create_url, [None, self.agent, self.editor])
         self.assertCreateFetch(create_url, [self.admin], form_fields={"email": None, "role": "E"})
 
         # try submitting without email
@@ -126,7 +126,7 @@ class InvitationCRUDLTest(TembaTest, CRUDLTestMixin):
         self.org.features = [Org.FEATURE_USERS]
         self.org.save(update_fields=("features",))
 
-        self.assertRequestDisallowed(delete_url, [None, self.user, self.editor, self.agent])
+        self.assertRequestDisallowed(delete_url, [None, self.editor, self.agent])
 
         response = self.assertDeleteFetch(delete_url, [self.admin], as_modal=True)
         self.assertContains(

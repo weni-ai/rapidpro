@@ -3,10 +3,11 @@ from datetime import timedelta
 from django.core import mail
 from django.utils import timezone
 
-from temba.orgs.models import Invitation, OrgRole, User
+from temba.orgs.models import Invitation, OrgRole
 from temba.orgs.tasks import expire_invitations
 from temba.tests import TembaTest
 from temba.tickets.models import Team
+from temba.users.models import User
 
 
 class InvitationTest(TembaTest):
@@ -19,7 +20,7 @@ class InvitationTest(TembaTest):
 
         self.assertEqual(1, len(mail.outbox))
         self.assertEqual(["invitededitor@textit.com"], mail.outbox[0].recipients())
-        self.assertEqual("RapidPro Invitation", mail.outbox[0].subject)
+        self.assertEqual("[Nyaruka] Invitation to join workspace", mail.outbox[0].subject)
         self.assertIn(f"https://app.rapidpro.io/org/join/{invitation.secret}/", mail.outbox[0].body)
 
         new_editor = User.create("invitededitor@textit.com", "Bob", "", "Qwerty123", "en-US")

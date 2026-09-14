@@ -5,6 +5,7 @@ from django.conf import settings
 from temba.api.v2 import fields
 from temba.campaigns.models import Campaign, CampaignEvent
 from temba.contacts.models import Contact, ContactField, ContactURN
+from temba.msgs.models import QuickReply
 
 from . import APITest
 
@@ -138,6 +139,43 @@ class FieldsTest(APITest):
                     },
                 },
             )
+
+    def test_quick_replies(self):
+        field = fields.TranslatedQuickRepliesField(source="test")
+        field._context = {"org": self.org}
+
+        self.assertEqual(
+            field.run_validation({"eng": [{"text": "Red"}, {"text": "Green"}, {"text": "Blue"}]}),
+            {"eng": [QuickReply("Red", None), QuickReply("Green", None), QuickReply("Blue", None)]},
+        )
+        self.assertEqual(
+            field.run_validation([{"text": "Red"}, {"text": "Green"}, {"text": "Blue"}]),
+            {"eng": [QuickReply("Red", None), QuickReply("Green", None), QuickReply("Blue", None)]},
+        )
+        self.assertEqual(
+            field.run_validation(
+                {
+                    "eng": [{"text": "Red"}, {"text": "Green"}, {"text": "Blue"}],
+                    "fra": [{"text": "Rouge"}, {"text": "Vert"}, {"text": "Bleu"}],
+                }
+            ),
+            {
+                "eng": [QuickReply("Red", None), QuickReply("Green", None), QuickReply("Blue", None)],
+                "fra": [QuickReply("Rouge", None), QuickReply("Vert", None), QuickReply("Bleu", None)],
+            },
+        )
+        self.assertRaises(serializers.ValidationError, field.run_validation, {"eng": ""})  # empty
+        self.assertRaises(serializers.ValidationError, field.run_validation, "")  # empty
+        self.assertRaises(serializers.ValidationError, field.run_validation, "  ")  # blank
+        self.assertRaises(serializers.ValidationError, field.run_validation, 123)  # not a string or dict
+        self.assertRaises(serializers.ValidationError, field.run_validation, {})  # no translations
+        self.assertRaises(serializers.ValidationError, field.run_validation, {"eng": {"foo": "bar"}})  # not an array
+        self.assertRaises(serializers.ValidationError, field.run_validation, {123: "Hello"})  # lang not a str
+        self.assertRaises(serializers.ValidationError, field.run_validation, {"base": [{"text": "Red"}]})  # not a lang
+        self.assertRaises(serializers.ValidationError, field.run_validation, {"eng": [{"text": "1"}] * 11})  # too many
+        self.assertRaises(serializers.ValidationError, field.run_validation, {"eng": [{"text": "a" * 65}]})  # too long
+        self.assertRaises(serializers.ValidationError, field.run_validation, {"eng": [{"foo": "??"}]})
+        self.assertRaises(serializers.ValidationError, field.run_validation, {"eng": [{"text": {}}]})  # invalid qr
 
     def test_language_and_translations(self):
         self.assert_field(
@@ -296,20 +334,19 @@ class FieldsTest(APITest):
         self.assert_field(
             fields.UserField(source="test"),
             submissions={
-                "VIEWER@TEXTIT.COM": self.user,
+                "AGENT@TEXTIT.COM": self.agent,
                 "admin@textit.com": self.admin,
                 self.editor.email: serializers.ValidationError,  # deleted
                 self.admin2.email: serializers.ValidationError,  # not in org
             },
             representations={
-                self.user: {"email": "viewer@textit.com", "name": ""},
+                self.agent: {"email": "agent@textit.com", "name": "Agnes"},
                 self.editor: {"email": "editor@textit.com", "name": "Ed McEdits"},
             },
         )
         self.assert_field(
-            fields.UserField(source="test", assignable_only=True),
+            fields.UserField(source="test"),
             submissions={
-                self.user.email: serializers.ValidationError,  # not assignable
                 self.admin.email: self.admin,
                 self.agent.email: self.agent,
             },

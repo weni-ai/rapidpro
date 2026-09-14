@@ -1,4 +1,3 @@
-import time
 from datetime import datetime, timedelta
 
 from smartmin.views import SmartTemplateView
@@ -8,31 +7,10 @@ from django.http import JsonResponse
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from temba.channels.models import Channel, ChannelCount
+from temba.channels.models import ChannelCount
 from temba.orgs.models import Org
 from temba.orgs.views.mixins import OrgPermsMixin
-from temba.utils.views.mixins import SpaMixin
-
-flattened_colors = [
-    "#335c81",
-    "#65afff",
-    "#1b2845",
-    "#50ffb1",
-    "#3c896d",
-    "#546d64",
-    "#ddb892",
-    "#7f5539",
-    "#9c6644",
-    "#b5c99a",
-    "#87986a",
-    "#718355",
-    "#ff5858",
-    "#ff9090",
-    "#ffb5b5",
-    "#cc9c00",
-    "#ffcb1f",
-    "#ffe285",
-]
+from temba.utils.views.mixins import ChartViewMixin, SpaMixin
 
 
 class Home(SpaMixin, OrgPermsMixin, SmartTemplateView):
@@ -46,89 +24,74 @@ class Home(SpaMixin, OrgPermsMixin, SmartTemplateView):
     menu_path = "/settings/dashboard"
 
 
-class MessageHistory(OrgPermsMixin, SmartTemplateView):
+class MessageHistory(OrgPermsMixin, ChartViewMixin, SmartTemplateView):
     """
-    Endpoint to expose message history since the dawn of time by day as JSON blob
+    Endpoint to expose message history by day as JSON for temba-chart
     """
 
     permission = "orgs.org_dashboard"
+    default_chart_period = (-timedelta(days=30), timedelta(days=1))
 
-    def render_to_response(self, context, **response_kwargs):
+    def get_chart_data(self, since, until) -> tuple[list, list]:
         orgs = []
         org = self.derive_org()
         if org:
             orgs = Org.objects.filter(Q(id=org.id) | Q(parent=org))
 
         # get all our counts for that period
-        daily_counts = ChannelCount.objects.filter(
-            count_type__in=[
-                ChannelCount.INCOMING_MSG_TYPE,
-                ChannelCount.OUTGOING_MSG_TYPE,
-            ]
-        )
-
-        daily_counts = daily_counts.filter(day__gt="2013-02-01").filter(day__lte=timezone.now())
+        daily_counts = ChannelCount.objects.filter(scope__in=[ChannelCount.SCOPE_TEXT_IN, ChannelCount.SCOPE_TEXT_OUT])
+        daily_counts = daily_counts.filter(day__gte=since).filter(day__lte=until)
 
         if orgs or not self.request.user.is_support:
             daily_counts = daily_counts.filter(channel__org__in=orgs)
 
         daily_counts = list(
-            daily_counts.values("day", "count_type").order_by("day", "count_type").annotate(count_sum=Sum("count"))
+            daily_counts.values("day", "scope").order_by("day", "scope").annotate(count_sum=Sum("count"))
         )
 
-        msgs_in = []
-        msgs_out = []
-        epoch = datetime(1970, 1, 1)
+        # collect all dates and values by scope
+        dates_set = set()
+        values_by_scope = {
+            ChannelCount.SCOPE_TEXT_IN: {},
+            ChannelCount.SCOPE_TEXT_OUT: {},
+        }
 
-        def get_timestamp(count_dict):
-            """
-            Gets a unix time that is highcharts friendly for a given day
-            """
-            count_date = datetime.fromtimestamp(time.mktime(count_dict["day"].timetuple()))
-            return int((count_date - epoch).total_seconds() * 1000)
-
-        def record_count(counts, day, count):
-            """
-            Records a count in counts list which is an ordered list of day, count tuples
-            """
-            is_new = True
-
-            # if we have seen this one before, increment it
-            if len(counts):
-                last = counts[-1]
-                if last and last[0] == day:
-                    last[1] += count["count_sum"]
-                    is_new = False
-
-            # otherwise add it as a new count
-            if is_new:
-                counts.append([day, count["count_sum"]])
-
-        msgs_total = []
         for count in daily_counts:
-            direction = count["count_type"][0]
-            day = get_timestamp(count)
+            dates_set.add(count["day"])
+            values_by_scope[count["scope"]][count["day"]] = count["count_sum"]  # create sorted list of dates
+        labels = sorted(list(dates_set))
 
-            if direction == "I":
-                record_count(msgs_in, day, count)
-            elif direction == "O":
-                record_count(msgs_out, day, count)
-
-            # we create one extra series that is the combination of both in and out
-            # so we can use that inside our navigator
-            record_count(msgs_total, day, count)
-
-        return JsonResponse(
-            [
-                dict(name="Incoming", type="column", data=msgs_in, showInNavigator=False),
-                dict(name="Outgoing", type="column", data=msgs_out, showInNavigator=False),
-            ],
-            safe=False,
-        )
+        return [d.strftime("%Y-%m-%d") for d in labels], [
+            {
+                "label": "Incoming",
+                "data": [values_by_scope[ChannelCount.SCOPE_TEXT_IN].get(d, 0) for d in labels],
+            },
+            {
+                "label": "Outgoing",
+                "data": [values_by_scope[ChannelCount.SCOPE_TEXT_OUT].get(d, 0) for d in labels],
+            },
+        ]
 
 
 class WorkspaceStats(OrgPermsMixin, SmartTemplateView):
     permission = "orgs.org_dashboard"
+
+    def get_period(self):
+        """Get the date range from request parameters or use defaults"""
+        since = self.request.GET.get("since")
+        until = self.request.GET.get("until")
+
+        if since:
+            since = datetime.fromisoformat(since.replace("Z", "+00:00")).date()
+        else:
+            since = timezone.now().date() - timedelta(days=30)
+
+        if until:
+            until = datetime.fromisoformat(until.replace("Z", "+00:00")).date()
+        else:
+            until = timezone.now().date()
+
+        return since, until
 
     def render_to_response(self, context, **response_kwargs):
         orgs = []
@@ -136,22 +99,17 @@ class WorkspaceStats(OrgPermsMixin, SmartTemplateView):
         if org:
             orgs = Org.objects.filter(Q(id=org.id) | Q(parent=org))
 
-        min_date = self.request.GET.get("min", datetime(2013, 1, 1).timestamp())
-        max_date = self.request.GET.get("max", datetime.now().timestamp())
-
-        if min_date and max_date:
-            min_date = datetime.utcfromtimestamp(float(min_date)).strftime("%Y-%m-%d")
-            max_date = datetime.utcfromtimestamp(float(max_date)).strftime("%Y-%m-%d")
+        since, until = self.get_period()
 
         # get all our counts for that period
         daily_counts = ChannelCount.objects.filter(
-            count_type__in=[
-                ChannelCount.INCOMING_MSG_TYPE,
-                ChannelCount.OUTGOING_MSG_TYPE,
+            scope__in=[
+                ChannelCount.SCOPE_TEXT_IN,
+                ChannelCount.SCOPE_TEXT_OUT,
             ]
         )
 
-        daily_counts = daily_counts.filter(day__gte=min_date).filter(day__lte=max_date)
+        daily_counts = daily_counts.filter(day__gte=since).filter(day__lte=until)
 
         if orgs or not self.request.user.is_support:
             daily_counts = daily_counts.filter(channel__org__in=orgs)
@@ -163,8 +121,8 @@ class WorkspaceStats(OrgPermsMixin, SmartTemplateView):
         for org in orgs:
             org_daily_counts = list(
                 daily_counts.filter(channel__org_id=org.id)
-                .values("count_type")
-                .order_by("count_type")
+                .values("scope")
+                .order_by("scope")
                 .annotate(count_sum=Sum("count"))
             )
 
@@ -175,9 +133,9 @@ class WorkspaceStats(OrgPermsMixin, SmartTemplateView):
             inbound_count, outbound_count = 0, 0
 
             for count in org_daily_counts:
-                if count["count_type"] == ChannelCount.INCOMING_MSG_TYPE:
+                if count["scope"] == ChannelCount.SCOPE_TEXT_IN:
                     inbound_count = count["count_sum"]
-                elif count["count_type"] == ChannelCount.OUTGOING_MSG_TYPE:
+                elif count["scope"] == ChannelCount.SCOPE_TEXT_OUT:
                     outbound_count = count["count_sum"]
 
             categories.append(org.name)
@@ -186,90 +144,10 @@ class WorkspaceStats(OrgPermsMixin, SmartTemplateView):
 
         return JsonResponse(
             {
-                "series": [{"name": "Incoming", "data": inbound}, {"name": "Outgoing", "data": outbound}],
-                "categories": categories,
+                "period": [since, until],
+                "data": {
+                    "labels": categories,
+                    "datasets": [{"label": "Incoming", "data": inbound}, {"label": "Outgoing", "data": outbound}],
+                },
             }
         )
-
-
-class RangeDetails(OrgPermsMixin, SmartTemplateView):
-    """
-    Intercooler snippet to show detailed information for a specific range
-    """
-
-    permission = "orgs.org_dashboard"
-    template_name = "dashboard/range_details.html"
-
-    def get_context_data(self, **kwargs):
-        context = super().get_context_data(**kwargs)
-
-        end = timezone.now()
-        begin = end - timedelta(days=30)
-        begin = self.request.GET.get("begin", datetime.strftime(begin, "%Y-%m-%d"))
-        end = self.request.GET.get("end", datetime.strftime(end, "%Y-%m-%d"))
-
-        direction = self.request.GET.get("direction", "IO")
-
-        if begin and end:
-            orgs = []
-            org = self.derive_org()
-            if org:
-                orgs = Org.objects.filter(Q(id=org.id) | Q(parent=org))
-
-            count_types = []
-            if "O" in direction:
-                count_types = [ChannelCount.OUTGOING_MSG_TYPE, ChannelCount.OUTGOING_IVR_TYPE]
-
-            if "I" in direction:
-                count_types += [ChannelCount.INCOMING_MSG_TYPE, ChannelCount.INCOMING_IVR_TYPE]
-
-            # get all our counts for that period
-            daily_counts = (
-                ChannelCount.objects.filter(count_type__in=count_types)
-                .filter(day__gte=begin)
-                .filter(day__lte=end)
-                .exclude(channel__org=None)
-            )
-            if orgs:
-                daily_counts = daily_counts.filter(channel__org__in=orgs)
-
-            context["orgs"] = list(
-                daily_counts.values("channel__org", "channel__org__name")
-                .annotate(count_sum=Sum("count"))
-                .order_by("-count_sum")[:12]
-            )
-
-            channel_types = (
-                ChannelCount.objects.filter(count_type__in=count_types)
-                .filter(day__gte=begin)
-                .filter(day__lte=end)
-                .exclude(channel__org=None)
-            )
-
-            if orgs or not self.request.user.is_support:
-                channel_types = channel_types.filter(channel__org__in=orgs)
-
-            channel_types = list(
-                channel_types.values("channel__channel_type").annotate(count_sum=Sum("count")).order_by("-count_sum")
-            )
-
-            # populate the channel names
-            pie = []
-            for channel_type in channel_types[0:6]:
-                channel_type["channel__name"] = Channel.get_type_from_code(channel_type["channel__channel_type"]).name
-                pie.append(channel_type)
-
-            other_count = 0
-            for channel_type in channel_types[6:]:
-                other_count += channel_type["count_sum"]
-
-            if other_count:
-                pie.append(dict(channel__name="Other", count_sum=other_count))
-
-            context["channel_types"] = pie
-
-            context["begin"] = datetime.strptime(begin, "%Y-%m-%d").date()
-            context["end"] = datetime.strptime(end, "%Y-%m-%d").date()
-            context["direction"] = direction
-
-        return context

@@ -14,7 +14,7 @@ class WorkspaceEndpointTest(APITest):
         # no filtering options.. just gets the current org
         self.assertGet(
             endpoint_url,
-            [self.agent, self.user, self.editor, self.admin],
+            [self.agent, self.editor, self.admin],
             raw={
                 "uuid": str(self.org.uuid),
                 "name": "Nyaruka",

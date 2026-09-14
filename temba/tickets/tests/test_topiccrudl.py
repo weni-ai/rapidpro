@@ -10,7 +10,7 @@ class TopicCRUDLTest(TembaTest, CRUDLTestMixin):
     def test_create(self):
         create_url = reverse("tickets.topic_create")
 
-        self.assertRequestDisallowed(create_url, [None, self.agent, self.user])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
 
         self.assertCreateFetch(create_url, [self.editor, self.admin], form_fields=("name",))
 
@@ -43,7 +43,7 @@ class TopicCRUDLTest(TembaTest, CRUDLTestMixin):
             create_url,
             self.admin,
             {"name": "sales"},
-            form_errors={"name": "Topic with this name already exists."},
+            form_errors={"name": "Must be unique."},
         )
 
         self.assertCreateSubmit(
@@ -54,22 +54,16 @@ class TopicCRUDLTest(TembaTest, CRUDLTestMixin):
             success_status=302,
         )
 
-        # try to create another now that we've reached the limit
-        self.assertCreateSubmit(
-            create_url,
-            self.admin,
-            {"name": "Training"},
-            form_errors={
-                "__all__": "This workspace has reached its limit of 2 topics. You must delete existing ones before you can create new ones."
-            },
-        )
+        # check we get the limit warning when we've reached the limit
+        response = self.requestView(create_url, self.admin)
+        self.assertContains(response, "You have reached the per-workspace limit")
 
     def test_update(self):
         topic = Topic.create(self.org, self.admin, "Hot Topic")
 
         update_url = reverse("tickets.topic_update", args=[topic.id])
 
-        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(update_url, [None, self.agent, self.admin2])
 
         self.assertUpdateFetch(update_url, [self.editor, self.admin], form_fields=["name"])
 
@@ -78,7 +72,7 @@ class TopicCRUDLTest(TembaTest, CRUDLTestMixin):
             update_url,
             self.admin,
             {"name": "general"},
-            form_errors={"name": "Topic with this name already exists."},
+            form_errors={"name": "Must be unique."},
             object_unchanged=topic,
         )
 
@@ -99,7 +93,7 @@ class TopicCRUDLTest(TembaTest, CRUDLTestMixin):
 
         delete_url = reverse("tickets.topic_delete", args=[topic1.id])
 
-        self.assertRequestDisallowed(delete_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(delete_url, [None, self.agent, self.admin2])
 
         # deleting blocked for topic with tickets
         response = self.assertDeleteFetch(delete_url, [self.editor, self.admin])

@@ -36,7 +36,7 @@ class BoundaryCRUDL(SmartCRUDL):
                     messages.warning(request, _("You must select a country for your workspace."))
                     return HttpResponseRedirect(reverse("orgs.org_workspace"))
 
-            return None
+            return super().pre_process(request, *args, **kwargs)
 
         def get_object(self, queryset=None):
             return self.request.org.country
@@ -49,7 +49,7 @@ class BoundaryCRUDL(SmartCRUDL):
             return r"^%s/%s/(?P<osmId>\w+\.?\d+\.?\d?\_?\d?)/$" % (path, action)
 
         def get_object(self):
-            return AdminBoundary.geometries.get(osm_id=self.kwargs["osmId"])
+            return AdminBoundary.objects.get(osm_id=self.kwargs["osmId"])
 
         def render_to_response(self, context):
             if self.object.children.all().count() > 0:
@@ -68,7 +68,7 @@ class BoundaryCRUDL(SmartCRUDL):
             return r"^%s/%s/(?P<osmId>[\w\.]+)/$" % (path, action)
 
         def get_object(self):
-            return AdminBoundary.geometries.get(osm_id=self.kwargs["osmId"])
+            return AdminBoundary.objects.get(osm_id=self.kwargs["osmId"])
 
         def post(self, request, *args, **kwargs):
             # try to parse our body

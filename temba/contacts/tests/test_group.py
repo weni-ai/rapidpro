@@ -1,10 +1,8 @@
-from datetime import timedelta
-
 from django.urls import reverse
 from django.utils import timezone
 
 from temba import mailroom
-from temba.campaigns.models import Campaign, CampaignEvent, EventFire
+from temba.campaigns.models import Campaign, CampaignEvent
 from temba.contacts.models import Contact, ContactField, ContactGroup, ContactGroupCount
 from temba.contacts.tasks import squash_group_counts
 from temba.schedules.models import Schedule
@@ -85,15 +83,15 @@ class ContactGroupTest(TembaTest):
             group.update_query("age = 18")
 
     def test_get_or_create(self):
-        group = ContactGroup.get_or_create(self.org, self.user, "first")
+        group = ContactGroup.get_or_create(self.org, self.editor, "first")
         self.assertEqual(group.name, "first")
         self.assertFalse(group.is_smart)
 
         # name look up is case insensitive
-        self.assertEqual(ContactGroup.get_or_create(self.org, self.user, "FIRST"), group)
+        self.assertEqual(ContactGroup.get_or_create(self.org, self.editor, "FIRST"), group)
 
         # fetching by id shouldn't modify original group
-        self.assertEqual(ContactGroup.get_or_create(self.org, self.user, "Kigali", uuid=group.uuid), group)
+        self.assertEqual(ContactGroup.get_or_create(self.org, self.editor, "Kigali", uuid=group.uuid), group)
 
         group.refresh_from_db()
         self.assertEqual(group.name, "first")
@@ -148,14 +146,14 @@ class ContactGroupTest(TembaTest):
         self.assertEqual(ContactGroup.objects.get(pk=group.pk).get_member_count(), 2)
 
         # blocking a contact removes them from all user groups
-        self.joe.block(self.user)
+        self.joe.block(self.editor)
 
         group = ContactGroup.objects.get(pk=group.pk)
         self.assertEqual(group.get_member_count(), 1)
         self.assertEqual(set(group.contacts.all()), {self.frank})
 
         # releasing removes from all user groups
-        self.frank.release(self.user)
+        self.frank.release(self.editor)
 
         group = ContactGroup.objects.get(pk=group.pk)
         self.assertEqual(group.get_member_count(), 0)
@@ -196,11 +194,11 @@ class ContactGroupTest(TembaTest):
         )
 
         # call methods twice to check counts don't change twice
-        murdock.block(self.user)
-        murdock.block(self.user)
-        face.block(self.user)
-        ba.stop(self.user)
-        ba.stop(self.user)
+        murdock.block(self.editor)
+        murdock.block(self.editor)
+        face.block(self.editor)
+        ba.stop(self.editor)
+        ba.stop(self.editor)
 
         counts = Contact.get_status_counts(self.org)
         self.assertEqual(
@@ -217,12 +215,12 @@ class ContactGroupTest(TembaTest):
         squash_group_counts()
         self.assertEqual(ContactGroupCount.objects.all().count(), 3)
 
-        murdock.release(self.user)
-        murdock.release(self.user)
-        face.restore(self.user)
-        face.restore(self.user)
-        ba.restore(self.user)
-        ba.restore(self.user)
+        murdock.release(self.editor)
+        murdock.release(self.editor)
+        face.restore(self.editor)
+        face.restore(self.editor)
+        ba.restore(self.editor)
+        ba.restore(self.editor)
 
         # squash again, this time we discard zero counts
         squash_group_counts()
@@ -252,8 +250,16 @@ class ContactGroupTest(TembaTest):
         # create a campaign based on group 1 - a hard dependency
         campaign = Campaign.create(self.org, self.admin, "Reminders", group1)
         joined = self.create_field("joined", "Joined On", value_type=ContactField.TYPE_DATETIME)
-        event = CampaignEvent.create_message_event(self.org, self.admin, campaign, joined, 2, unit="D", message="Hi")
-        EventFire.objects.create(event=event, contact=self.joe, scheduled=timezone.now() + timedelta(days=2))
+        CampaignEvent.create_message_event(
+            self.org,
+            self.admin,
+            campaign,
+            joined,
+            2,
+            unit="D",
+            translations={"eng": {"text": "Hi"}},
+            base_language="eng",
+        )
         campaign.is_archived = True
         campaign.save()
 
@@ -273,7 +279,6 @@ class ContactGroupTest(TembaTest):
 
         self.assertFalse(group1.is_active)
         self.assertTrue(group1.name.startswith("deleted-"))
-        self.assertEqual(0, EventFire.objects.count())  # event fires will have been deleted
         self.assertEqual({group2}, set(bcast1.groups.all()))  # removed from scheduled broadcast
         self.assertEqual({group1, group2}, set(bcast2.groups.all()))  # regular broadcast unchanged
 

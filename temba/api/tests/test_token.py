@@ -27,9 +27,8 @@ class APITokenTest(TembaTest):
         self.assertNotEqual(token1, token2)
         self.assertNotEqual(token1.key, token2.key)
 
-        # can't create tokens for viewer or agent users
+        # can't create tokens for agent users
         self.assertRaises(AssertionError, APIToken.create, self.org, self.agent)
-        self.assertRaises(AssertionError, APIToken.create, self.org, self.user)
 
     def test_record_used(self):
         token1 = APIToken.create(self.org, self.admin)

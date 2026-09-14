@@ -79,6 +79,7 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
                 "globals_limit",
                 "groups_limit",
                 "labels_limit",
+                "llms_limit",
                 "teams_limit",
                 "topics_limit",
                 "loc",
@@ -98,6 +99,7 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
                 "globals_limit": "",
                 "groups_limit": 400,
                 "labels_limit": "",
+                "llms_limit": "",
                 "teams_limit": "",
                 "topics_limit": "",
             },
@@ -176,12 +178,12 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # requesting a next page has a slightly different message
         response = self.client.get(service_url, {"other_org": self.org.id, "next": inbox_url})
+        print(inbox_url)
         self.assertContains(response, "The page you are requesting belongs to a different workspace, <b>Nyaruka</b>.")
 
         response = self.client.post(service_url, {"other_org": self.org.id})
-        self.assertRedirect(response, "/msg/")
+        self.assertRedirect(response, "/org/start/")
         self.assertEqual(self.org.id, self.client.session["org_id"])
-        self.assertTrue(self.client.session["servicing"])
 
         # specify redirect_url
         response = self.client.post(service_url, {"other_org": self.org.id, "next": "/flow/"})
@@ -212,15 +214,12 @@ class OrgCRUDLTest(TembaTest, CRUDLTestMixin):
 
         contact = Contact.objects.get(urns__path="+250788123123", org=self.org)
         self.assertEqual(self.customer_support, contact.created_by)
-
         self.assertEqual(self.org.id, self.client.session["org_id"])
-        self.assertTrue(self.client.session["servicing"])
 
         # stop servicing
         response = self.client.post(service_url, {})
         self.assertRedirect(response, reverse("staff.org_list"))
         self.assertIsNone(self.client.session["org_id"])
-        self.assertFalse(self.client.session["servicing"])
 
 
 class UserCRUDLTest(TembaTest, CRUDLTestMixin):
@@ -230,14 +229,14 @@ class UserCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertStaffOnly(list_url)
 
         response = self.requestView(list_url, self.customer_support)
-        self.assertEqual(8, len(response.context["object_list"]))
+        self.assertEqual(9, len(response.context["object_list"]))
         self.assertEqual("/staff/users/all", response.headers[TEMBA_MENU_SELECTION])
 
         response = self.requestView(list_url + "?filter=beta", self.customer_support)
         self.assertEqual(set(), set(response.context["object_list"]))
 
         response = self.requestView(list_url + "?filter=staff", self.customer_support)
-        self.assertEqual({self.customer_support, self.superuser}, set(response.context["object_list"]))
+        self.assertEqual({self.customer_support}, set(response.context["object_list"]))
 
         response = self.requestView(list_url + "?search=admin@textit.com", self.customer_support)
         self.assertEqual({self.admin}, set(response.context["object_list"]))
@@ -254,8 +253,12 @@ class UserCRUDLTest(TembaTest, CRUDLTestMixin):
         # this is a customer support only view
         self.assertStaffOnly(read_url)
 
-        response = self.requestView(read_url, self.customer_support)
-        self.assertEqual(200, response.status_code)
+        # we should have option to unverify
+        self.assertContentMenu(read_url, self.customer_support, ["Edit", "Unverify", "Delete"])
+
+        self.editor.set_verified(False)
+
+        self.assertContentMenu(read_url, self.customer_support, ["Edit", "Verify", "Delete"])
 
     def test_update(self):
         update_url = reverse("staff.user_update", args=[self.editor.id])
@@ -266,11 +269,9 @@ class UserCRUDLTest(TembaTest, CRUDLTestMixin):
         response = self.requestView(update_url, self.customer_support)
         self.assertEqual(200, response.status_code)
 
-        alphas = Group.objects.get(name="Alpha")
+        granters = Group.objects.get(name="Granters")
         betas = Group.objects.get(name="Beta")
-        current_password = self.editor.password
 
-        # submit without new password
         response = self.requestView(
             update_url,
             self.customer_support,
@@ -278,20 +279,18 @@ class UserCRUDLTest(TembaTest, CRUDLTestMixin):
                 "email": "eddy@textit.com",
                 "first_name": "Edward",
                 "last_name": "",
-                "groups": [alphas.id, betas.id],
+                "groups": [granters.id, betas.id],
             },
         )
         self.assertEqual(302, response.status_code)
 
         self.editor.refresh_from_db()
         self.assertEqual("eddy@textit.com", self.editor.email)
-        self.assertEqual("eddy@textit.com", self.editor.username)  # should match email
-        self.assertEqual(current_password, self.editor.password)
         self.assertEqual("Edward", self.editor.first_name)
         self.assertEqual("", self.editor.last_name)
-        self.assertEqual({alphas, betas}, set(self.editor.groups.all()))
+        self.assertEqual({granters, betas}, set(self.editor.groups.all()))
 
-        # submit with new password and one less group
+        # submit with one less group
         response = self.requestView(
             update_url,
             self.customer_support,
@@ -300,18 +299,26 @@ class UserCRUDLTest(TembaTest, CRUDLTestMixin):
                 "new_password": "Asdf1234",
                 "first_name": "Edward",
                 "last_name": "",
-                "groups": [alphas.id],
+                "groups": [granters.id],
             },
         )
         self.assertEqual(302, response.status_code)
 
         self.editor.refresh_from_db()
         self.assertEqual("eddy@textit.com", self.editor.email)
-        self.assertEqual("eddy@textit.com", self.editor.username)
-        self.assertNotEqual(current_password, self.editor.password)
         self.assertEqual("Edward", self.editor.first_name)
         self.assertEqual("", self.editor.last_name)
-        self.assertEqual({alphas}, set(self.editor.groups.all()))
+        self.assertEqual({granters}, set(self.editor.groups.all()))
+
+        # unverify user
+        self.client.post(update_url, {"action": "unverify"})
+        self.editor.refresh_from_db()
+        self.assertFalse(self.editor.is_verified())
+
+        # verify user
+        self.client.post(update_url, {"action": "verify"})
+        self.editor.refresh_from_db()
+        self.assertTrue(self.editor.is_verified())
 
     @mock_mailroom
     def test_delete(self, mr_mocks):
@@ -326,7 +333,6 @@ class UserCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # make editor the owner of the org
         OrgMembership.objects.filter(org=self.org, role_code=OrgRole.ADMINISTRATOR.code).delete()
-        OrgMembership.objects.filter(org=self.org, role_code=OrgRole.VIEWER.code).delete()
         OrgMembership.objects.filter(org=self.org, role_code=OrgRole.AGENT.code).delete()
 
         response = self.requestView(delete_url, self.customer_support)

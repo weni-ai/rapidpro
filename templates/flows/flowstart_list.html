@@ -40,7 +40,7 @@
                 {% trans "A deleted flow" %}
               {% endif %}
               {% if obj.start_type == "M" %}
-                {% blocktrans trimmed with user=obj.created_by %}
+                {% blocktrans trimmed with user=obj.created_by.email %}
                   was started by {{ user }}
                 {% endblocktrans %}
               {% elif obj.start_type == "Z" %}

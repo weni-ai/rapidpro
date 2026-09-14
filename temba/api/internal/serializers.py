@@ -2,7 +2,9 @@ from datetime import timezone as tzone
 
 from rest_framework import serializers
 
+from temba.ai.models import LLM
 from temba.locations.models import AdminBoundary
+from temba.orgs.models import Org
 from temba.templates.models import Template, TemplateTranslation
 from temba.tickets.models import Shortcut
 
@@ -10,6 +12,15 @@ from temba.tickets.models import Shortcut
 class ModelAsJsonSerializer(serializers.BaseSerializer):
     def to_representation(self, instance):
         return instance.as_json()
+
+
+class LLMReadSerializer(serializers.ModelSerializer):
+
+    type = serializers.CharField(source="llm_type")
+
+    class Meta:
+        model = LLM
+        fields = ("uuid", "name", "type")
 
 
 class LocationReadSerializer(serializers.ModelSerializer):
@@ -24,6 +35,12 @@ class ShortcutReadSerializer(serializers.ModelSerializer):
     class Meta:
         model = Shortcut
         fields = ("uuid", "name", "text", "modified_on")
+
+
+class OrgReadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Org
+        fields = ("id", "name")
 
 
 class TemplateReadSerializer(serializers.ModelSerializer):
