@@ -19,7 +19,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         menu_url = reverse("triggers.trigger_menu")
 
         self.assertRequestDisallowed(menu_url, [None, self.agent])
-        self.assertPageMenu(menu_url, self.user, ["Active (0)", "Archived (0)"])
+        self.assertPageMenu(menu_url, self.editor, ["Active (0)", "Archived (0)", "New Trigger"])
 
         # create a trigger with no groups
         create_url = reverse("triggers.trigger_create_keyword")
@@ -33,7 +33,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         )
 
         # our keyword trigger should force a messages section
-        self.assertPageMenu(menu_url, self.user, ["Active (1)", "Archived (0)", "Messages (1)"])
+        self.assertPageMenu(menu_url, self.editor, ["Active (1)", "Archived (0)", "New Trigger", "Messages (1)"])
 
         # have an archived keyword trigger
         trigger = Trigger.create(
@@ -47,12 +47,12 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
             match_type=Trigger.MATCH_ONLY_WORD,
         )
 
-        self.assertPageMenu(menu_url, self.user, ["Active (2)", "Archived (0)", "Messages (2)"])
+        self.assertPageMenu(menu_url, self.editor, ["Active (2)", "Archived (0)", "New Trigger", "Messages (2)"])
 
         trigger.archive(self.admin)
 
         # the archived trigger not counted
-        self.assertPageMenu(menu_url, self.user, ["Active (1)", "Archived (1)", "Messages (1)"])
+        self.assertPageMenu(menu_url, self.editor, ["Active (1)", "Archived (1)", "New Trigger", "Messages (1)"])
 
     @mock_mailroom
     def test_create(self, mr_mocks):
@@ -64,7 +64,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         self.assertLoginRedirect(self.client.get(create_url))
 
-        self.login(self.user)
+        self.login(self.agent)
         self.assertLoginRedirect(self.client.get(create_url))
 
         self.login(self.admin)
@@ -107,7 +107,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         group1 = self.create_group("Group 1", contacts=[])
         group2 = self.create_group("Group 2", contacts=[])
 
-        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
         response = self.assertCreateFetch(
             create_url,
             [self.editor, self.admin],
@@ -223,7 +223,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         self.create_flow("Flow 4", flow_type=Flow.TYPE_SURVEY)
         self.create_flow("Flow 5", is_system=True)
 
-        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
         response = self.assertCreateFetch(
             create_url,
             [self.editor, self.admin],
@@ -342,7 +342,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         create_url = reverse("triggers.trigger_create_inbound_call")
 
-        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
         response = self.assertCreateFetch(
             create_url,
             [self.editor, self.admin],
@@ -412,7 +412,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         create_url = reverse("triggers.trigger_create_missed_call")
 
-        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
         response = self.assertCreateFetch(
             create_url, [self.editor, self.admin], form_fields=["flow", "groups", "exclude_groups"]
         )
@@ -437,7 +437,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         )
 
     @patch("temba.channels.types.facebook_legacy.FacebookLegacyType.activate_trigger")
-    @patch("temba.channels.types.viber_public.ViberPublicType.activate_trigger")
+    @patch("temba.channels.types.viber.ViberType.activate_trigger")
     def test_create_new_conversation(self, mock_vp_activate, mock_fb_activate):
         create_url = reverse("triggers.trigger_create_new_conversation")
         flow1 = self.create_flow("Flow 1", flow_type=Flow.TYPE_MESSAGE)
@@ -452,7 +452,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         channel2 = self.create_channel("VP", "Viber Channel", "1234567")
         self.create_channel("A", "Android Channel", "+1234")
 
-        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
         response = self.assertCreateFetch(
             create_url, [self.editor, self.admin], form_fields=["flow", "channel", "groups", "exclude_groups"]
         )
@@ -510,7 +510,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         channel2 = self.create_channel("FB", "Facebook 2", "2345678")
         self.create_channel("A", "Android Channel", "+1234")
 
-        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
         response = self.assertCreateFetch(
             create_url,
             [self.editor, self.admin],
@@ -587,7 +587,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         group1 = self.create_group("Group 1", contacts=[])
         group2 = self.create_group("Group 2", contacts=[])
 
-        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
         response = self.assertCreateFetch(
             create_url, [self.editor, self.admin], form_fields=["flow", "channel", "groups", "exclude_groups"]
         )
@@ -652,7 +652,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         create_url = reverse("triggers.trigger_create_closed_ticket")
 
-        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
         response = self.assertCreateFetch(
             create_url, [self.editor, self.admin], form_fields=["flow", "groups", "exclude_groups"]
         )
@@ -691,7 +691,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         create_url = reverse("triggers.trigger_create_opt_in")
 
-        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
         response = self.assertCreateFetch(
             create_url, [self.editor, self.admin], form_fields=["flow", "channel", "groups", "exclude_groups"]
         )
@@ -751,7 +751,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         create_url = reverse("triggers.trigger_create_opt_out")
 
-        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
         response = self.assertCreateFetch(
             create_url, [self.editor, self.admin], form_fields=["flow", "channel", "groups", "exclude_groups"]
         )
@@ -814,7 +814,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         update_url = reverse("triggers.trigger_update", args=[trigger.id])
 
-        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(update_url, [None, self.agent, self.admin2])
         self.assertUpdateFetch(
             update_url,
             [self.editor, self.admin],
@@ -877,7 +877,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         update_url = reverse("triggers.trigger_update", args=[trigger.id])
 
-        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(update_url, [None, self.agent, self.admin2])
         self.assertUpdateFetch(
             update_url,
             [self.editor, self.admin],
@@ -947,7 +947,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         update_url = reverse("triggers.trigger_update", args=[trigger.id])
 
-        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(update_url, [None, self.agent, self.admin2])
         self.assertUpdateFetch(
             update_url,
             [self.editor, self.admin],
@@ -1068,7 +1068,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
 
         self.assertRequestDisallowed(list_url, [None, self.agent])
         response = self.assertListFetch(
-            list_url, [self.user, self.editor, self.admin], context_objects=[trigger4, trigger3, trigger2, trigger1]
+            list_url, [self.editor, self.admin], context_objects=[trigger4, trigger3, trigger2, trigger1]
         )
         self.assertEqual(("archive",), response.context["actions"])
 
@@ -1161,9 +1161,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         list_url = reverse("triggers.trigger_list")
 
         self.assertRequestDisallowed(archived_url, [None, self.agent])
-        response = self.assertListFetch(
-            archived_url, [self.user, self.editor, self.admin], context_objects=[trigger2, trigger1]
-        )
+        response = self.assertListFetch(archived_url, [self.editor, self.admin], context_objects=[trigger2, trigger1])
         self.assertEqual(("restore", "delete"), response.context["actions"])
 
         # can restore it
@@ -1353,7 +1351,7 @@ class TriggerCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertRequestDisallowed(tickets_url, [None, self.agent])
 
         response = self.assertListFetch(
-            messages_url, [self.user, self.editor, self.admin], context_objects=[trigger2, trigger1, trigger5]
+            messages_url, [self.editor, self.admin], context_objects=[trigger2, trigger1, trigger5]
         )
         self.assertEqual("/trigger/messages", response.headers[TEMBA_MENU_SELECTION])
         self.assertEqual(("archive",), response.context["actions"])

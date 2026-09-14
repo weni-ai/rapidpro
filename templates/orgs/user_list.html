@@ -7,16 +7,6 @@
   <temba-modax header="{{ _("Remove User") |escapejs }}" -temba-redirected="refreshUsers" id="delete-user">
   </temba-modax>
 {% endblock modaxes %}
-{% block pre-table %}
-  {% if has_viewers %}
-    <temba-alert level="warning" class="mb-4">
-      {% blocktrans trimmed with cutoff="2024-12-31"|day %}
-        The <i>Viewer</i> role for users is being removed. Please update any users with that role or remove from your
-        workspace. After <b>{{ cutoff }}</b> these users will no longer be able to access the workspace.
-      {% endblocktrans %}
-    </temba-alert>
-  {% endif %}
-{% endblock pre-table %}
 {% block table %}
   <table class="list lined scrolled">
     <thead>
@@ -25,6 +15,7 @@
         <th>{% trans "Name" %}</th>
         <th>{% trans "Role" %}</th>
         <th>{% trans "2FA" %}</th>
+        <th>{% trans "Verified" %}</th>
         <th></th>
       </tr>
     </thead>
@@ -37,13 +28,8 @@
             {{ obj.role.display }}
             {% if obj.team and has_teams %}({{ obj.team.name }}){% endif %}
           </td>
-          <td>
-            {% if obj.settings.two_factor_enabled %}
-              {% trans "Yes" %}
-            {% else %}
-              {% trans "No" %}
-            {% endif %}
-          </td>
+          <td>{{ obj.mfa_enabled|yesno:"✓,-" }}</td>
+          <td>{{ obj.email_verified|yesno:"✓,-" }}</td>
           <td class="w-10">
             {% if obj.role.code != "A" or admin_count > 1 %}
               <temba-icon name="delete"

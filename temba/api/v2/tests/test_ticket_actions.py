@@ -14,7 +14,7 @@ class TicketActionsEndpointTest(APITest):
         endpoint_url = reverse("api.v2.ticket_actions") + ".json"
 
         self.assertGetNotAllowed(endpoint_url)
-        self.assertPostNotPermitted(endpoint_url, [None, self.user])
+        self.assertPostNotPermitted(endpoint_url, [None])
         self.assertDeleteNotAllowed(endpoint_url)
 
         # create some tickets
@@ -125,12 +125,15 @@ class TicketActionsEndpointTest(APITest):
         self.assertEqual(sales, ticket2.topic)
 
         # close tickets
-        self.assertPost(
+        response = self.assertPost(
             endpoint_url,
             self.agent,
             {"tickets": [str(ticket1.uuid), str(ticket2.uuid)], "action": "close"},
-            status=204,
+            status=200,
         )
+
+        # ticket1 reported as failure because it is already closed
+        self.assertEqual({"failures": [str(ticket1.uuid)]}, response.json())
 
         ticket1.refresh_from_db()
         ticket2.refresh_from_db()

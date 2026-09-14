@@ -3,7 +3,6 @@ from django.utils import timezone
 
 from temba.api.v2.serializers import format_datetime
 from temba.classifiers.models import Classifier
-from temba.classifiers.types.luis import LuisType
 from temba.classifiers.types.wit import WitType
 
 from . import APITest
@@ -28,12 +27,12 @@ class ClassifiersEndpointTest(APITest):
         c2.save()
 
         # on another org
-        Classifier.create(self.org2, self.admin, LuisType.slug, "Org2 Booker", {})
+        Classifier.create(self.org2, self.admin, WitType.slug, "Org2 Booker", {})
 
         # no filtering
         self.assertGet(
             endpoint_url,
-            [self.user, self.editor, self.admin],
+            [self.editor, self.admin],
             results=[
                 {
                     "name": "Booker",
@@ -50,4 +49,4 @@ class ClassifiersEndpointTest(APITest):
         self.assertGet(endpoint_url + "?uuid=09d23a05-47fe-11e4-bfe9-b8f6b119e9ab", [self.editor], results=[])
 
         # filter by uuid present
-        self.assertGet(endpoint_url + f"?uuid={c1.uuid}", [self.user, self.editor, self.admin], results=[c1])
+        self.assertGet(endpoint_url + f"?uuid={c1.uuid}", [self.editor, self.admin], results=[c1])

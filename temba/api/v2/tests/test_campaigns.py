@@ -1,18 +1,22 @@
+from unittest.mock import call
+
 from django.urls import reverse
 
 from temba.api.v2.serializers import format_datetime
-from temba.campaigns.models import Campaign
+from temba.campaigns.models import Campaign, CampaignEvent
 from temba.contacts.models import ContactGroup
+from temba.tests import mock_mailroom
 
 from . import APITest
 
 
 class CampaignsEndpointTest(APITest):
-    def test_endpoint(self):
+    @mock_mailroom
+    def test_endpoint(self, mr_mocks):
         endpoint_url = reverse("api.v2.campaigns") + ".json"
 
         self.assertGetNotPermitted(endpoint_url, [None, self.agent])
-        self.assertPostNotPermitted(endpoint_url, [None, self.user, self.agent])
+        self.assertPostNotPermitted(endpoint_url, [None, self.agent])
         self.assertDeleteNotAllowed(endpoint_url)
 
         joe = self.create_contact("Joe Blow", phone="+250788123123")
@@ -29,7 +33,7 @@ class CampaignsEndpointTest(APITest):
         # no filtering
         response = self.assertGet(
             endpoint_url,
-            [self.user, self.editor, self.admin],
+            [self.editor, self.admin],
             results=[
                 {
                     "uuid": str(campaign2.uuid),
@@ -77,6 +81,27 @@ class CampaignsEndpointTest(APITest):
             },
         )
 
+        event1 = CampaignEvent.create_message_event(
+            self.org,
+            self.admin,
+            campaign3,
+            self.create_field("field1", "Field1", value_type="D"),
+            1,
+            "W",
+            {"eng": {"text": "1"}},
+            base_language="eng",
+        )
+        event2 = CampaignEvent.create_message_event(
+            self.org,
+            self.admin,
+            campaign3,
+            self.create_field("field2", "Field2", value_type="D"),
+            1,
+            "W",
+            {"eng": {"text": "2"}},
+            base_language="eng",
+        )
+
         # try to create another campaign with same name
         self.assertPost(
             endpoint_url,
@@ -104,6 +129,9 @@ class CampaignsEndpointTest(APITest):
         campaign3.refresh_from_db()
         self.assertEqual(campaign3.name, "Reminders III")
         self.assertEqual(campaign3.group, other_group)
+
+        self.assertEqual(campaign3.events.filter(status="S").count(), 2)  # events should be scheduling
+        self.assertEqual([call(self.org, event1), call(self.org, event2)], mr_mocks.calls["campaign_schedule"])
 
         # can't update campaign in other org
         self.assertPost(

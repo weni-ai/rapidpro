@@ -2,7 +2,6 @@ from datetime import timedelta
 
 from django.utils import timezone
 
-from temba.campaigns.models import Campaign, CampaignEvent, EventFire
 from temba.channels.models import ChannelEvent
 from temba.ivr.models import Call
 from temba.mailroom.events import Event
@@ -29,7 +28,7 @@ class EventTest(TembaTest):
         self.assertEqual(
             {
                 "type": "msg_received",
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
                 "msg": {
                     "uuid": str(msg_in.uuid),
                     "id": msg_in.id,
@@ -52,7 +51,7 @@ class EventTest(TembaTest):
         self.assertEqual(
             {
                 "type": "msg_received",
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
                 "msg": {
                     "uuid": str(msg_in.uuid),
                     "id": msg_in.id,
@@ -75,7 +74,7 @@ class EventTest(TembaTest):
         self.assertEqual(
             {
                 "type": "msg_received",
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
                 "msg": {
                     "uuid": str(msg_in.uuid),
                     "id": msg_in.id,
@@ -99,7 +98,7 @@ class EventTest(TembaTest):
         self.assertEqual(
             {
                 "type": "msg_created",
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
                 "msg": {
                     "uuid": str(msg_out.uuid),
                     "id": msg_out.id,
@@ -116,7 +115,7 @@ class EventTest(TembaTest):
                 },
                 "optin": None,
                 "status": "E",
-                "logs_url": f"/channels/{str(self.channel.uuid)}/logs/msg/{msg_out.id}/",
+                "logs_url": f"/channels/channel/logs/{str(self.channel.uuid)}/msg/{msg_out.id}/",
             },
             Event.from_msg(self.org, self.admin, msg_out),
         )
@@ -126,7 +125,7 @@ class EventTest(TembaTest):
         self.assertEqual(
             {
                 "type": "msg_created",
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
                 "msg": {
                     "uuid": str(msg_out.uuid),
                     "id": msg_out.id,
@@ -149,7 +148,7 @@ class EventTest(TembaTest):
         self.assertEqual(
             {
                 "type": "ivr_created",
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
                 "msg": {
                     "uuid": str(ivr_out.uuid),
                     "id": ivr_out.id,
@@ -159,7 +158,7 @@ class EventTest(TembaTest):
                 },
                 "created_by": None,
                 "status": "S",
-                "logs_url": f"/channels/{str(self.channel.uuid)}/logs/msg/{ivr_out.id}/",
+                "logs_url": f"/channels/channel/logs/{str(self.channel.uuid)}/msg/{ivr_out.id}/",
             },
             Event.from_msg(self.org, self.admin, ivr_out),
         )
@@ -170,7 +169,7 @@ class EventTest(TembaTest):
         self.assertEqual(
             {
                 "type": "broadcast_created",
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
                 "translations": {"und": {"text": "Hi there"}},
                 "base_language": "und",
                 "msg": {
@@ -189,7 +188,7 @@ class EventTest(TembaTest):
                 "optin": None,
                 "status": "S",
                 "recipient_count": 2,
-                "logs_url": f"/channels/{str(self.channel.uuid)}/logs/msg/{msg_out2.id}/",
+                "logs_url": f"/channels/channel/logs/{str(self.channel.uuid)}/msg/{msg_out2.id}/",
             },
             Event.from_msg(self.org, self.admin, msg_out2),
         )
@@ -204,7 +203,7 @@ class EventTest(TembaTest):
         self.assertEqual(
             {
                 "type": "broadcast_created",
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
                 "translations": {"und": {"text": "Hi there"}},
                 "base_language": "und",
                 "msg": {
@@ -223,7 +222,7 @@ class EventTest(TembaTest):
                 "optin": {"uuid": str(optin.uuid), "name": "Polls"},
                 "status": "S",
                 "recipient_count": 2,
-                "logs_url": f"/channels/{str(self.channel.uuid)}/logs/msg/{msg_out3.id}/",
+                "logs_url": f"/channels/channel/logs/{str(self.channel.uuid)}/msg/{msg_out3.id}/",
             },
             Event.from_msg(self.org, self.admin, msg_out3),
         )
@@ -233,13 +232,13 @@ class EventTest(TembaTest):
         self.assertEqual(
             {
                 "type": "optin_requested",
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
                 "optin": {"uuid": str(optin.uuid), "name": "Polls"},
                 "channel": {"uuid": str(self.channel.uuid), "name": "Test Channel"},
                 "urn": "tel:+250979111111",
                 "created_by": None,
                 "status": "S",
-                "logs_url": f"/channels/{str(self.channel.uuid)}/logs/msg/{msg_out4.id}/",
+                "logs_url": f"/channels/channel/logs/{str(self.channel.uuid)}/msg/{msg_out4.id}/",
             },
             Event.from_msg(self.org, self.admin, msg_out4),
         )
@@ -254,7 +253,7 @@ class EventTest(TembaTest):
         self.assertEqual(
             {
                 "type": "channel_event",
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
                 "event": {
                     "type": "mo_call",
                     "channel": {"uuid": str(self.channel.uuid), "name": "Test Channel"},
@@ -278,7 +277,7 @@ class EventTest(TembaTest):
         self.assertEqual(
             {
                 "type": "channel_event",
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
                 "event": {
                     "type": "optin",
                     "channel": {"uuid": str(self.channel.uuid), "name": "Test Channel"},
@@ -294,19 +293,18 @@ class EventTest(TembaTest):
         contact = self.create_contact("Jim", phone="0979111111")
         flow = self.get_flow("color_v13")
         nodes = flow.get_definition()["nodes"]
-        (
+        run = (
             MockSessionWriter(contact, flow)
             .visit(nodes[0])
             .send_msg("What is your favorite color?", self.channel)
             .wait()
             .save()
-        )
-        run = contact.runs.get()
+        )[0]
 
         self.assertEqual(
             {
                 "type": "flow_entered",
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
                 "flow": {"uuid": str(flow.uuid), "name": "Colors"},
                 "logs_url": None,
             },
@@ -317,43 +315,11 @@ class EventTest(TembaTest):
         self.assertEqual(
             {
                 "type": "flow_entered",
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
                 "flow": {"uuid": str(flow.uuid), "name": "Colors"},
-                "logs_url": f"/flowsession/json/{run.session.uuid}/",
+                "logs_url": f"/flowsession/json/{run.session_uuid}/",
             },
             Event.from_flow_run(self.org, self.customer_support, run),
-        )
-
-    def test_from_event_fire(self):
-        flow = self.create_flow("Test")
-        group = self.create_group("Reporters", contacts=[])
-        registered = self.create_field("registered", "Registered", value_type="D")
-        campaign = Campaign.create(self.org, self.admin, "Welcomes", group)
-        event = CampaignEvent.create_flow_event(
-            self.org, self.user, campaign, registered, offset=1, unit="W", flow=flow
-        )
-        contact = self.create_contact("Jim", phone="0979111111")
-        fire = EventFire.objects.create(
-            event=event,
-            contact=contact,
-            scheduled=timezone.now(),
-            fired=timezone.now(),
-            fired_result=EventFire.RESULT_FIRED,
-        )
-
-        self.assertEqual(
-            {
-                "type": "campaign_fired",
-                "created_on": fire.fired.isoformat(),
-                "campaign": {"id": campaign.id, "name": "Welcomes", "uuid": campaign.uuid},
-                "campaign_event": {
-                    "id": event.id,
-                    "offset_display": "1 week after",
-                    "relative_to": {"key": "registered", "name": "Registered"},
-                },
-                "fired_result": "F",
-            },
-            Event.from_event_fire(self.org, self.admin, fire),
         )
 
     def test_from_ticket_event(self):
@@ -378,12 +344,12 @@ class EventTest(TembaTest):
                 "assignee": None,
                 "ticket": {
                     "uuid": str(ticket.uuid),
-                    "opened_on": matchers.ISODate(),
+                    "opened_on": matchers.ISODatetime(),
                     "closed_on": None,
                     "status": "O",
                     "topic": {"uuid": str(self.org.default_ticket_topic.uuid), "name": "General"},
                 },
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
                 "created_by": {
                     "id": self.agent.id,
                     "first_name": "Agnes",
@@ -391,7 +357,7 @@ class EventTest(TembaTest):
                     "email": "agent@textit.com",
                 },
             },
-            Event.from_ticket_event(self.org, self.user, event1),
+            Event.from_ticket_event(self.org, self.admin, event1),
         )
 
         # event without a user
@@ -407,15 +373,15 @@ class EventTest(TembaTest):
                 "assignee": None,
                 "ticket": {
                     "uuid": str(ticket.uuid),
-                    "opened_on": matchers.ISODate(),
+                    "opened_on": matchers.ISODatetime(),
                     "closed_on": None,
                     "status": "O",
                     "topic": {"uuid": str(self.org.default_ticket_topic.uuid), "name": "General"},
                 },
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
                 "created_by": None,
             },
-            Event.from_ticket_event(self.org, self.user, event2),
+            Event.from_ticket_event(self.org, self.admin, event2),
         )
 
     def test_from_ivr_call(self):
@@ -435,7 +401,7 @@ class EventTest(TembaTest):
                 "type": "call_started",
                 "status": "I",
                 "status_display": "In Progress",
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
                 "logs_url": None,
             },
             Event.from_ivr_call(self.org, self.admin, call1),
@@ -446,18 +412,18 @@ class EventTest(TembaTest):
                 "type": "call_started",
                 "status": "E",
                 "status_display": "Errored (Busy)",
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
                 "logs_url": None,  # user can't see logs
             },
-            Event.from_ivr_call(self.org, self.user, call2),
+            Event.from_ivr_call(self.org, self.agent, call2),
         )
         self.assertEqual(
             {
                 "type": "call_started",
                 "status": "E",
                 "status_display": "Errored (Busy)",
-                "created_on": matchers.ISODate(),
-                "logs_url": f"/channels/{call2.channel.uuid}/logs/call/{call2.id}/",
+                "created_on": matchers.ISODatetime(),
+                "logs_url": f"/channels/channel/logs/{call2.channel.uuid}/call/{call2.id}/",
             },
             Event.from_ivr_call(self.org, self.admin, call2),
         )

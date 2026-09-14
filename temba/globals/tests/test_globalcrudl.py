@@ -22,7 +22,7 @@ class GlobalCRUDLTest(TembaTest, CRUDLTestMixin):
 
         self.assertRequestDisallowed(list_url, [None, self.agent])
         response = self.assertListFetch(
-            list_url, [self.user, self.editor, self.admin], context_objects=[self.global2, self.global1]
+            list_url, [self.editor, self.admin], context_objects=[self.global2, self.global1]
         )
         self.assertContains(response, "Acme Ltd")
         self.assertContains(response, "23464373")
@@ -31,14 +31,20 @@ class GlobalCRUDLTest(TembaTest, CRUDLTestMixin):
         response = self.client.get(list_url + "?search=access")
         self.assertEqual(list(response.context["object_list"]), [self.global2])
 
-        self.assertListFetch(unused_url, [self.user, self.editor, self.admin], context_objects=[self.global2])
+        self.assertListFetch(unused_url, [self.editor, self.admin], context_objects=[self.global2])
         self.assertContentMenu(list_url, self.admin, ["New"])
+        self.assertContentMenu(list_url, self.editor, ["New"])
+
+        with override_settings(ORG_LIMIT_DEFAULTS={"globals": 2}):
+            response = self.assertListFetch(list_url, [self.editor], context_object_count=2)
+            self.assertContains(response, "You have reached the per-workspace limit")
+            self.assertContentMenu(list_url, self.admin, [])
 
     @override_settings(ORG_LIMIT_DEFAULTS={"globals": 4})
     def test_create(self):
         create_url = reverse("globals.global_create")
 
-        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
         self.assertCreateFetch(create_url, [self.editor, self.admin], form_fields=["name", "value"])
 
         # try to submit with invalid name and missing value
@@ -77,20 +83,14 @@ class GlobalCRUDLTest(TembaTest, CRUDLTestMixin):
             new_obj_query=Global.objects.filter(org=self.org, name="Secret2", value="[abc]"),
         )
 
-        # try to create another now that we've reached the limit
-        self.assertCreateSubmit(
-            create_url,
-            self.admin,
-            {"name": "Secret3", "value": "[abc]"},
-            form_errors={
-                "__all__": "This workspace has reached its limit of 4 globals. You must delete existing ones before you can create new ones."
-            },
-        )
+        # check we get the limit warning when we've reached the limit
+        response = self.requestView(create_url, self.admin)
+        self.assertContains(response, "You have reached the per-workspace limit")
 
     def test_update(self):
         update_url = reverse("globals.global_update", args=[self.global1.id])
 
-        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(update_url, [None, self.agent, self.admin2])
         self.assertUpdateFetch(update_url, [self.editor, self.admin], form_fields=["value"])
 
         # try to submit with missing value
@@ -121,14 +121,14 @@ class GlobalCRUDLTest(TembaTest, CRUDLTestMixin):
         detail_url = reverse("globals.global_usages", args=[self.global1.uuid])
 
         self.assertRequestDisallowed(detail_url, [None, self.agent, self.admin2])
-        response = self.assertReadFetch(detail_url, [self.user, self.editor, self.admin], context_object=self.global1)
+        response = self.assertReadFetch(detail_url, [self.editor, self.admin], context_object=self.global1)
 
         self.assertEqual({"flow": [self.flow]}, {t: list(qs) for t, qs in response.context["dependents"].items()})
 
     def test_delete(self):
         delete_url = reverse("globals.global_delete", args=[self.global2.uuid])
 
-        self.assertRequestDisallowed(delete_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(delete_url, [None, self.agent, self.admin2])
 
         # fetch delete modal
         response = self.assertDeleteFetch(delete_url, [self.editor, self.admin])

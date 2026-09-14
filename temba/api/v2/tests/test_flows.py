@@ -2,7 +2,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from temba.api.v2.serializers import format_datetime
-from temba.flows.models import Flow, FlowLabel, FlowRun
+from temba.flows.models import FlowLabel, FlowRun
 from temba.tests import matchers
 
 from . import APITest
@@ -21,9 +21,6 @@ class FlowsEndpointTest(APITest):
         archived = self.get_flow("favorites")
         archived.archive(self.admin)
 
-        # add a campaign message flow that should be filtered out
-        Flow.create_single_message(self.org, self.admin, dict(eng="Hello world"), "eng")
-
         # add a flow label
         reporting = FlowLabel.create(self.org, self.admin, "Reporting")
         color.labels.add(reporting)
@@ -40,7 +37,7 @@ class FlowsEndpointTest(APITest):
         # no filtering
         self.assertGet(
             endpoint_url,
-            [self.user, self.editor],
+            [self.editor, self.admin],
             results=[
                 {
                     "uuid": archived.uuid,
@@ -100,7 +97,7 @@ class FlowsEndpointTest(APITest):
                     "type": "survey",
                     "archived": False,
                     "labels": [],
-                    "expires": 10080,
+                    "expires": 0,
                     "runs": {"active": 0, "waiting": 0, "completed": 0, "interrupted": 0, "expired": 0, "failed": 0},
                     "results": [
                         {

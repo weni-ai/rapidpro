@@ -263,14 +263,6 @@ temba-loading {
   background: #fff;
 }
 
-.button-action:hover,
-#gear-container .button-light:hover,
-#gear-container .button-light.dropdown-toggle:hover,
-#gear-container .button-light.dropdown-toggle:hover .icon-menu {
-  background: var(--color-primary-dark);
-  color: #fff !important;
-}
-
 #gear-container .button-light {
   padding-top: 0.62em;
   padding-bottom: 0.62em;

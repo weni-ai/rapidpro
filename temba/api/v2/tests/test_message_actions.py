@@ -10,7 +10,7 @@ class MessageActionsEndpointTest(APITest):
         endpoint_url = reverse("api.v2.message_actions") + ".json"
 
         self.assertGetNotAllowed(endpoint_url)
-        self.assertPostNotPermitted(endpoint_url, [None, self.user, self.agent])
+        self.assertPostNotPermitted(endpoint_url, [None, self.agent])
         self.assertDeleteNotAllowed(endpoint_url)
 
         # create some messages to act on

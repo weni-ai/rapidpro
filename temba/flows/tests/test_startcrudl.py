@@ -28,9 +28,7 @@ class FlowStartCRUDLTest(TembaTest, CRUDLTestMixin):
         FlowStart.create(other_org_flow, self.admin2)
 
         self.assertRequestDisallowed(list_url, [None, self.agent])
-        response = self.assertListFetch(
-            list_url, [self.user, self.editor, self.admin], context_objects=[start3, start2, start1]
-        )
+        response = self.assertListFetch(list_url, [self.editor, self.admin], context_objects=[start3, start2, start1])
 
         self.assertContains(response, "Test Flow 1")
         self.assertNotContains(response, "Test Flow 2")
@@ -62,7 +60,7 @@ class FlowStartCRUDLTest(TembaTest, CRUDLTestMixin):
         start = FlowStart.create(flow, self.admin, contacts=[contact])
 
         interrupt_url = reverse("flows.flowstart_interrupt", args=[start.id])
-        self.assertRequestDisallowed(interrupt_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(interrupt_url, [None, self.agent])
         self.requestView(interrupt_url, self.admin, post_data={})
 
         start.refresh_from_db()

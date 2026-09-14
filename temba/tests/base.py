@@ -1,6 +1,5 @@
 import copy
 import os
-from collections import namedtuple
 from datetime import datetime
 from functools import wraps
 from io import BytesIO
@@ -8,7 +7,8 @@ from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from django_redis import get_redis_connection
+from allauth.account.models import EmailAddress
+from django_valkey import get_valkey_connection
 from PIL import Image, ImageDraw
 from smartmin.tests import SmartminTest
 
@@ -19,6 +19,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.test import override_settings
+from django.urls import reverse
 from django.utils import timezone
 
 from temba.archives.models import Archive, jsonlgz_encode
@@ -28,9 +29,10 @@ from temba.flows.models import Flow, FlowRun, FlowSession
 from temba.ivr.models import Call
 from temba.locations.models import AdminBoundary, BoundaryAlias
 from temba.msgs.models import Broadcast, Label, Msg, OptIn
-from temba.orgs.models import Org, OrgRole, User
+from temba.orgs.models import Org, OrgRole
 from temba.templates.models import Template
 from temba.tickets.models import Ticket, TicketEvent
+from temba.users.models import User
 from temba.utils import dynamo, json
 from temba.utils.uuid import UUID, uuid4, uuid7
 
@@ -54,19 +56,18 @@ class TembaTest(SmartminTest):
     def setUp(self):
         super().setUp()
 
-        self.create_anonymous_user()
-
-        self.superuser = User.objects.create_superuser(
-            username="super", email="super@user.com", password=self.default_password
-        )
+        self.superuser = User.objects.create_user("super@user.com", self.default_password, is_superuser=True)
 
         # create different user types
         self.non_org_user = self.create_user("nonorg@textit.com")
         self.admin = self.create_user("admin@textit.com", first_name="Andy")
         self.editor = self.create_user("editor@textit.com", first_name="Ed", last_name="McEdits")
-        self.user = self.create_user("viewer@textit.com")
         self.agent = self.create_user("agent@textit.com", first_name="Agnes")
         self.customer_support = self.create_user("support@textit.com", is_staff=True)
+
+        # mark all of their emails as verified
+        for user in User.objects.all():
+            EmailAddress.objects.create(user=user, email=user.email, verified=True, primary=True)
 
         self.org = Org.objects.create(
             name="Nyaruka",
@@ -78,11 +79,11 @@ class TembaTest(SmartminTest):
         self.org.initialize()
         self.org.add_user(self.admin, OrgRole.ADMINISTRATOR)
         self.org.add_user(self.editor, OrgRole.EDITOR)
-        self.org.add_user(self.user, OrgRole.VIEWER)
         self.org.add_user(self.agent, OrgRole.AGENT)
 
         # setup a second org with a single admin
         self.admin2 = self.create_user("administrator@trileet.com")
+        EmailAddress.objects.create(user=self.admin2, email=self.admin2.email, verified=True, primary=True)
         self.org2 = Org.objects.create(
             name="Trileet Inc.",
             timezone=ZoneInfo("US/Pacific"),
@@ -96,7 +97,7 @@ class TembaTest(SmartminTest):
         # a single Android channel
         self.channel = Channel.create(
             self.org,
-            self.user,
+            self.admin,
             "RW",
             "A",
             name="Test Channel",
@@ -106,11 +107,6 @@ class TembaTest(SmartminTest):
             config={Channel.CONFIG_FCM_ID: "123"},
             normalize_urns=False,
         )
-
-        # don't cache anon user between tests
-        from temba import utils
-
-        utils._anon_user = None
 
         # OrgRole.group and OrgRole.permissions are cached properties so get those cached before test starts to avoid
         # query count differences when a test is first to request it and when it's not.
@@ -146,14 +142,18 @@ class TembaTest(SmartminTest):
     def tearDown(self):
         super().tearDown()
 
-        r = get_redis_connection()
+        r = get_valkey_connection()
         r.flushdb()
 
     def login(self, user, *, update_last_auth_on: bool = True, choose_org=None):
         self.assertTrue(
-            self.client.login(username=user.username, password=self.default_password),
-            f"couldn't login as {user.username}:{self.default_password}",
+            self.client.login(username=user.email, password=self.default_password),
+            f"couldn't login as {user.email}:{self.default_password}",
         )
+
+        # infer our org if we weren't handed one
+        if not choose_org:
+            choose_org = user.orgs.filter(is_active=True).order_by("-created_on").first()
 
         if update_last_auth_on:
             user.record_auth()
@@ -198,8 +198,7 @@ class TembaTest(SmartminTest):
         return flow
 
     def create_user(self, email, group_names=(), **kwargs):
-        user = User.objects.create_user(username=email, email=email, **kwargs)
-        user.set_password(self.default_password)
+        user = User.objects.create_user(email=email, password=self.default_password, **kwargs)
         user.save()
 
         for group in group_names:
@@ -217,14 +216,14 @@ class TembaTest(SmartminTest):
         org=None,
         user=None,
         status=Contact.STATUS_ACTIVE,
-        last_seen_on=None,
+        **kwargs,
     ):
         """
         Create a new contact
         """
 
         org = org or self.org
-        user = user or self.user
+        user = user or self.admin
         urns = [URN.from_tel(phone)] if phone else urns
 
         return create_contact_locally(
@@ -236,16 +235,16 @@ class TembaTest(SmartminTest):
             fields or {},
             group_uuids=[],
             status=status,
-            last_seen_on=last_seen_on,
+            **kwargs,
         )
 
     def create_group(self, name, contacts=(), query=None, org=None):
         assert not (contacts and query), "can't provide contact list for a smart group"
 
         if query:
-            return ContactGroup.create_smart(org or self.org, self.user, name, query=query)
+            return ContactGroup.create_smart(org or self.org, self.admin, name, query=query)
         else:
-            group = ContactGroup.create_manual(org or self.org, self.user, name)
+            group = ContactGroup.create_manual(org or self.org, self.admin, name)
             if contacts:
                 group.contacts.add(*contacts)
             return group
@@ -339,10 +338,6 @@ class TembaTest(SmartminTest):
         if status in (Msg.STATUS_WIRED, Msg.STATUS_SENT, Msg.STATUS_DELIVERED) and not sent_on:
             sent_on = timezone.now()
 
-        metadata = {}
-        if quick_replies:
-            metadata["quick_replies"] = quick_replies
-
         return self._create_msg(
             contact,
             text,
@@ -358,7 +353,6 @@ class TembaTest(SmartminTest):
             high_priority=high_priority,
             flow=flow,
             ticket=ticket,
-            metadata=metadata,
             next_attempt=next_attempt,
             failed_reason=failed_reason,
             logs=logs,
@@ -403,7 +397,6 @@ class TembaTest(SmartminTest):
         broadcast=None,
         optin=None,
         locale=None,
-        metadata=None,
         next_attempt=None,
         failed_reason=None,
         logs=None,
@@ -433,7 +426,7 @@ class TembaTest(SmartminTest):
             status=status or (Msg.STATUS_PENDING if direction == Msg.DIRECTION_IN else Msg.STATUS_INITIALIZING),
             msg_type=msg_type,
             visibility=visibility,
-            is_android=channel and channel.is_android,
+            is_android=bool(channel and channel.is_android),
             external_id=external_id,
             high_priority=high_priority,
             created_on=created_on or timezone.now(),
@@ -444,7 +437,6 @@ class TembaTest(SmartminTest):
             optin=optin,
             flow=flow,
             ticket=ticket,
-            metadata=metadata,
             next_attempt=next_attempt,
             failed_reason=failed_reason,
             log_uuids=[l.uuid for l in logs or []],
@@ -564,6 +556,7 @@ class TembaTest(SmartminTest):
         Create something that looks like an incoming IVR call handled by mailroom
         """
         call = Call.objects.create(
+            uuid=uuid4(),
             org=self.org,
             channel=self.channel,
             direction=Call.DIRECTION_IN,
@@ -577,12 +570,10 @@ class TembaTest(SmartminTest):
         )
         session = FlowSession.objects.create(
             uuid=uuid4(),
-            org=contact.org,
             contact=contact,
             status=FlowSession.STATUS_COMPLETED,
             output_url="http://sessions.com/123.json",
             call=call,
-            wait_resume_on_expire=False,
             ended_on=timezone.now(),
         )
         FlowRun.objects.create(
@@ -590,7 +581,7 @@ class TembaTest(SmartminTest):
             flow=flow,
             contact=contact,
             status=FlowRun.STATUS_COMPLETED,
-            session=session,
+            session_uuid=session.uuid,
             exited_on=timezone.now(),
         )
         Msg.objects.create(
@@ -602,10 +593,14 @@ class TembaTest(SmartminTest):
             text="Hello",
             status=Msg.STATUS_SENT,
             msg_type=Msg.TYPE_VOICE,
+            is_android=False,
             sent_on=timezone.now(),
             created_on=timezone.now(),
             modified_on=timezone.now(),
         )
+
+        call.session_uuid = session.uuid
+        call.save(update_fields=("session_uuid",))
 
         return call
 
@@ -679,25 +674,31 @@ class TembaTest(SmartminTest):
             modified_by=self.admin,
         )
 
-    def create_channel_log(self, log_type: str, *, http_logs=(), errors=()) -> dict:
+    def create_channel_log(self, channel, log_type: str, *, http_logs=(), errors=()) -> dict:
+        def is_error():
+            if len(errors) > 0:
+                return True
+            for hlog in http_logs:
+                if hlog.get("status_code", 0) >= 400:
+                    return True
+            return False
+
         uuid = uuid7()
         created_on = timezone.now()
         expires_on = created_on + timezone.timedelta(days=7)
+        pk, sk = ChannelLog._get_key(channel, uuid)
+        item = {
+            "PK": pk,
+            "SK": sk,
+            "OrgID": channel.org_id,
+            "TTL": int(expires_on.timestamp()),
+            "Data": {"type": log_type, "elapsed_ms": 12, "created_on": created_on.isoformat(), "is_error": is_error()},
+            "DataGZ": dynamo.dump_jsongz({"http_logs": http_logs, "errors": errors}),
+        }
 
-        client = dynamo.get_client()
-        client.put_item(
-            TableName=dynamo.table_name(ChannelLog.DYNAMO_TABLE),
-            Item={
-                "UUID": {"S": str(uuid)},
-                "Type": {"S": log_type},
-                "DataGZ": {"B": dynamo.dump_jsongz({"http_logs": http_logs, "errors": errors})},
-                "ElapsedMS": {"N": "12"},
-                "CreatedOn": {"N": str(int(created_on.timestamp()))},
-                "ExpiresOn": {"N": str(int(expires_on.timestamp()))},
-            },
-        )
+        dynamo.MAIN.put_item(Item=item)
 
-        return namedtuple("ChannelLog", ["uuid", "created_on"])(uuid, created_on)
+        return ChannelLog._from_item(channel, item)
 
     def create_channel_event(self, channel, urn, event_type, occurred_on=None, optin=None, extra=None):
         urn_obj = contact_urn_lookup(channel.org, urn)
@@ -787,6 +788,9 @@ class TembaTest(SmartminTest):
 
     def set_contact_field(self, contact, key, value):
         update_field_locally(self.admin, contact, key, value)
+
+    def assertLoginRedirectLegacy(self, response, msg=None):
+        self.assertRedirect(response, reverse("orgs.login"), msg=msg)
 
     def assertToast(self, response, level, text):
         toasts = json.loads(response.get("X-Temba-Toasts", []))

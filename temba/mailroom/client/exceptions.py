@@ -78,3 +78,18 @@ class URNValidationException(Exception):
 
     def __str__(self):
         return self.error
+
+
+class AIServiceException(Exception):
+    """
+    Request that fails because an LLM service error
+    """
+
+    def __init__(self, error: str, code: str, instructions: str, input: str):
+        self.error = error
+        self.code = code
+        self.instructions = instructions
+        self.input = input
+
+    def __str__(self):
+        return self.error

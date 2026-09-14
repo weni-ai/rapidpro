@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import timedelta
 
 from smartmin.views import SmartCRUDL, SmartListView, SmartTemplateView, SmartUpdateView
@@ -12,7 +13,6 @@ from django.utils.functional import cached_property
 from django.utils.translation import gettext_lazy as _
 
 from temba.msgs.models import Msg
-from temba.notifications.views import NotificationTargetMixin
 from temba.orgs.models import Org
 from temba.orgs.views.base import (
     BaseCreateModal,
@@ -27,7 +27,7 @@ from temba.utils.dates import datetime_to_timestamp, timestamp_to_datetime
 from temba.utils.export import response_from_workbook
 from temba.utils.fields import InputWidget
 from temba.utils.uuid import UUID_REGEX
-from temba.utils.views.mixins import ComponentFormMixin, ContextMenuMixin, ModalFormMixin, SpaMixin
+from temba.utils.views.mixins import ChartViewMixin, ComponentFormMixin, ContextMenuMixin, ModalFormMixin, SpaMixin
 
 from .forms import ShortcutForm, TeamForm, TopicForm
 from .models import (
@@ -139,16 +139,12 @@ class TeamCRUDL(SmartCRUDL):
         menu_path = "/settings/teams"
 
         def derive_queryset(self, **kwargs):
-            return super().derive_queryset(**kwargs).filter(is_active=True).order_by(Lower("name"))
+            return super().derive_queryset(**kwargs).order_by(Lower("name"))
 
         def build_context_menu(self, menu):
-            if self.has_org_perm("tickets.team_create"):
+            if self.has_org_perm("tickets.team_create") and not self.is_limit_reached():
                 menu.add_modax(
-                    _("New"),
-                    "new-team",
-                    reverse("tickets.team_create"),
-                    title=_("New Team"),
-                    as_button=True,
+                    _("New"), "new-team", reverse("tickets.team_create"), title=_("New Team"), as_button=True
                 )
 
         def get_context_data(self, **kwargs):
@@ -163,7 +159,7 @@ class TeamCRUDL(SmartCRUDL):
 
 class TicketCRUDL(SmartCRUDL):
     model = Ticket
-    actions = ("menu", "list", "folder", "update", "note", "export_stats", "export")
+    actions = ("menu", "list", "folder", "update", "note", "chart", "export_stats", "export", "analytics")
 
     class Menu(BaseMenuView):
         def derive_menu(self):
@@ -198,10 +194,25 @@ class TicketCRUDL(SmartCRUDL):
                     href="tickets.shortcut_list",
                 )
             )
+
+            if self.has_org_perm("tickets.ticket_analytics"):
+                menu.append(
+                    self.create_menu_item(
+                        menu_id="analytics",
+                        name=_("Analytics"),
+                        icon="analytics",
+                        href="tickets.ticket_analytics",
+                    )
+                )
+
+            menu.append(self.create_space())
             menu.append(self.create_modax_button(_("Export"), "tickets.ticket_export", icon="export"))
-            menu.append(
-                self.create_modax_button(_("New Topic"), "tickets.topic_create", icon="add", on_submit="refreshMenu()")
-            )
+            if not Topic.is_limit_reached(org):
+                menu.append(
+                    self.create_modax_button(
+                        _("New Topic"), "tickets.topic_create", icon="add", on_submit="refreshMenu()"
+                    )
+                )
 
             menu.append(self.create_divider())
 
@@ -219,7 +230,17 @@ class TicketCRUDL(SmartCRUDL):
 
             return menu
 
-    class List(SpaMixin, ContextMenuMixin, OrgPermsMixin, NotificationTargetMixin, SmartListView):
+    class Analytics(SpaMixin, OrgPermsMixin, SmartTemplateView):
+        permission = "tickets.ticket_analytics"
+        title = _("Analytics")
+
+        menu_path = "/ticket/analytics"
+
+        def get_context_data(self, **kwargs):
+            context = super().get_context_data(**kwargs)
+            return context
+
+    class List(SpaMixin, ContextMenuMixin, OrgPermsMixin, SmartListView):
         """
         Placeholder view for the ticketing frontend components which fetch tickets from the folders view below.
         """
@@ -228,15 +249,6 @@ class TicketCRUDL(SmartCRUDL):
         def derive_url_pattern(cls, path, action):
             folders = "|".join(TicketFolder.all().keys())
             return rf"^ticket/((?P<folder>{folders}|{UUID_REGEX.pattern})/((?P<status>open|closed)/((?P<uuid>[a-z0-9\-]+)/)?)?)?$"
-
-        def get_notification_scope(self) -> tuple:
-            folder, status, ticket, in_page = self.tickets_path
-
-            if folder.slug == UnassignedFolder.slug and status == Ticket.STATUS_OPEN:
-                return "tickets:opened", ""
-            elif folder.slug == MineFolder.slug and status == Ticket.STATUS_OPEN:
-                return "tickets:activity", ""
-            return "", ""
 
         def derive_menu_path(self):
             folder, status, ticket, in_page = self.tickets_path
@@ -300,15 +312,6 @@ class TicketCRUDL(SmartCRUDL):
             folder, status, ticket, in_page = self.tickets_path
 
             if ticket and ticket.status == Ticket.STATUS_OPEN:
-                if self.has_org_perm("tickets.ticket_update"):
-                    menu.add_modax(
-                        _("Edit"),
-                        "edit-ticket",
-                        f"{reverse('tickets.ticket_update', args=[ticket.uuid])}",
-                        title=_("Edit Ticket"),
-                        on_submit="handleTicketEditComplete()",
-                    )
-
                 if self.has_org_perm("tickets.ticket_note"):
                     menu.add_modax(
                         _("Add Note"),
@@ -516,7 +519,72 @@ class TicketCRUDL(SmartCRUDL):
             self.get_object().add_note(self.request.user, note=form.cleaned_data["note"])
             return self.render_modal_response(form)
 
+    class Chart(OrgPermsMixin, ChartViewMixin, SmartTemplateView):
+        permission = "tickets.ticket_analytics"
+        default_chart_period = (-timedelta(days=90), timedelta(days=1))
+
+        @classmethod
+        def derive_url_pattern(cls, path, action):
+            return r"^%s/%s/(?P<chart>(opened|resptime))/$" % (path, action)
+
+        def get_opened_chart(self, org, since, until) -> tuple:
+            topics_by_id = {t.id: t.name for t in org.topics.filter(is_active=True)}
+
+            counts = org.daily_counts.period(since, until).prefix("tickets:opened:").day_totals(scoped=True)
+
+            # collect all dates and values by topic
+            dates_set = set()
+            values_by_topic = defaultdict(dict)
+
+            for (day, scope), count in counts.items():
+                topic_id = int(scope.split(":")[-1])
+                topic_name = topics_by_id.get(topic_id, "<Unknown>")
+                dates_set.add(day)
+                values_by_topic[topic_name][day] = count
+
+            # create sorted list of dates
+            labels = sorted(list(dates_set))
+
+            # create arrays of values for each topic, using 0 for missing dates
+            datasets = []
+            for topic_name, date_counts in values_by_topic.items():
+                datasets.append({"label": topic_name, "data": [date_counts.get(date, 0) for date in labels]})
+
+            return [d.strftime("%Y-%m-%d") for d in labels], datasets
+
+        def get_resptime_chart(self, org, since, until) -> tuple:
+            counts = org.daily_counts.period(since, until).prefix("ticketresptime:").day_totals(scoped=True)
+            totals_by_date, counts_by_date = {}, {}
+            for (day, scope), count in counts.items():
+                if scope.endswith(":total"):
+                    totals_by_date[day] = count
+                elif scope.endswith(":count"):
+                    counts_by_date[day] = count
+
+            # collect all dates
+            dates_set = set(totals_by_date.keys()) | set(counts_by_date.keys())
+            labels = sorted(list(dates_set))
+
+            # calculate averages for each date, use 0 if missing
+            data = []
+            for d in labels:
+                total = totals_by_date.get(d, 0)
+                count = counts_by_date.get(d, 0)
+                avg = (total // count) if count else 0
+                data.append(avg)
+
+            return [d.strftime("%Y-%m-%d") for d in labels], [{"label": "Response Time", "data": data}]
+
+        def get_chart_data(self, since, until) -> tuple[list, list]:
+            chart = self.kwargs["chart"]
+            if chart == "opened":
+                return self.get_opened_chart(self.request.org, since, until)
+            elif chart == "resptime":
+                return self.get_resptime_chart(self.request.org, since, until)
+
     class ExportStats(OrgPermsMixin, SmartTemplateView):
+        permission = "tickets.ticket_analytics"
+
         def render_to_response(self, context, **response_kwargs):
             num_days = self.request.GET.get("days", 90)
             today = timezone.now().date()

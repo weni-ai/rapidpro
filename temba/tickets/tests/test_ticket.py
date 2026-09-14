@@ -1,9 +1,11 @@
+from datetime import date
 from unittest.mock import call
 
 from temba.contacts.models import Contact
+from temba.orgs.models import OrgRole
 from temba.orgs.tasks import squash_item_counts
 from temba.tests import TembaTest, mock_mailroom
-from temba.tickets.models import Ticket, TicketEvent, Topic
+from temba.tickets.models import Team, Ticket, TicketEvent, Topic, export_ticket_stats
 
 
 class TicketTest(TembaTest):
@@ -46,18 +48,14 @@ class TicketTest(TembaTest):
         self.assertEqual([call(self.org, self.admin, [ticket], topic)], mr_mocks.calls["ticket_change_topic"])
 
         # test bulk closing
-        Ticket.bulk_close(self.org, self.admin, [ticket], force=True)
+        Ticket.bulk_close(self.org, self.admin, [ticket])
 
-        self.assertEqual([call(self.org, self.admin, [ticket], force=True)], mr_mocks.calls["ticket_close"])
+        self.assertEqual([call(self.org, self.admin, [ticket])], mr_mocks.calls["ticket_close"])
 
         # test bulk re-opening
         Ticket.bulk_reopen(self.org, self.admin, [ticket])
 
         self.assertEqual([call(self.org, self.admin, [ticket])], mr_mocks.calls["ticket_reopen"])
-
-    def test_allowed_assignees(self):
-        self.assertEqual({self.admin, self.editor, self.agent}, set(Ticket.get_allowed_assignees(self.org)))
-        self.assertEqual({self.admin2}, set(Ticket.get_allowed_assignees(self.org2)))
 
     @mock_mailroom
     def test_counts(self, mr_mocks):
@@ -81,7 +79,7 @@ class TicketTest(TembaTest):
             org, *, assignee_open: dict, assignee_closed: dict, topic_open: dict, topic_closed: dict, contacts: dict
         ):
             all_topics = org.topics.filter(is_active=True)
-            assignees = [None] + list(Ticket.get_allowed_assignees(org))
+            assignees = [None] + list(org.get_users())
 
             self.assertEqual(
                 assignee_open, {u: Ticket.get_assignee_count(org, u, all_topics, Ticket.STATUS_OPEN) for u in assignees}
@@ -232,3 +230,50 @@ class TicketTest(TembaTest):
             },
             {c["scope"]: c["count"] for c in self.org.counts.order_by("scope").values("scope", "count")},
         )
+
+    def test_export_ticket_stats(self):
+        sales = Team.create(self.org, self.admin, "Sales")
+        self.org.add_user(self.agent, OrgRole.AGENT, team=sales)
+        self.org.add_user(self.editor, OrgRole.AGENT, team=sales)
+
+        self.org.daily_counts.create(day=date(2022, 4, 30), scope="tickets:opened:0", count=1)
+        self.org.daily_counts.create(day=date(2022, 5, 3), scope="tickets:opened:1", count=1)
+        self.org.daily_counts.create(day=date(2022, 5, 3), scope=f"tickets:assigned:0:{self.admin.id}", count=1)
+        self.org.daily_counts.create(day=date(2022, 5, 3), scope=f"msgs:ticketreplies:0:{self.admin.id}", count=1)
+
+        self.org.daily_counts.create(
+            day=date(2022, 5, 4), scope=f"msgs:ticketreplies:{sales.id}:{self.editor.id}", count=1
+        )
+        self.org.daily_counts.create(
+            day=date(2022, 5, 4), scope=f"msgs:ticketreplies:{sales.id}:{self.agent.id}", count=1
+        )
+
+        self.org.daily_counts.create(day=date(2022, 5, 5), scope=f"msgs:ticketreplies:0:{self.admin.id}", count=1)
+        self.org.daily_counts.create(day=date(2022, 5, 5), scope=f"msgs:ticketreplies:0:{self.admin.id}", count=1)
+        self.org.daily_counts.create(day=date(2022, 5, 5), scope="tickets:opened:0", count=1)
+        self.org.daily_counts.create(
+            day=date(2022, 5, 5), scope=f"msgs:ticketreplies:{sales.id}:{self.agent.id}", count=1
+        )
+
+        def _record_first_reply(org, user, d: date, seconds: int):
+            org.daily_counts.create(day=d, scope=f"ticketresptime:0:{user.id}:total", count=seconds)
+            org.daily_counts.create(day=d, scope=f"ticketresptime:0:{user.id}:count", count=1)
+
+        _record_first_reply(self.org, self.admin, date(2022, 4, 30), 60)
+        _record_first_reply(self.org, self.admin, date(2022, 5, 1), 60)
+        _record_first_reply(self.org, self.admin, date(2022, 5, 1), 120)
+        _record_first_reply(self.org, self.admin, date(2022, 5, 1), 180)
+        _record_first_reply(self.org, self.admin, date(2022, 5, 2), 11)
+        _record_first_reply(self.org, self.admin, date(2022, 5, 2), 70)
+
+        workbook = export_ticket_stats(self.org, date(2022, 4, 30), date(2022, 5, 6))
+        self.assertEqual(["Tickets"], workbook.sheetnames)
+        self.assertExcelRow(
+            workbook.active, 1, ["", "Opened", "Replies", "Reply Time (Secs)"] + ["Assigned", "Replies"] * 3
+        )
+        self.assertExcelRow(workbook.active, 2, [date(2022, 4, 30), 1, 0, 60, 0, 0, 0, 0, 0, 0])
+        self.assertExcelRow(workbook.active, 3, [date(2022, 5, 1), 0, 0, 120, 0, 0, 0, 0, 0, 0])
+        self.assertExcelRow(workbook.active, 4, [date(2022, 5, 2), 0, 0, 40, 0, 0, 0, 0, 0, 0])
+        self.assertExcelRow(workbook.active, 5, [date(2022, 5, 3), 1, 1, "", 1, 1, 0, 0, 0, 0])
+        self.assertExcelRow(workbook.active, 6, [date(2022, 5, 4), 0, 2, "", 0, 0, 0, 1, 0, 1])
+        self.assertExcelRow(workbook.active, 7, [date(2022, 5, 5), 1, 3, "", 0, 2, 0, 1, 0, 0])

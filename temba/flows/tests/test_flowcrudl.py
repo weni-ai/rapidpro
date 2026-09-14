@@ -3,15 +3,18 @@ from datetime import date, datetime, timedelta, timezone as tzone
 from decimal import Decimal
 from unittest.mock import patch
 
-from django_redis import get_redis_connection
+from django_valkey import get_valkey_connection
 
 from django.test.utils import override_settings
 from django.urls import reverse
 
 from temba import mailroom
+from temba.api.models import Resthook
+from temba.campaigns.models import Campaign, CampaignEvent
+from temba.classifiers.models import Classifier
 from temba.contacts.models import URN
 from temba.flows.models import Flow, FlowLabel, FlowStart, FlowUserConflictException, ResultsExport
-from temba.msgs.models import SystemLabel
+from temba.orgs.integrations.dtone.type import DTOneType
 from temba.orgs.models import Export
 from temba.templates.models import TemplateTranslation
 from temba.tests import CRUDLTestMixin, TembaTest, matchers, mock_mailroom
@@ -46,7 +49,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         create_url = reverse("flows.flow_create")
         self.create_flow("Registration")
 
-        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
         response = self.assertCreateFetch(
             create_url,
             [self.editor, self.admin],
@@ -92,7 +95,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
             create_url,
             self.admin,
             {"name": "Registration", "flow_type": "M", "base_language": "eng"},
-            form_errors={"name": "Already used by another flow."},
+            form_errors={"name": "Must be unique."},
         )
 
         response = self.assertCreateSubmit(
@@ -178,6 +181,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual([["test"]], list(flow2.triggers.order_by("id").values_list("keywords", flat=True)))
 
     def test_views(self):
+        list_url = reverse("flows.flow_list")
         create_url = reverse("flows.flow_create")
 
         self.create_contact("Eric", phone="+250788382382")
@@ -187,7 +191,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         other_flow = Flow.create(self.org2, self.admin2, "Flow2")
 
         # no login, no list
-        response = self.client.get(reverse("flows.flow_list"))
+        response = self.client.get(list_url)
         self.assertLoginRedirect(response)
 
         user = self.admin
@@ -196,16 +200,11 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         user.save()
         self.login(user)
 
-        self.assertContentMenu(reverse("flows.flow_list"), self.user, ["Export"])
-
-        self.assertContentMenu(
-            reverse("flows.flow_list"),
-            self.admin,
-            ["New Flow", "New Label", "Import", "Export"],
-        )
+        self.assertContentMenu(list_url, self.editor, ["New Flow", "New Label", "Import", "Export"])
+        self.assertContentMenu(list_url, self.admin, ["New Flow", "New Label", "Import", "Export"])
 
         # list, should have only one flow (the one created in setUp)
-        response = self.client.get(reverse("flows.flow_list"))
+        response = self.client.get(list_url)
         self.assertEqual(1, len(response.context["object_list"]))
 
         # inactive list shouldn't have any flows
@@ -231,7 +230,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual(f"/flow/editor/{flow1.uuid}/", response.url)
         self.assertEqual(1, flow1.revisions.all().count())
         self.assertEqual(Flow.TYPE_MESSAGE, flow1.flow_type)
-        self.assertEqual(10080, flow1.expires_after_minutes)
+        self.assertEqual(4320, flow1.expires_after_minutes)
 
         # add a trigger on this flow
         trigger = Trigger.create(
@@ -311,11 +310,11 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertRedirect(response, reverse("flows.flow_editor", args=[flow3.uuid]))
 
         # can see results for a flow
-        response = self.client.get(reverse("flows.flow_results", args=[flow.id]))
+        response = self.client.get(reverse("flows.flow_results", args=[flow.uuid]))
         self.assertEqual(200, response.status_code)
 
         # check flow listing
-        response = self.client.get(reverse("flows.flow_list"))
+        response = self.client.get(list_url)
         self.assertEqual(list(response.context["object_list"]), [flow3, voice_flow, flow1, flow])  # by saved_on
 
         # test update view
@@ -379,14 +378,14 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
             actual = list(flow.triggers.filter(trigger_type="K", is_active=True).values("keywords", "is_archived"))
             self.assertCountEqual(actual, expected)
 
-        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(update_url, [None, self.agent, self.admin2])
         self.assertUpdateFetch(
             update_url,
             [self.editor, self.admin],
             form_fields={
                 "name": "Test",
                 "keyword_triggers": [],
-                "expires_after_minutes": 10080,
+                "expires_after_minutes": 4320,
                 "ignore_triggers": False,
             },
         )
@@ -485,7 +484,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         flow = self.create_flow("IVR Test", flow_type=Flow.TYPE_VOICE)
         update_url = reverse("flows.flow_update", args=[flow.id])
 
-        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(update_url, [None, self.agent, self.admin2])
         self.assertUpdateFetch(
             update_url,
             [self.editor, self.admin],
@@ -521,35 +520,34 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual("New Name", flow.name)
         self.assertEqual(10, flow.expires_after_minutes)
         self.assertTrue(flow.ignore_triggers)
-        self.assertEqual(30, flow.metadata.get("ivr_retry"))
+        self.assertEqual(30, flow.ivr_retry)
         self.assertEqual(1, flow.triggers.count())
         self.assertEqual(1, flow.triggers.filter(keywords=["test", "help"]).count())
 
         # check we still have that value after saving a new revision
         flow.save_revision(self.admin, flow.get_definition())
-        self.assertEqual(30, flow.metadata["ivr_retry"])
+        self.assertEqual(30, flow.ivr_retry)
 
     def test_update_surveyor_flow(self):
         flow = self.create_flow("Survey", flow_type=Flow.TYPE_SURVEY)
         update_url = reverse("flows.flow_update", args=[flow.id])
 
         # we should only see name and contact creation option on form
-        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
-        self.assertUpdateFetch(update_url, [self.editor, self.admin], form_fields=["name", "contact_creation"])
+        self.assertRequestDisallowed(update_url, [None, self.agent, self.admin2])
+        self.assertUpdateFetch(update_url, [self.editor, self.admin], form_fields=["name"])
 
         # update name and contact creation option to be per login
-        self.assertUpdateSubmit(update_url, self.admin, {"name": "New Name", "contact_creation": "login"})
+        self.assertUpdateSubmit(update_url, self.admin, {"name": "New Name"})
 
         flow.refresh_from_db()
         self.assertEqual("New Name", flow.name)
-        self.assertEqual("login", flow.metadata.get("contact_creation"))
 
     def test_update_background_flow(self):
         flow = self.create_flow("Background", flow_type=Flow.TYPE_BACKGROUND)
         update_url = reverse("flows.flow_update", args=[flow.id])
 
         # we should only see name on form
-        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(update_url, [None, self.agent, self.admin2])
         self.assertUpdateFetch(update_url, [self.editor, self.admin], form_fields=["name"])
 
         # update name and contact creation option to be per login
@@ -566,20 +564,33 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         flow2.is_archived = True
         flow2.save(update_fields=("is_archived",))
 
+        # create flow used by a campaign
+        group = self.create_group("Reporters", contacts=[])
         flow3 = self.create_flow("Flow 3")
+        campaign = Campaign.create(self.org, self.admin, "Reminders", group)
+        registered = self.create_field("registered", "Registered", value_type="D")
+        CampaignEvent.create_flow_event(
+            self.org, self.admin, campaign, registered, offset=1, unit="W", flow=flow3, delivery_hour="13"
+        )
 
-        self.login(self.admin)
+        list_url = reverse("flows.flow_list")
 
-        # see our trigger on the list page
-        response = self.client.get(reverse("flows.flow_list"))
-        self.assertContains(response, flow1.name)
-        self.assertContains(response, flow3.name)
+        self.assertRequestDisallowed(list_url, [None, self.agent])
+        self.assertListFetch(list_url, [self.editor, self.admin], context_objects=[flow3, flow1])
 
-        # archive it
-        response = self.client.post(reverse("flows.flow_list"), {"action": "archive", "objects": flow1.id})
+        # try to archive flow used by campaign
+        response = self.client.post(list_url, {"action": "archive", "objects": flow3.id})
+        # TODO: convert to temba-toast
+        # self.assertContains(response, "The following flows are still used by campaigns")
+
+        flow3.refresh_from_db()
+        self.assertFalse(flow3.is_archived)
+
+        # archive first flow
+        response = self.client.post(list_url, {"action": "archive", "objects": flow1.id})
         self.assertEqual(200, response.status_code)
 
-        # flow should no longer appear in list
+        # should no longer appear in list
         response = self.client.get(reverse("flows.flow_list"))
         self.assertNotContains(response, flow1.name)
         self.assertContains(response, flow3.name)
@@ -634,18 +645,6 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
         response = self.client.get(reverse("flows.flow_list"))
         self.assertContains(response, flow1.name)
-
-        # single message flow (flom campaign) should not be included in counts and not even on this list
-        Flow.objects.filter(id=flow1.id).update(is_system=True)
-
-        response = self.client.get(reverse("flows.flow_list"))
-        self.assertNotContains(response, flow1.name)
-
-        # single message flow should not be even in the archived list
-        Flow.objects.filter(id=flow1.id).update(is_system=True, is_archived=True)
-
-        response = self.client.get(reverse("flows.flow_archived"))
-        self.assertNotContains(response, flow1.name)
 
     def test_filter(self):
         flow1 = self.create_flow("Flow 1")
@@ -732,19 +731,19 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual("11.12", revisions[1].spec_version)
 
         self.assertRequestDisallowed(revisions_url, [None, self.agent, self.admin2])
-        response = self.assertReadFetch(revisions_url, [self.user, self.editor, self.admin])
+        response = self.assertReadFetch(revisions_url, [self.editor, self.admin])
         self.assertEqual(
             [
                 {
                     "user": {"email": "admin@textit.com", "name": "Andy"},
-                    "created_on": matchers.ISODate(),
+                    "created_on": matchers.ISODatetime(),
                     "id": revisions[0].id,
                     "version": Flow.CURRENT_SPEC_VERSION,
                     "revision": 2,
                 },
                 {
                     "user": {"email": "admin@textit.com", "name": "Andy"},
-                    "created_on": matchers.ISODate(),
+                    "created_on": matchers.ISODatetime(),
                     "id": revisions[1].id,
                     "version": "11.12",
                     "revision": 1,
@@ -754,11 +753,18 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         )
 
         # fetch a specific revision
-        response = self.assertReadFetch(f"{revisions_url}{revisions[0].id}/", [self.user, self.editor, self.admin])
+        response = self.assertReadFetch(f"{revisions_url}{revisions[0].id}/", [self.editor, self.admin])
 
         # make sure we can read the definition
-        definition = response.json()["definition"]
-        self.assertEqual("und", definition["language"])
+        resp_json = response.json()
+        self.assertEqual("und", resp_json["definition"]["language"])
+        self.assertEqual(
+            {"counts", "issues", "locals", "results", "parent_refs", "dependencies"}, set(resp_json["info"].keys())
+        )
+
+        # we can also fetch the latest revision without knowing the id
+        response = self.client.get(f"{revisions_url}latest/")
+        self.assertEqual(resp_json, response.json())
 
         # fetch the legacy revision
         response = self.client.get(f"{revisions_url}{revisions[1].id}/")
@@ -786,10 +792,10 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
         definition = flow.revisions.all().first().definition
 
-        # viewers can't save flows
-        self.login(self.user)
+        # agents can't access
+        self.login(self.agent)
         response = self.client.post(revisions_url, definition, content_type="application/json")
-        self.assertEqual(403, response.status_code)
+        self.assertEqual(302, response.status_code)
 
         # check that we can create a new revision
         self.login(self.admin)
@@ -986,7 +992,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         )
 
         # if we have too many messages in our outbox we should block
-        self.org.counts.create(scope=f"msgs:folder:{SystemLabel.TYPE_OUTBOX}", count=1_000_001)
+        self.org.counts.create(scope="msgs:folder:O", count=1_000_001)
         preview_url = reverse("flows.flow_preview_start", args=[flow.id])
         mr_mocks.flow_start_preview(query="age > 30", total=1000)
 
@@ -1094,6 +1100,41 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
             response.json(),
         )
 
+    def test_editor_feature_filters(self):
+        flow = self.create_flow("Test")
+
+        self.login(self.admin)
+
+        def assert_features(features: set):
+            response = self.client.get(reverse("flows.flow_editor", args=[flow.uuid]))
+            self.assertEqual(features, set(json.loads(response.context["feature_filters"])))
+
+        # add a resthook
+        Resthook.objects.create(org=flow.org, created_by=self.admin, modified_by=self.admin)
+        assert_features({"resthook"})
+
+        # add an NLP classifier
+        Classifier.objects.create(org=flow.org, config="", created_by=self.admin, modified_by=self.admin)
+        assert_features({"classifier", "resthook"})
+
+        # add a DT One integration
+        DTOneType().connect(flow.org, self.admin, "login", "token")
+        assert_features({"airtime", "classifier", "resthook"})
+
+        # change our channel to use a whatsapp scheme
+        self.channel.schemes = [URN.WHATSAPP_SCHEME]
+        self.channel.save()
+        assert_features({"whatsapp", "airtime", "classifier", "resthook"})
+
+        # change our channel to use a facebook scheme
+        self.channel.schemes = [URN.FACEBOOK_SCHEME]
+        self.channel.save()
+        assert_features({"optins", "airtime", "classifier", "resthook"})
+
+        self.setUpLocations()
+
+        assert_features({"optins", "airtime", "classifier", "resthook", "locations"})
+
     @mock_mailroom
     def test_template_warnings(self, mr_mocks):
         self.login(self.admin)
@@ -1135,8 +1176,8 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         self.channel.save()
 
         # clear dependencies, this will cause our flow to look like it isn't using templates
-        flow.metadata["dependencies"] = []
-        flow.save(update_fields=("metadata",))
+        flow.info["dependencies"] = []
+        flow.save(update_fields=("info",))
 
         mr_mocks.flow_start_preview(query="age > 30", total=2)
         response = self.client.post(
@@ -1155,10 +1196,10 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         )
 
         # make it look like we are using a template, but it doesn't exist
-        flow.metadata["dependencies"] = [
+        flow.info["dependencies"] = [
             {"type": "template", "uuid": "f712e05c-bbed-40f1-b3d9-671bb9b60775", "name": "affirmation"}
         ]
-        flow.save(update_fields=("metadata",))
+        flow.save(update_fields=("info",))
 
         # template doesn't exit, will be warned
         mr_mocks.flow_start_preview(query="age > 30", total=2)
@@ -1240,7 +1281,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         flow = self.create_flow("Test")
         start_url = f"{reverse('flows.flow_start', args=[])}?flow={flow.id}"
 
-        self.assertRequestDisallowed(start_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(start_url, [None, self.agent])
         self.assertUpdateFetch(start_url, [self.editor, self.admin], form_fields=["flow", "contact_search"])
 
         # create flow start with a query
@@ -1351,13 +1392,13 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
         seg1_url = reverse("flows.flow_recent_contacts", args=[flow.uuid, node1_exit1_uuid, node2_uuid])
 
-        # nothing set in redis just means empty list
+        # nothing set in valkey just means empty list
         self.assertRequestDisallowed(seg1_url, [None, self.agent, self.admin2])
-        response = self.assertReadFetch(seg1_url, [self.user, self.editor, self.admin])
+        response = self.assertReadFetch(seg1_url, [self.editor, self.admin])
         self.assertEqual([], response.json())
 
         def add_recent_contact(exit_uuid: str, dest_uuid: str, contact, text: str, ts: float):
-            r = get_redis_connection()
+            r = get_valkey_connection()
             member = f"{uuid4()}|{contact.id}|{text}"  # text is prefixed with a random value to keep it unique
             r.zadd(f"recent_contacts:{exit_uuid}:{dest_uuid}", mapping={member: ts})
 
@@ -1365,7 +1406,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         add_recent_contact(node1_exit1_uuid, node2_uuid, contact2, "|x|", 1639338555.234567)
         add_recent_contact(node1_exit1_uuid, node2_uuid, contact1, "Sounds good", 1639338561.345678)
 
-        response = self.assertReadFetch(seg1_url, [self.user, self.editor, self.admin])
+        response = self.assertReadFetch(seg1_url, [self.editor, self.admin])
         self.assertEqual(
             [
                 {
@@ -1387,84 +1428,57 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
             response.json(),
         )
 
-    def test_category_counts(self):
+    def test_result_chart(self):
         flow1 = self.create_flow("Test 1")
 
-        counts_url = reverse("flows.flow_category_counts", args=[flow1.id])
+        # chart URL with a result key
+        chart_url = reverse("flows.flow_result_chart", args=[flow1.uuid, "color"])
 
-        self.assertRequestDisallowed(counts_url, [None, self.agent])
+        self.assertRequestDisallowed(chart_url, [None, self.agent])
 
         # check with no data
-        response = self.assertReadFetch(counts_url, [self.user, self.editor, self.admin])
-        self.assertEqual({"counts": []}, response.json())
+        response = self.assertReadFetch(chart_url, [self.editor, self.admin])
+        self.assertEqual({"data": {"labels": [], "datasets": []}}, response.json())
 
         # simulate some category data
-        flow1.metadata["results"] = [{"key": "color", "name": "Color"}, {"key": "beer", "name": "Beer"}]
-        flow1.save(update_fields=("metadata",))
+        flow1.info["results"] = [{"key": "color", "name": "Color"}, {"key": "beer", "name": "Beer"}]
+        flow1.save(update_fields=("info",))
 
-        flow1.category_counts.create(
-            node_uuid="9b00751c-0d46-4e5f-86b1-7ccfae76ea10",
-            result_key="color",
-            result_name="Color",
-            category_name="Red",
-            count=3,
-        )
-        flow1.category_counts.create(
-            node_uuid="9b00751c-0d46-4e5f-86b1-7ccfae76ea10",
-            result_key="color",
-            result_name="Color",
-            category_name="Blue",
-            count=2,
-        )
-        flow1.category_counts.create(
-            node_uuid="9b00751c-0d46-4e5f-86b1-7ccfae76ea10",
-            result_key="color",
-            result_name="Color",
-            category_name="Other",
-            count=1,
-        )
-        flow1.category_counts.create(
-            node_uuid="300fd49b-c69d-4e8c-aba9-b6036d0b83d9",
-            result_key="beer",
-            result_name="Beer",
-            category_name="Primus",
-            count=7,
-        )
+        flow1.result_counts.create(result="color", category="Red", count=3)
+        flow1.result_counts.create(result="color", category="Blue", count=2)
+        flow1.result_counts.create(result="color", category="Other", count=1)
+        flow1.result_counts.create(result="beer", category="Primus", count=7)
 
-        response = self.assertReadFetch(counts_url, [self.user, self.editor, self.admin])
+        response = self.assertReadFetch(chart_url, [self.editor, self.admin])
         self.assertEqual(
-            {
-                "counts": [
-                    {
-                        "key": "color",
-                        "name": "Color",
-                        "categories": [
-                            {"name": "Blue", "count": 2, "pct": 0.3333333333333333},
-                            {"name": "Other", "count": 1, "pct": 0.16666666666666666},
-                            {"name": "Red", "count": 3, "pct": 0.5},
-                        ],
-                        "total": 6,
-                    },
-                    {
-                        "key": "beer",
-                        "name": "Beer",
-                        "categories": [
-                            {"name": "Primus", "count": 7, "pct": 1.0},
-                        ],
-                        "total": 7,
-                    },
-                ]
-            },
+            {"data": {"labels": ["Red", "Blue", "Other"], "datasets": [{"label": "Color", "data": [3, 2, 1]}]}},
             response.json(),
         )
+
+        # test "Other" category sorting - "Other" should come last even with higher count
+        flow1.result_counts.filter(result="color").delete()
+        flow1.result_counts.create(result="color", category="Red", count=1)
+        flow1.result_counts.create(result="color", category="Other", count=5)
+        flow1.result_counts.create(result="color", category="Blue", count=3)
+
+        response = self.assertReadFetch(chart_url, [self.editor, self.admin])
+        self.assertEqual(
+            {"data": {"labels": ["Blue", "Red", "Other"], "datasets": [{"label": "Color", "data": [3, 1, 5]}]}},
+            response.json(),
+        )
+
+        # test non-existent result key
+        chart_url_invalid = reverse("flows.flow_result_chart", args=[flow1.uuid, "nonexistent"])
+        response = self.assertReadFetch(chart_url_invalid, [self.editor, self.admin])
+        self.assertEqual({"data": {"labels": [], "datasets": []}}, response.json())
 
     def test_results(self):
         flow = self.create_flow("Test 1")
 
-        results_url = reverse("flows.flow_results", args=[flow.id])
+        results_url = reverse("flows.flow_results", args=[flow.uuid])
 
         self.assertRequestDisallowed(results_url, [None, self.agent])
-        self.assertReadFetch(results_url, [self.user, self.editor, self.admin])
+        self.assertReadFetch(results_url, [self.editor, self.admin])
 
         flow.release(self.admin)
 
@@ -1472,207 +1486,173 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual(404, response.status_code)
 
     @patch("django.utils.timezone.now")
-    def test_engagement(self, mock_now):
-        # this test runs as if it's 2024-11-25 12:05:00
+    def test_engagement_timeline(self, mock_now):
+        """Test timeline rollup modes for different date ranges"""
         mock_now.return_value = datetime(2024, 11, 25, 12, 5, 0, tzinfo=tzone.utc)
 
         flow1 = self.create_flow("Test 1")
+        timeline_url = reverse("flows.flow_engagement_timeline", args=[flow1.uuid])
 
-        engagement_url = reverse("flows.flow_engagement", args=[flow1.id])
+        # check permissions
+        self.assertRequestDisallowed(timeline_url, [None, self.agent])
 
-        # check fetching as template
-        self.assertRequestDisallowed(engagement_url, [None, self.agent])
-        self.assertReadFetch(engagement_url, [self.user, self.editor, self.admin])
+        # empty timeline
+        response = self.requestView(timeline_url, self.admin).json()
 
-        # check fetching as chart data (when there's no data)
-        response = self.requestView(engagement_url, self.admin, HTTP_ACCEPT="application/json")
+        # should be empty
+        self.assertEqual(response["rollup_by"], "day")
+        self.assertEqual(len(response["data"]["labels"]), 0)
+        self.assertEqual(response["data"]["datasets"][0]["data"], [])
+
+        # test week rollup mode (1-3 years ago)
+        flow1.counts.create(scope="msgsin:date:2022-11-25", count=5)
+        flow1.counts.create(scope="msgsin:date:2022-11-29", count=50)
+        flow1.counts.create(scope="msgsin:date:2022-12-1", count=8)
+        response = self.requestView(timeline_url, self.admin).json()
+
+        self.assertEqual("week", response["rollup_by"])
+        self.assertEqual(["2022-11-21", "2022-11-28"], response["data"]["labels"][0:2])
+        self.assertEqual(5, response["data"]["datasets"][0]["data"][0])
+        self.assertEqual(58, response["data"]["datasets"][0]["data"][1])
+        flow1.counts.all().delete()
+
+        # test month rollup mode (>3 years ago)
+        flow1.counts.create(scope="msgsin:date:2020-11-25", count=10)
+        flow1.counts.create(scope="msgsin:date:2020-12-26", count=5)
+        flow1.counts.create(scope="msgsin:date:2020-12-27", count=6)
+        response = self.requestView(timeline_url, self.admin).json()
+        self.assertEqual("month", response["rollup_by"])
+        self.assertEqual(["2020-11-01", "2020-12-01"], response["data"]["labels"][0:2])
+        self.assertEqual(10, response["data"]["datasets"][0]["data"][0])
+        self.assertEqual(11, response["data"]["datasets"][0]["data"][1])
+
+    @patch("django.utils.timezone.now")
+    def test_engagement_progress(self, mock_now):
+        mock_now.return_value = datetime(2024, 11, 25, 12, 5, 0, tzinfo=tzone.utc)
+
+        flow1 = self.create_flow("Test 1")
+        progress_url = reverse("flows.flow_engagement_progress", args=[flow1.uuid])
+
+        # check permissions
+        self.assertRequestDisallowed(progress_url, [None, self.agent])
+
+        # empty progress
+        response = self.requestView(progress_url, self.admin)
         self.assertEqual(
             {
-                "timeline": {
-                    "data": [],
-                    "xmin": 1729900800000,  # 2024-10-26
-                    "xmax": 1732492800000,  # 2024-11-25
-                    "ymax": 0,
-                },
-                "dow": {
-                    "data": [
-                        {"msgs": 0, "y": 0.0},
-                        {"msgs": 0, "y": 0.0},
-                        {"msgs": 0, "y": 0.0},
-                        {"msgs": 0, "y": 0.0},
-                        {"msgs": 0, "y": 0.0},
-                        {"msgs": 0, "y": 0.0},
-                        {"msgs": 0, "y": 0.0},
-                    ]
-                },
-                "hod": {"data": [[i, 0] for i in range(24)]},
-                "completion": {
-                    "summary": [
-                        {"name": "Active", "y": 0, "drilldown": None, "color": "#2387CA"},
-                        {"name": "Completed", "y": 0, "drilldown": None, "color": "#8FC93A"},
-                        {
-                            "name": "Interrupted, Expired and Failed",
-                            "y": 0,
-                            "drilldown": "incomplete",
-                            "color": "#CCC",
-                        },
-                    ],
-                    "drilldown": [
-                        {
-                            "name": "Interrupted, Expired and Failed",
-                            "id": "incomplete",
-                            "innerSize": "50%",
-                            "data": [
-                                {"name": "Expired", "y": 0, "color": "#CCC"},
-                                {"name": "Interrupted", "y": 0, "color": "#EEE"},
-                                {"name": "Failed", "y": 0, "color": "#FEE"},
-                            ],
-                        }
-                    ],
-                },
+                "data": {
+                    "labels": ["Ongoing", "Completed", "Expired", "Interrupted"],
+                    "datasets": [{"label": "Progress", "data": [0, 0, 0, 0]}],
+                }
             },
             response.json(),
         )
 
-        def engagement(flow, when, count):
-            flow.counts.create(scope=f"msgsin:hour:{when.hour}", count=count)
-            flow.counts.create(scope=f"msgsin:dow:{when.isoweekday()}", count=count)
-            flow.counts.create(scope=f"msgsin:date:{when.date().isoformat()}", count=count)
+        # with run data
+        from temba.flows.models import FlowRun
 
-        engagement(flow1, datetime(2024, 11, 24, 9, 0, 0, tzinfo=tzone.utc), 3)  # 2024-11-24 09:00 (Sun)
-        engagement(flow1, datetime(2024, 11, 25, 12, 0, 0, tzinfo=tzone.utc), 2)  # 2024-11-25 12:00 (Mon)
-        engagement(flow1, datetime(2024, 11, 26, 9, 0, 0, tzinfo=tzone.utc), 4)  # 2024-11-26 09:00 (Tue)
-        engagement(flow1, datetime(2024, 11, 26, 23, 0, 0, tzinfo=tzone.utc), 1)  # 2024-11-26 23:00 (Tue)
+        flow1.counts.create(scope=f"status:{FlowRun.STATUS_ACTIVE}", count=5)
+        flow1.counts.create(scope=f"status:{FlowRun.STATUS_COMPLETED}", count=3)
+        flow1.counts.create(scope=f"status:{FlowRun.STATUS_EXPIRED}", count=1)
 
-        flow1.counts.create(scope="status:W", count=4)
-        flow1.counts.create(scope="status:C", count=3)
-        flow1.counts.create(scope="status:X", count=2)
-        flow1.counts.create(scope="status:I", count=1)
+        response = self.requestView(progress_url, self.admin)
+        resp_data = response.json()["data"]
+        self.assertEqual([5, 3, 1, 0], resp_data["datasets"][0]["data"])
 
-        response = self.requestView(engagement_url, self.admin, HTTP_ACCEPT="application/json")
-        self.assertEqual(
-            {
-                "timeline": {
-                    "data": [[1732406400000, 3], [1732492800000, 2], [1732579200000, 5]],
-                    "xmin": 1729900800000,  # 2024-10-26
-                    "xmax": 1732492800000,
-                    "ymax": 5,
-                },
-                "dow": {
-                    "data": [
-                        {"msgs": 3, "y": 30.0},
-                        {"msgs": 2, "y": 20.0},
-                        {"msgs": 5, "y": 50.0},
-                        {"msgs": 0, "y": 0.0},
-                        {"msgs": 0, "y": 0.0},
-                        {"msgs": 0, "y": 0.0},
-                        {"msgs": 0, "y": 0.0},
-                    ]
-                },
-                "hod": {
-                    "data": [
-                        [0, 0],
-                        [1, 1],  # 23:00 UTC is 01:00 in Kigali
-                        [2, 0],
-                        [3, 0],
-                        [4, 0],
-                        [5, 0],
-                        [6, 0],
-                        [7, 0],
-                        [8, 0],
-                        [9, 0],
-                        [10, 0],
-                        [11, 7],
-                        [12, 0],
-                        [13, 0],
-                        [14, 2],
-                        [15, 0],
-                        [16, 0],
-                        [17, 0],
-                        [18, 0],
-                        [19, 0],
-                        [20, 0],
-                        [21, 0],
-                        [22, 0],
-                        [23, 0],
-                    ]
-                },
-                "completion": {
-                    "summary": [
-                        {"name": "Active", "y": 4, "drilldown": None, "color": "#2387CA"},
-                        {"name": "Completed", "y": 3, "drilldown": None, "color": "#8FC93A"},
-                        {
-                            "name": "Interrupted, Expired and Failed",
-                            "y": 3,
-                            "drilldown": "incomplete",
-                            "color": "#CCC",
-                        },
-                    ],
-                    "drilldown": [
-                        {
-                            "name": "Interrupted, Expired and Failed",
-                            "id": "incomplete",
-                            "innerSize": "50%",
-                            "data": [
-                                {"name": "Expired", "y": 2, "color": "#CCC"},
-                                {"name": "Interrupted", "y": 1, "color": "#EEE"},
-                                {"name": "Failed", "y": 0, "color": "#FEE"},
-                            ],
-                        }
-                    ],
-                },
-            },
-            response.json(),
-        )
+        # test additional status types for complete coverage
+        flow1.counts.create(scope=f"status:{FlowRun.STATUS_WAITING}", count=2)
+        flow1.counts.create(scope=f"status:{FlowRun.STATUS_FAILED}", count=1)
+        flow1.counts.create(scope=f"status:{FlowRun.STATUS_INTERRUPTED}", count=3)
 
-        # simulate having some data from 6 months ago
-        engagement(flow1, datetime(2024, 5, 1, 12, 0, 0, tzinfo=tzone.utc), 4)  # 2024-05-01 12:00 (Wed)
+        response = self.requestView(progress_url, self.admin)
+        resp_data = response.json()["data"]
+        # Ongoing includes both ACTIVE (5) and WAITING (2) = 7
+        self.assertEqual([7, 3, 1, 4], resp_data["datasets"][0]["data"])
 
-        response = self.requestView(engagement_url, self.admin, HTTP_ACCEPT="application/json")
-        resp_json = response.json()
-        self.assertEqual(1714521600000, resp_json["timeline"]["xmin"])  # 2024-05-01
-        self.assertEqual(
-            [[1714521600000, 4], [1732406400000, 3], [1732492800000, 2], [1732579200000, 5]],
-            resp_json["timeline"]["data"],
-        )
+    @patch("django.utils.timezone.now")
+    def test_engagement_dow(self, mock_now):
+        mock_now.return_value = datetime(2024, 11, 25, 12, 5, 0, tzinfo=tzone.utc)
 
-        # simulate having some data from 18 months ago (should trigger bucketing by week)
-        engagement(flow1, datetime(2023, 5, 1, 12, 0, 0, tzinfo=tzone.utc), 3)  # 2023-05-01 12:00 (Mon)
+        flow1 = self.create_flow("Test 1")
+        dow_url = reverse("flows.flow_engagement_dow", args=[flow1.uuid])
 
-        response = self.requestView(engagement_url, self.admin, HTTP_ACCEPT="application/json")
-        resp_json = response.json()
-        self.assertEqual(1682899200000, resp_json["timeline"]["xmin"])  # 2023-05-01
-        self.assertEqual(
-            [
-                [1682899200000, 3],  # 2023-05-01 (Mon)
-                [1714348800000, 4],  # 2024-04-29 (Mon)
-                [1731888000000, 3],  # 2024-11-18 (Mon)
-                [1732492800000, 7],  # 2024-11-25 (Mon)
-            ],
-            resp_json["timeline"]["data"],
-        )
+        # check permissions
+        self.assertRequestDisallowed(dow_url, [None, self.agent])
 
-        # simulate having some data from 4 years ago (should trigger bucketing by month)
-        engagement(flow1, datetime(2020, 11, 25, 12, 0, 0, tzinfo=tzone.utc), 6)  # 2020-11-25 12:00 (Wed)
+        # empty dow
+        response = self.requestView(dow_url, self.admin)
+        resp_data = response.json()["data"]
+        self.assertEqual(7, len(resp_data["labels"]))  # 7 days
+        self.assertEqual([0, 0, 0, 0, 0, 0, 0], resp_data["datasets"][0]["data"])
 
-        response = self.requestView(engagement_url, self.admin, HTTP_ACCEPT="application/json")
-        resp_json = response.json()
-        self.assertEqual(1606262400000, resp_json["timeline"]["xmin"])  # 2020-11-25
-        self.assertEqual(
-            [
-                [1604188800000, 6],  # 2020-11-01
-                [1682899200000, 3],  # 2023-05-01
-                [1714521600000, 4],  # 2024-05-01
-                [1730419200000, 10],  # 2024-11-01
-            ],
-            resp_json["timeline"]["data"],
-        )
+        # with dow data
+        flow1.counts.create(scope="msgsin:dow:0", count=4)  # Sunday
+        flow1.counts.create(scope="msgsin:dow:1", count=2)  # Monday
 
-        # check 404 for inactive flow
-        flow1.release(self.admin)
+        response = self.requestView(dow_url, self.admin)
+        resp_data = response.json()["data"]
+        self.assertEqual([4, 2, 0, 0, 0, 0, 0], resp_data["datasets"][0]["data"])
 
-        response = self.requestView(engagement_url, self.admin)
-        self.assertEqual(404, response.status_code)
+        # test that labels are datetime objects starting from Sunday
+        labels = resp_data["labels"]
+        self.assertEqual(7, len(labels))
+        # Labels should be datetime objects based on 2023-01-01 (Sunday) + day_index
+        self.assertIsInstance(labels[0], str)  # datetime gets serialized to string in JSON
+
+    def test_engagement_dow_labels(self):
+        """Test that EngagementDow generates correct day labels"""
+        flow1 = self.create_flow("Test 1")
+        dow_url = reverse("flows.flow_engagement_dow", args=[flow1.uuid])
+
+        response = self.requestView(dow_url, self.admin)
+        resp_data = response.json()["data"]
+
+        # The view should create labels for 7 days starting from Sunday (2023-01-01)
+        labels = resp_data["labels"]
+        self.assertEqual(7, len(labels))
+
+    @patch("django.utils.timezone.now")
+    def test_engagement_hod(self, mock_now):
+        mock_now.return_value = datetime(2024, 11, 25, 12, 5, 0, tzinfo=tzone.utc)
+
+        flow1 = self.create_flow("Test 1")
+        hod_url = reverse("flows.flow_engagement_hod", args=[flow1.uuid])
+
+        # check permissions
+        self.assertRequestDisallowed(hod_url, [None, self.agent])
+
+        # empty hod
+        response = self.requestView(hod_url, self.admin)
+        resp_data = response.json()["data"]
+        self.assertEqual(24, len(resp_data["labels"]))  # 24 hours
+        self.assertEqual([0] * 24, resp_data["datasets"][0]["data"])
+
+        # hod data is stored in UTC, so we need to adjust for the timezone
+        kigali_offset = 2
+        flow1.counts.create(scope=f"msgsin:hour:{9-kigali_offset}", count=5)  # 9a in Kigali
+        flow1.counts.create(scope=f"msgsin:hour:{12-kigali_offset}", count=3)  # 12p in Kigali
+
+        response = self.requestView(hod_url, self.admin)
+        resp_data = response.json()["data"]
+        # Check that hour 9 and 12 have the right values
+        self.assertEqual(5, resp_data["datasets"][0]["data"][9])
+        self.assertEqual(3, resp_data["datasets"][0]["data"][12])
+
+    def test_engagement_hod_labels(self):
+        """Test that EngagementHod generates correct hour labels"""
+        flow1 = self.create_flow("Test 1")
+        hod_url = reverse("flows.flow_engagement_hod", args=[flow1.uuid])
+
+        response = self.requestView(hod_url, self.admin)
+        resp_data = response.json()["data"]
+
+        # Test that labels are properly formatted as "00:00", "01:00", etc.
+        labels = resp_data["labels"]
+        self.assertEqual(24, len(labels))
+        self.assertEqual("00:00", labels[0])
+        self.assertEqual("01:00", labels[1])
+        self.assertEqual("12:00", labels[12])
+        self.assertEqual("23:00", labels[23])
 
     def test_activity(self):
         flow1 = self.create_flow("Test 1")
@@ -1698,7 +1678,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
         self.assertRequestDisallowed(activity_url, [None, self.agent])
 
-        response = self.assertReadFetch(activity_url, [self.user, self.editor, self.admin])
+        response = self.assertReadFetch(activity_url, [self.editor, self.admin])
         self.assertEqual(
             {
                 "nodes": {"01c175da-d23d-40a4-a845-c4a9bb4b481a": 4, "400d6b5e-c963-42a1-a06c-50bb9b1e38b1": 5},
@@ -1792,7 +1772,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertRequestDisallowed(export_url, [None, self.agent])
         response = self.assertUpdateFetch(
             export_url + f"?ids={flow1.id},{flow2.id}",
-            [self.user, self.editor, self.admin],
+            [self.editor, self.admin],
             form_fields=(
                 "start_date",
                 "end_date",
@@ -1868,11 +1848,14 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
     def test_simulate(self):
         flow = self.create_flow("Test")
 
-        # create our payload
-        payload = dict(version=2, trigger={}, flow={})
+        payload = {
+            "contact": {"uuid": "8ada55d2-2f5e-4d56-8f10-26971332cd1c"},
+            "trigger": {"type": "manual"},
+            "flow": {"uuid": "5c5d5ba9-adb9-41c2-9da9-590e90b3cf01", "name": "Test"},
+        }
 
         self.login(self.admin)
-        simulate_url = reverse("flows.flow_simulate", args=[flow.pk])
+        simulate_url = reverse("flows.flow_simulate", args=[flow.id])
 
         with override_settings(MAILROOM_AUTH_TOKEN="sesame", MAILROOM_URL="https://mailroom.temba.io"):
             with patch("requests.post") as mock_post:
@@ -1893,7 +1876,10 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
                 self.assertEqual(actual_url, "https://mailroom.temba.io/mr/sim/start")
                 self.assertEqual(actual_payload["org_id"], flow.org_id)
-                self.assertEqual(actual_payload["trigger"]["environment"]["date_format"], "DD-MM-YYYY")
+                self.assertEqual(
+                    {"type": "manual", "user": {"uuid": str(self.admin.uuid), "name": "Andy"}},
+                    actual_payload["trigger"],
+                )
                 self.assertEqual(len(actual_payload["assets"]["channels"]), 1)  # fake channel
                 self.assertEqual(len(actual_payload["flows"]), 1)
                 self.assertEqual(actual_headers["Authorization"], "Token sesame")
@@ -1901,8 +1887,8 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
             # try a resume
             payload = {
-                "version": 2,
-                "session": {"contact": {"fields": {"age": Decimal("39")}}},
+                "contact": {"uuid": "8ada55d2-2f5e-4d56-8f10-26971332cd1c", "fields": {"age": Decimal("39")}},
+                "session": {"uuid": "01979ebb-044a-7768-a0d0-0455ef356441", "status": "waiting"},
                 "resume": {},
                 "flow": {},
             }
@@ -1924,7 +1910,6 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
 
                 self.assertEqual(actual_url, "https://mailroom.temba.io/mr/sim/resume")
                 self.assertEqual(actual_payload["org_id"], flow.org_id)
-                self.assertEqual(actual_payload["resume"]["environment"]["date_format"], "DD-MM-YYYY")
                 self.assertEqual(len(actual_payload["assets"]["channels"]), 1)  # fake channel
                 self.assertEqual(len(actual_payload["flows"]), 1)
                 self.assertEqual(actual_headers["Authorization"], "Token sesame")
@@ -1940,31 +1925,34 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
             with patch("requests.post") as mock_post:
                 mock_post.return_value = MockJsonResponse(200, {"session": {}})
                 response = self.client.post(
-                    simulate_url, {"version": 2, "trigger": {}, "flow": {}}, content_type="application/json"
+                    simulate_url,
+                    {
+                        "contact": {"uuid": "8ada55d2-2f5e-4d56-8f10-26971332cd1c"},
+                        "trigger": {"type": "manual"},
+                        "flow": {},
+                    },
+                    content_type="application/json",
                 )
 
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json(), {"session": {}})
 
-                # since this is an IVR flow, the session trigger will have a connection
+                # since this is an IVR flow, we need to include a call
+                payload = json.loads(mock_post.call_args[1]["data"])
                 self.assertEqual(
                     {
-                        "call": {
-                            "channel": {"uuid": "440099cf-200c-4d45-a8e7-4a564f4a0e8b", "name": "Test Channel"},
-                            "urn": "tel:+12065551212",
-                        },
-                        "environment": {
-                            "date_format": "DD-MM-YYYY",
-                            "time_format": "tt:mm",
-                            "timezone": "Africa/Kigali",
-                            "allowed_languages": ["eng", "kin"],
-                            "default_country": "RW",
-                            "redaction_policy": "none",
-                            "input_collation": "default",
-                        },
-                        "user": {"email": "admin@textit.com", "name": "Andy"},
+                        "uuid": "01979e0b-3072-7345-ae19-879750caaaf6",
+                        "channel": {"uuid": "440099cf-200c-4d45-a8e7-4a564f4a0e8b", "name": "Test Channel"},
+                        "urn": "tel:+12065551212",
                     },
-                    json.loads(mock_post.call_args[1]["data"])["trigger"],
+                    payload["call"],
+                )
+                self.assertEqual(
+                    {
+                        "type": "manual",
+                        "user": {"uuid": str(self.admin.uuid), "name": "Andy"},
+                    },
+                    payload["trigger"],
                 )
 
     def test_export_and_download_translation(self):
@@ -1974,7 +1962,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         export_url = reverse("flows.flow_export_translation", args=[flow.id])
 
         self.assertRequestDisallowed(export_url, [None, self.agent, self.admin2])
-        self.assertUpdateFetch(export_url, [self.user, self.editor, self.admin], form_fields=["language"])
+        self.assertUpdateFetch(export_url, [self.editor, self.admin], form_fields=["language"])
 
         # submit with no language
         response = self.assertUpdateSubmit(export_url, self.admin, {}, success_status=200)
@@ -1986,7 +1974,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         with patch("temba.mailroom.client.client.MailroomClient.po_export") as mock_po_export:
             mock_po_export.return_value = b'msgid "Red"\nmsgstr "Roja"\n\n'
             self.assertRequestDisallowed(download_url, [None, self.agent, self.admin2])
-            response = self.assertReadFetch(download_url, [self.user, self.editor, self.admin])
+            response = self.assertReadFetch(download_url, [self.editor, self.admin])
 
             self.assertEqual(b'msgid "Red"\nmsgstr "Roja"\n\n', response.content)
             self.assertEqual('attachment; filename="favorites.po"', response["Content-Disposition"])
@@ -2013,7 +2001,7 @@ class FlowCRUDLTest(TembaTest, CRUDLTestMixin):
         step1_url = reverse("flows.flow_import_translation", args=[flow.id])
 
         # check step 1 is just a file upload
-        self.assertRequestDisallowed(step1_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(step1_url, [None, self.agent, self.admin2])
         self.assertUpdateFetch(step1_url, [self.editor, self.admin], form_fields=["po_file"])
 
         # submit with no file
@@ -2127,3 +2115,21 @@ msgstr "Azul"
 
         # should have a new revision
         self.assertEqual(2, flow.revisions.count())
+
+    def test_open_ended_no_chart(self):
+        flow = self.create_flow("Open Ended Flow")
+
+        # define a result that ends up with only one category
+        flow.info["results"] = [{"key": "feedback", "name": "Feedback", "categories": ["All Responses"]}]
+        flow.save(update_fields=("info",))
+
+        # add a single category count
+        flow.result_counts.create(result="feedback", category="Yes", count=5)
+        results_url = reverse("flows.flow_results", args=[flow.uuid])
+
+        self.login(self.admin)
+        response = self.client.get(results_url)
+        self.assertEqual(200, response.status_code)
+
+        # page should not include a chart for feedback
+        self.assertNotContains(response, "Feedback")

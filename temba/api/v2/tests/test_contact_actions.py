@@ -16,7 +16,7 @@ class ContactActionsEndpointTest(APITest):
         endpoint_url = reverse("api.v2.contact_actions") + ".json"
 
         self.assertGetNotAllowed(endpoint_url)
-        self.assertPostNotPermitted(endpoint_url, [None, self.user])
+        self.assertPostNotPermitted(endpoint_url, [None])
         self.assertDeleteNotAllowed(endpoint_url)
 
         for contact in Contact.objects.all():
@@ -29,8 +29,8 @@ class ContactActionsEndpointTest(APITest):
         contact3 = self.create_contact("Cat", phone="+250788000003")
         contact4 = self.create_contact("Don", phone="+250788000004")  # a blocked contact
         contact5 = self.create_contact("Eve", phone="+250788000005")  # a deleted contact
-        contact4.block(self.user)
-        contact5.release(self.user)
+        contact4.block(self.editor)
+        contact5.release(self.editor)
 
         group = self.create_group("Testers")
         self.create_field("isdeveloper", "Is developer")

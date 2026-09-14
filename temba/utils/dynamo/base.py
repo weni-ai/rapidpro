@@ -1,17 +1,15 @@
-import json
-import zlib
-
 import boto3
 from botocore.client import Config
 
 from django.conf import settings
+from django.utils.functional import SimpleLazyObject
 
 _client = None
 
 
 def get_client():
     """
-    Returns our shared DynamoDB client
+    Returns our shared DynamoDB resource service client
     """
 
     global _client
@@ -26,29 +24,12 @@ def get_client():
         else:  # pragma: no cover
             session = boto3.Session()
 
-        _client = session.client(
+        _client = session.resource(
             "dynamodb", endpoint_url=settings.DYNAMO_ENDPOINT_URL, config=Config(retries={"max_attempts": 3})
         )
 
     return _client
 
 
-def table_name(logical_name: str) -> str:
-    """
-    Add optional prefix to name to allow multiple deploys in same region
-    """
-    return settings.DYNAMO_TABLE_PREFIX + logical_name
-
-
-def load_jsongz(data: bytes) -> dict:
-    """
-    Loads a value from gzipped JSON
-    """
-    return json.loads(zlib.decompress(data, wbits=zlib.MAX_WBITS | 16))
-
-
-def dump_jsongz(value: dict) -> bytes:
-    """
-    Dumps a value to gzipped JSON
-    """
-    return zlib.compress(json.dumps(value).encode("utf-8"), wbits=zlib.MAX_WBITS | 16)
+MAIN = SimpleLazyObject(lambda: get_client().Table(settings.DYNAMO_TABLE_PREFIX + "Main"))
+HISTORY = SimpleLazyObject(lambda: get_client().Table(settings.DYNAMO_TABLE_PREFIX + "History"))
