@@ -84,6 +84,10 @@ class TembaSocialAccountAdapter(InviteAdapterMixin, DefaultSocialAccountAdapter)
 
     @staticmethod
     def extract_email(sociallogin):
+        for address in getattr(sociallogin, "email_addresses", []) or []:
+            if address.email:
+                return address.email
+
         if not hasattr(sociallogin, "account") or not hasattr(sociallogin.account, "extra_data"):
             return None
 
@@ -100,6 +104,17 @@ class TembaSocialAccountAdapter(InviteAdapterMixin, DefaultSocialAccountAdapter)
                 address.save(update_fields=["verified", "primary"])
         else:
             EmailAddress.objects.create(user=user, email=user.email, verified=True, primary=True)
+
+    @staticmethod
+    def ensure_verified_email_addresses(sociallogin, email):
+        sociallogin.email_addresses = [EmailAddress(email=email, verified=True, primary=True)]
+
+    def is_email_verified(self, provider, email):
+        # Microsoft Entra is a trusted IdP; treat OIDC emails as verified so allauth
+        # lookup() can match existing accounts before auto-signup runs.
+        if provider.id == "openid_connect" and email:
+            return True
+        return super().is_email_verified(provider, email)
 
     def populate_user(self, request, sociallogin, data):
         user = super().populate_user(request, sociallogin, data)
@@ -121,8 +136,7 @@ class TembaSocialAccountAdapter(InviteAdapterMixin, DefaultSocialAccountAdapter)
         if not email:
             return
 
-        if not sociallogin.email_addresses:
-            sociallogin.email_addresses = [EmailAddress(email=email, verified=True, primary=True)]
+        self.ensure_verified_email_addresses(sociallogin, email)
 
         sociallogin_user = getattr(sociallogin, "user", None)
         if sociallogin_user is None or sociallogin_user.pk is None:
@@ -135,7 +149,12 @@ class TembaSocialAccountAdapter(InviteAdapterMixin, DefaultSocialAccountAdapter)
 @receiver(social_account_added)
 def update_user_profile_picture(request, sociallogin, **kwargs):  # pragma: no cover
     user = sociallogin.user
-    user.fetch_avatar(sociallogin.account.get_avatar_url())
+    try:
+        avatar_url = sociallogin.account.get_avatar_url()
+    except Exception:
+        return
+    if avatar_url:
+        user.fetch_avatar(avatar_url)
 
 
 class TembaMFAAdapter(DefaultMFAAdapter):

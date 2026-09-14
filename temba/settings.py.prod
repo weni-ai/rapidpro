@@ -135,6 +135,8 @@ SOCIALACCOUNT_PROVIDERS["openid_connect"]["APPS"] = [
         "settings": {
             "server_url": SOCIAL_OIDC_SERVER_URL,
             "token_auth_method": SOCIAL_OIDC_TOKEN_AUTH_METHOD,
+            "email_authentication": True,
+            "verified_email": True,
         },
     }
 ]
