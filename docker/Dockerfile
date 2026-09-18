@@ -119,6 +119,9 @@ COPY --chown=${PROJECT_USER}:${PROJECT_GROUP} . ${PROJECT_PATH}
 RUN mkdir -p "${PROJECT_CONF}" \
  && chown "${PROJECT_USER}:${PROJECT_GROUP}" "${PROJECT_CONF}"
 
+RUN ln -s "${PROJECT_PATH}/temba/settings.py.prod" \
+    "${PROJECT_PATH}/temba/settings.py"
+
 WORKDIR "${PROJECT_PATH}"
 
 USER "${PROJECT_USER}:${PROJECT_GROUP}"
