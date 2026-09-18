@@ -1,4 +1,6 @@
-FROM python:3.12-trixie as build-poetry
+# syntax=docker/dockerfile:1
+
+FROM python:3.12-trixie AS build-poetry
 
 WORKDIR /app
 
@@ -12,67 +14,120 @@ RUN python -m pip install -U "poetry>=2.1,<3" \
  && poetry add -n --lock $(cat pip-requires.txt) \
  && poetry export --without-hashes --with dev --output requirements.txt
 
-FROM python:3.12-trixie
 
-ARG COMPRESS_ENABLED
-ARG BRANDING_ENABLED
- 
-ARG RAPIDPRO_APPS_GIT_URL
-ARG RAPIDPRO_APPS_GIT_BRANCH
+FROM python:3.12-trixie AS base
+
+ARG PROJECT_USER=rapidpro
+ARG PROJECT_GROUP=rapidpro
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    PROJECT=rapidpro \
+    PROJECT_PATH=/app \
+    PROJECT_USER=${PROJECT_USER} \
+    PROJECT_GROUP=${PROJECT_GROUP} \
+    PROJECT_CONF=/app-conf \
+    NPM_CONFIG_PREFIX=/opt/npm-globals \
+    PATH="/opt/npm-globals/bin:${PATH}" \
+    APP_PORT=8001
+
+RUN addgroup --gid 1999 "${PROJECT_GROUP}" \
+ && useradd --system \
+    --create-home \
+    --home-dir "${PROJECT_PATH}" \
+    --uid 1999 \
+    --gid 1999 \
+    "${PROJECT_USER}"
+
+WORKDIR "${PROJECT_PATH}"
+
+RUN rm -f /etc/apt/apt.conf.d/docker-clean \
+ && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' \
+    > /etc/apt/apt.conf.d/keep-cache
 
 
-ENV PYTHONUNBUFFERED 1
-ENV DEBIAN_FRONTEND  noninteractive
+FROM base AS build
 
-ENV PROJECT           rapidpro
-ENV PROJECT_PATH      /app
-ENV PROJECT_USER      $PROJECT
-ENV PROJECT_GROUP     $PROJECT_USER
-ENV PROJECT_CONF      ${PROJECT_PATH}-conf
-ENV NPM_CONFIG_PREFIX /opt/npm-globals
-ENV PATH              "${NPM_CONFIG_PREFIX}/bin:${PATH}"
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
+ && apt-get install --no-install-recommends --no-install-suggests -y \
+    gcc \
+    bzip2 \
+    git \
+    curl \
+    libpq-dev \
+    gettext \
+    libgdal-dev \
+    python3-cffi \
+    python3-gdal \
+    vim
 
-RUN apt-get update \
- && apt-get install --no-install-recommends --no-install-suggests -y apt-utils \
- && apt-get install --no-install-recommends --no-install-suggests -y gcc bzip2 git curl nginx libpq-dev gettext \
-    libgdal-dev python3-cffi python3-gdal vim
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    curl -sL https://deb.nodesource.com/setup_20.x | bash - \
+ && apt-get update \
+ && apt-get install --no-install-recommends --no-install-suggests -y \
+    nodejs
 
-RUN curl -sL https://deb.nodesource.com/setup_20.x | bash - \
- && apt-get install --no-install-recommends --no-install-suggests -y nodejs
+COPY --from=build-poetry /app/requirements.txt /tmp/dep/requirements.txt
+COPY ./docker/pip-freeze.txt /tmp/dep/pip-freeze.txt
 
-RUN rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,mode=0755,target=/pip_cache,id=pip \
+    pip install \
+    --cache-dir /pip_cache \
+    --prefix=/install \
+    -r /tmp/dep/requirements.txt
 
-RUN useradd -Ums /bin/bash $PROJECT_USER \
- && usermod -aG adm $PROJECT_USER
+COPY ./package.json ./yarn.lock ./
 
-RUN mkdir $PROJECT_PATH \
- && mkdir $PROJECT_CONF \
- && mkdir $NPM_CONFIG_PREFIX \
- && chown -R $PROJECT_USER:$PROJECT_GROUP $PROJECT_PATH \
- && chown -R $PROJECT_USER:$PROJECT_GROUP $NPM_CONFIG_PREFIX
+RUN --mount=type=cache,id=npm,target=/npm_cache \
+    npm install --global --cache /npm_cache yarn less
 
-RUN rm /etc/nginx/sites-enabled/default
+RUN yarn install
 
-COPY --from=build-poetry /app/requirements.txt /tmp/dep/
-COPY ./docker/pip-freeze.txt /tmp/dep/
-COPY ./docker/nginx.site.conf /tmp/
-RUN pip install --no-cache-dir -r /tmp/dep/requirements.txt
 
-RUN cp /tmp/nginx.site.conf /etc/nginx/sites-available/$PROJECT.conf \
- && ln -s /etc/nginx/sites-available/$PROJECT.conf /etc/nginx/sites-enabled/$PROJECT.conf
+FROM base
 
-COPY . $PROJECT_PATH
-RUN chown -R $PROJECT_USER:$PROJECT_GROUP $PROJECT_PATH
+ARG RUNTIME_DEPS="\
+    gosu \
+    libpq-dev \
+    gettext \
+    libgdal-dev \
+    python3-cffi \
+    python3-gdal \
+    nodejs"
 
-WORKDIR $PROJECT_PATH
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
+ && apt-get install --no-install-recommends --no-install-suggests -y \
+    ${RUNTIME_DEPS} \
+ && rm -rf /usr/share/man /usr/share/doc
 
-RUN su $PROJECT_USER -c "npm install --global yarn"
-RUN su $PROJECT_USER -c "yarn global add less"
+COPY --from=build /install /usr/local
 
-RUN su $PROJECT_USER -c "ln -s $PROJECT_PATH/temba/settings.py.prod $PROJECT_PATH/temba/settings.py"
+COPY --from=build /opt/npm-globals /opt/npm-globals
 
-RUN su $PROJECT_USER -c "yarn install"
+COPY --from=build --chown=${PROJECT_USER}:${PROJECT_GROUP} \
+    ${PROJECT_PATH}/node_modules \
+    ${PROJECT_PATH}/node_modules
 
-EXPOSE 8000
+COPY --chown=${PROJECT_USER}:${PROJECT_GROUP} . ${PROJECT_PATH}
+
+RUN mkdir -p "${PROJECT_CONF}" \
+ && chown "${PROJECT_USER}:${PROJECT_GROUP}" "${PROJECT_CONF}"
+
+RUN ln -s "${PROJECT_PATH}/temba/settings.py.prod" \
+    "${PROJECT_PATH}/temba/settings.py"
+
+WORKDIR "${PROJECT_PATH}"
+
+USER "${PROJECT_USER}:${PROJECT_GROUP}"
+
 EXPOSE 8001
-ENTRYPOINT ["sh", "./docker/start"]
+
+ENTRYPOINT ["bash", "./docker/start"]
+
+CMD ["start"]

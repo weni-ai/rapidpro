@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from allauth.account.adapter import DefaultAccountAdapter
 from allauth.account.models import EmailAddress
@@ -50,6 +50,33 @@ class SSOAdapterTest(TembaTest):
     def test_extract_email_from_upn(self):
         sociallogin = self._make_sociallogin("", upn="user@unicef.org")
         self.assertEqual("user@unicef.org", TembaSocialAccountAdapter.extract_email(sociallogin))
+
+    def test_extract_email_from_email_addresses(self):
+        sociallogin = self._make_sociallogin("")
+        sociallogin.email_addresses = [EmailAddress(email="user@unicef.org", verified=False, primary=True)]
+        self.assertEqual("user@unicef.org", TembaSocialAccountAdapter.extract_email(sociallogin))
+
+    def test_is_email_verified_for_openid_connect(self):
+        provider = MagicMock()
+        provider.id = "openid_connect"
+        self.assertTrue(self.adapter.is_email_verified(provider, "user@unicef.org"))
+
+    def test_pre_social_login_replaces_unverified_email_addresses(self):
+        user = User.objects.create_user(
+            email="user@unicef.org",
+            password=self.default_password,
+            first_name="Test",
+            last_name="User",
+        )
+        EmailAddress.objects.filter(user=user).update(verified=False)
+
+        request = self._make_request()
+        sociallogin = self._make_sociallogin("user@unicef.org")
+        sociallogin.email_addresses = [EmailAddress(email="user@unicef.org", verified=False, primary=True)]
+
+        self._run_pre_social_login(request, sociallogin)
+
+        self.assertTrue(sociallogin.email_addresses[0].verified)
 
     def test_pre_social_login_marks_existing_unverified_email_as_verified(self):
         user = User.objects.create_user(
