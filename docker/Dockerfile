@@ -64,11 +64,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     python3-gdal \
     vim
 
-RUN curl -sL https://deb.nodesource.com/setup_20.x | bash -
-
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get install --no-install-recommends --no-install-suggests -y \
+    curl -sL https://deb.nodesource.com/setup_20.x | bash - \
+ && apt-get update \
+ && apt-get install --no-install-recommends --no-install-suggests -y \
     nodejs
 
 COPY --from=build-poetry /app/requirements.txt /tmp/dep/requirements.txt
