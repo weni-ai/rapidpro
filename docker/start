@@ -9,20 +9,16 @@ if [ ! -z "${BRANDING_FILES}" ]; then
     mv $PROJECT_PATH/$BRANDING_SLUG/$BRANDING_SLUG/ $PROJECT_PATH/static/brands/
 fi
 
-su $PROJECT_USER -c "python manage.py collectstatic --noinput"
+python manage.py collectstatic --noinput
+
 if [ "${COMPRESS_ENABLED}" = true ]; then
     python manage.py compress --extension=.haml,.html --force
 fi
 
-echo "Starting nginx..."
-service nginx start  # TODO: Update after change the user from root
-echo "Done!"
-
 echo "Starting server..."
-#gunicorn --access-logfile - --workers 3 --bind unix:/run/gunicorn.sock temba.wsgi:application
+
 exec gunicorn temba.wsgi:application \
   --name=$PROJECT \
-  --user=$PROJECT_USER \
   --chdir=$PROJECT_PATH \
   --bind=0.0.0.0:8001 \
   --timeout=120 \
