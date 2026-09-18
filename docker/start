@@ -9,19 +9,50 @@ if [ ! -z "${BRANDING_FILES}" ]; then
     mv $PROJECT_PATH/$BRANDING_SLUG/$BRANDING_SLUG/ $PROJECT_PATH/static/brands/
 fi
 
-python manage.py collectstatic --noinput
+do_gosu(){
+    user="$1"
+    shift 1
 
-if [ "${COMPRESS_ENABLED}" = true ]; then
-    python manage.py compress --extension=.haml,.html --force
+    is_exec="false"
+    if [ "$1" = "exec" ]; then
+        is_exec="true"
+        shift 1
+    fi
+
+    if [ "$(id -u)" = "0" ]; then
+        if [ "${is_exec}" = "true" ]; then
+            exec gosu "${user}" "$@"
+        else
+            gosu "${user}" "$@"
+            return "$?"
+        fi
+    else
+        if [ "${is_exec}" = "true" ]; then
+            exec "$@"
+        else
+            eval '"$@"'
+            return "$?"
+        fi
+    fi
+}
+
+if [[ "start" == "$1" ]]; then
+    do_gosu "${PROJECT_USER}:${PROJECT_GROUP}" python manage.py collectstatic --noinput
+
+    if [ "${COMPRESS_ENABLED}" = true ]; then
+        do_gosu "${PROJECT_USER}:${PROJECT_GROUP}" python manage.py compress --extension=.haml,.html --force
+    fi
+
+    echo "Starting server..."
+
+    do_gosu "${PROJECT_USER}:${PROJECT_GROUP}" exec gunicorn temba.wsgi:application \
+        --name="$PROJECT" \
+        --chdir="$PROJECT_PATH" \
+        --bind=0.0.0.0:8001 \
+        --timeout=120 \
+        --log-level=info \
+        --log-config="$PROJECT_PATH/docker/gunicorn/gunicorn-logging.conf" \
+        -c "$PROJECT_PATH/docker/gunicorn/gunicorn.conf.py"
 fi
 
-echo "Starting server..."
-
-exec gunicorn temba.wsgi:application \
-  --name=$PROJECT \
-  --chdir=$PROJECT_PATH \
-  --bind=0.0.0.0:8001 \
-  --timeout=120 \
-  --log-level=info \
-  --log-config=$PROJECT_PATH/docker/gunicorn/gunicorn-logging.conf \
-  -c $PROJECT_PATH/docker/gunicorn/gunicorn.conf.py
+exec "$@"

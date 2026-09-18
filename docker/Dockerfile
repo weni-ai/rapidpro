@@ -83,10 +83,7 @@ RUN --mount=type=cache,mode=0755,target=/pip_cache,id=pip \
 COPY ./package.json ./yarn.lock ./
 
 RUN --mount=type=cache,id=npm,target=/npm_cache \
-    npm install --global --cache /npm_cache yarn
-
-RUN --mount=type=cache,id=npm,target=/npm_cache \
-    npm install --global --cache /npm_cache less
+    npm install --global --cache /npm_cache yarn less
 
 RUN yarn install
 
@@ -94,6 +91,7 @@ RUN yarn install
 FROM base
 
 ARG RUNTIME_DEPS="\
+    gosu \
     libpq-dev \
     gettext \
     libgdal-dev \
