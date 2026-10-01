@@ -98,6 +98,9 @@ class URN:
 
     FACEBOOK_PATH_REF_PREFIX = "ref:"
 
+    # a WhatsApp business-scoped user id: two-letter country code, dot, 1-128 alphanumerics
+    BSUID_PATH_REGEX = r"^[A-Z]{2}\.[a-zA-Z0-9]{1,128}$"
+
     def __init__(self):  # pragma: no cover
         raise ValueError("Class shouldn't be instantiated")
 
@@ -135,17 +138,17 @@ class URN:
         """
         scheme, path, query, display = cls.to_parts(urn)
 
-        if scheme in [cls.TEL_SCHEME, cls.WHATSAPP_SCHEME] and formatted:
+        # tel URNs, and all-digit whatsapp URNs, are shown as friendly phone numbers; business-scoped
+        # whatsapp ids (not all digits) fall through and are shown as-is
+        if formatted and (scheme == cls.TEL_SCHEME or (scheme == cls.WHATSAPP_SCHEME and path.isdigit())):
             try:
-                # whatsapp scheme is E164 without a leading +, add it so parsing works
-                if scheme == cls.WHATSAPP_SCHEME:
-                    path = "+" + path
-
-                if path and path[0] == "+":
+                # whatsapp phone paths are E164 without a leading +, add it so parsing works
+                number = path if scheme == cls.TEL_SCHEME else "+" + path
+                if number and number[0] == "+":
                     phone_format = phonenumbers.PhoneNumberFormat.NATIONAL
                     if international:
                         phone_format = phonenumbers.PhoneNumberFormat.INTERNATIONAL
-                    return phonenumbers.format_number(phonenumbers.parse(path, None), phone_format)
+                    return phonenumbers.format_number(phonenumbers.parse(number, None), phone_format)
             except phonenumbers.NumberParseException:  # pragma: no cover
                 pass
 
@@ -204,9 +207,13 @@ class URN:
                 except ValueError:
                     return False
 
-        # telegram, whatsapp and instagram use integer ids
-        elif scheme in [cls.TELEGRAM_SCHEME, cls.WHATSAPP_SCHEME, cls.INSTAGRAM_SCHEME]:
+        # telegram and instagram use integer ids
+        elif scheme in [cls.TELEGRAM_SCHEME, cls.INSTAGRAM_SCHEME]:
             return regex.match(r"^[0-9]+$", path, regex.V0)
+
+        # whatsapp holds either a phone number (all digits) or a business-scoped user id
+        elif scheme == cls.WHATSAPP_SCHEME:
+            return regex.match(r"^[0-9]+$", path, regex.V0) or regex.match(cls.BSUID_PATH_REGEX, path, regex.V0)
 
         # validate Viber URNS look right (this is a guess)
         elif scheme == cls.VIBER_SCHEME:  # pragma: needs cover
@@ -249,6 +256,11 @@ class URN:
 
         elif scheme == cls.EMAIL_SCHEME:
             norm_path = norm_path.lower()
+
+        elif scheme == cls.WHATSAPP_SCHEME:
+            # business-scoped user ids have format CC.ALPHANUMERIC - uppercase the country code
+            if len(norm_path) > 2 and norm_path[2] == ".":
+                norm_path = norm_path[:2].upper() + norm_path[2:]
 
         return cls.from_parts(scheme, norm_path, query, display)
 

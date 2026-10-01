@@ -23,6 +23,12 @@ class ContactURNTest(TembaTest):
         )
         self.assertEqual(urn.get_display(self.org), "(206) 555-1212")
 
+        # a business-scoped whatsapp id (not all digits) is shown as-is (no phone formatting, no leading +)
+        urn = ContactURN.objects.create(
+            org=self.org, scheme="whatsapp", path="US.abcDEF123", identity="whatsapp:US.abcDEF123", priority=50
+        )
+        self.assertEqual(urn.get_display(self.org), "US.abcDEF123")
+
         # use path for other schemes
         urn = ContactURN.objects.create(
             org=self.org, scheme="twitter", path="billy_bob", identity="twitter:billy_bob", priority=50
@@ -70,8 +76,14 @@ class URNTest(TembaTest):
         self.assertTrue(URN.validate("instagram:12345678901234567"))
 
     def test_whatsapp_urn(self):
+        # whatsapp holds either a phone number (all digits) or a business-scoped id (CC.alphanumeric)
         self.assertTrue(URN.validate("whatsapp:12065551212"))
+        self.assertTrue(URN.validate("whatsapp:BR.1A2B3C4D5E6F7G8H9I0J"))
+        self.assertTrue(URN.validate("whatsapp:US.abcDEF123"))
         self.assertFalse(URN.validate("whatsapp:+12065551212"))
+        self.assertFalse(URN.validate("whatsapp:br.1A2B3C4D"))
+        self.assertFalse(URN.validate("whatsapp:BR.abc-123"))
+        self.assertFalse(URN.validate("whatsapp:US.ENT.11815799212886844830"))
 
     def test_freshchat_urn(self):
         self.assertTrue(
@@ -146,6 +158,11 @@ class URNTest(TembaTest):
 
         # email addresses
         self.assertEqual(URN.normalize("mailto: nAme@domAIN.cOm "), "mailto:name@domain.com")
+
+        # whatsapp - uppercase the two-letter country code prefix
+        self.assertEqual(URN.normalize("whatsapp:br.1A2B3C4D"), "whatsapp:BR.1A2B3C4D")
+        self.assertEqual(URN.normalize("whatsapp:BR.1A2B3C4D"), "whatsapp:BR.1A2B3C4D")
+        self.assertEqual(URN.normalize("whatsapp:12065551212"), "whatsapp:12065551212")
 
         # external ids are case sensitive
         self.assertEqual(URN.normalize("ext: eXterNAL123 "), "ext:eXterNAL123")
