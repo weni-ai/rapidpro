@@ -32,6 +32,7 @@ html {
   --color-secondary-light: rgba(var(--secondary-rgb), 0.3);
   --color-primary-dark: rgb(var(--primary-rgb));
   --color-secondary-dark: rgb(var(--secondary-rgb));
+  --color-message: #3c92dd;
   --color-focus: #a4cafe;
   --color-widget-bg: #fff;
   --color-widget-bg-focused: #fff;
@@ -60,6 +61,7 @@ html {
   --color-button-destructive: rgb(var(--error-rgb));
   --color-button-destructive-text: var(--color-text-light);
   --color-button-attention: #3ca96a;
+  --color-connectors: #95cbef;
   --color-label-primary: var(--color-primary-dark);
   --color-label-primary-text: var(--color-text-light);
   --color-label-secondary: var(--color-secondary-dark);
@@ -75,6 +77,7 @@ html {
   --color-warning-border: rgb(251, 246, 176);
   --color-error: rgb(var(--error-rgb));
   --color-alert: rgb(var(--error-rgb));
+  --color-success: #3ca96a;
   --icon-color: var(--text-color);
   --icon-color-circle: rgb(240, 240, 240);
   --icon-color-circle-hover: rgba(245, 245, 245, 0.8);
@@ -96,7 +99,6 @@ html {
   /* temba-select */
   --select-input-height: inherit;
   --temba-select-selected-font-size: 1em;
-  --temba-select-selected-padding: 0.6em 0.8em;
   --temba-select-selected-line-height: 1.2em;
   --options-block-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1),
     0 1px 2px 0 rgba(0, 0, 0, 0.03);

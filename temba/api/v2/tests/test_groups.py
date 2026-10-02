@@ -16,8 +16,8 @@ class GroupsEndpointTest(APITest):
         endpoint_url = reverse("api.v2.groups") + ".json"
 
         self.assertGetNotPermitted(endpoint_url, [None])
-        self.assertPostNotPermitted(endpoint_url, [None, self.user, self.agent])
-        self.assertDeleteNotPermitted(endpoint_url, [None, self.user, self.agent])
+        self.assertPostNotPermitted(endpoint_url, [None, self.agent])
+        self.assertDeleteNotPermitted(endpoint_url, [None, self.agent])
 
         frank = self.create_contact("Frank", urns=["facebook:123456"])
         self.create_field("isdeveloper", "Is developer")
@@ -38,7 +38,7 @@ class GroupsEndpointTest(APITest):
         # no filtering
         self.assertGet(
             endpoint_url,
-            [self.user, self.editor],
+            [self.editor, self.admin],
             results=[
                 {
                     "uuid": dynamic.uuid,
@@ -216,6 +216,6 @@ class GroupsEndpointTest(APITest):
             endpoint_url,
             self.admin,
             {"name": "Reporters"},
-            errors={None: "Cannot create object because workspace has reached limit of 10."},
+            errors={None: "Cannot create object because workspace has reached limit."},
             status=409,
         )

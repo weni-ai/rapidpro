@@ -40,8 +40,8 @@ class CallCRUDLTest(CRUDLTestMixin, TembaTest):
 
         # check query count
         self.login(self.admin)
-        with self.assertNumQueries(10):
+        with self.assertNumQueries(9):
             self.client.get(list_url)
 
         self.assertRequestDisallowed(list_url, [None, self.agent])
-        self.assertListFetch(list_url, [self.user, self.editor, self.admin], context_objects=[call2, call1])
+        self.assertListFetch(list_url, [self.editor, self.admin], context_objects=[call2, call1])

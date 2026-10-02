@@ -67,13 +67,13 @@ class DefinitionExportTest(TembaTest):
         self.assertEqual([child, parent], response.context["buckets"][0])
 
     def test_import_voice_flows_expiration_time(self):
-        # import file has invalid expires for an IVR flow so it should get the default (5)
+        # import file has invalid expires for an IVR flow so it should get clamped to the maximum (15)
         self.get_flow("ivr")
 
         self.assertEqual(Flow.objects.filter(flow_type=Flow.TYPE_VOICE).count(), 1)
         voice_flow = Flow.objects.get(flow_type=Flow.TYPE_VOICE)
         self.assertEqual(voice_flow.name, "IVR Flow")
-        self.assertEqual(voice_flow.expires_after_minutes, 5)
+        self.assertEqual(voice_flow.expires_after_minutes, 15)
 
     def test_import(self):
         create_url = reverse("orgs.orgimport_create")
@@ -141,25 +141,21 @@ class DefinitionExportTest(TembaTest):
             # trigger import failed, new flows that were added should get rolled back
             self.assertIsNone(Flow.objects.filter(org=self.org, name="New Mother").first())
 
-    def test_import_campaign_with_translations(self):
+    @patch("temba.mailroom.client.client.MailroomClient.campaign_schedule")
+    def test_import_campaign_with_translations(self, mock_schedule):
         self.import_file("test_flows/campaign_import_with_translations.json")
 
         campaign = Campaign.objects.all().first()
         event = campaign.events.all().first()
 
-        self.assertEqual(event.message["swa"], "hello")
-        self.assertEqual(event.message["eng"], "Hey")
+        self.assertEqual(event.translations["swa"], {"text": "hello"})
+        self.assertEqual(event.translations["eng"], {"text": "Hey"})
 
-        # base language for this flow is 'swa' despite our org languages being unset
-        self.assertEqual(event.flow.base_language, "swa")
+        # base language for this event is 'swa' despite our org languages being unset
+        self.assertEqual(event.base_language, "swa")
 
-        flow_def = event.flow.get_definition()
-        action = flow_def["nodes"][0]["actions"][0]
-
-        self.assertEqual(action["text"], "hello")
-        self.assertEqual(flow_def["localization"]["eng"][action["uuid"]]["text"], ["Hey"])
-
-    def test_reimport(self):
+    @patch("temba.mailroom.client.client.MailroomClient.campaign_schedule")
+    def test_reimport(self, mock_schedule):
         self.import_file("test_flows/survey_campaign.json")
 
         campaign = Campaign.objects.filter(is_active=True).last()
@@ -428,21 +424,12 @@ class DefinitionExportTest(TembaTest):
         )
         self.assertEqual(restored_trigger.pk, flow_trigger.pk)
 
-    def test_export_import(self):
+    @patch("temba.mailroom.client.client.MailroomClient.campaign_schedule")
+    def test_export_import(self, mock_schedule):
         def assert_object_counts():
-            # the regular flows
             self.assertEqual(
                 8,
-                Flow.objects.filter(
-                    org=self.org, is_active=True, is_archived=False, flow_type="M", is_system=False
-                ).count(),
-            )
-            # the campaign single message flows
-            self.assertEqual(
-                2,
-                Flow.objects.filter(
-                    org=self.org, is_active=True, is_archived=False, flow_type="B", is_system=True
-                ).count(),
+                Flow.objects.filter(org=self.org, is_active=True, is_archived=False, flow_type="M").count(),
             )
             self.assertEqual(1, Campaign.objects.filter(org=self.org, is_archived=False).count())
             self.assertEqual(
@@ -464,7 +451,7 @@ class DefinitionExportTest(TembaTest):
         self.import_file("test_flows/the_clinic.json")
 
         confirm_appointment = Flow.objects.get(name="Confirm Appointment")
-        self.assertEqual(10080, confirm_appointment.expires_after_minutes)
+        self.assertEqual(4320, confirm_appointment.expires_after_minutes)
 
         # check that the right number of objects successfully imported for our app
         assert_object_counts()
@@ -477,36 +464,16 @@ class DefinitionExportTest(TembaTest):
         trigger.flow = confirm_appointment
         trigger.save()
 
-        message_flow = (
-            Flow.objects.filter(flow_type="B", is_system=True, campaign_events__offset=-1).order_by("id").first()
-        )
-        message_flow.update_single_message_flow(self.admin, {"eng": "No reminders for you!"}, base_language="eng")
-
         # now reimport
         self.import_file("test_flows/the_clinic.json")
 
         # our flow should get reset from the import
         confirm_appointment.refresh_from_db()
-        self.assertEqual(10080, confirm_appointment.expires_after_minutes)
+        self.assertEqual(4320, confirm_appointment.expires_after_minutes)
 
         # same with our trigger
         trigger = Trigger.objects.filter(keywords=["patient"]).order_by("-created_on").first()
         self.assertEqual(Flow.objects.filter(name="Register Patient").first(), trigger.flow)
-
-        # our old campaign message flow should be inactive now
-        self.assertTrue(Flow.objects.filter(pk=message_flow.pk, is_active=False))
-
-        # find our new message flow, and see that the original message is there
-        message_flow = (
-            Flow.objects.filter(flow_type="B", is_system=True, campaign_events__offset=-1, is_active=True)
-            .order_by("id")
-            .first()
-        )
-
-        self.assertEqual(
-            message_flow.get_definition()["nodes"][0]["actions"][0]["text"],
-            "Hi there, just a quick reminder that you have an appointment at The Clinic at @(format_date(contact.next_appointment)). If you can't make it please call 1-888-THE-CLINIC.",
-        )
 
         # and we should have the same number of items as after the first import
         assert_object_counts()
@@ -581,15 +548,6 @@ class DefinitionExportTest(TembaTest):
         # finally let's try importing our exported file
         self.org.import_app(exported, self.admin, site="http://app.rapidpro.io")
         assert_object_counts()
-
-        message_flow = (
-            Flow.objects.filter(flow_type="B", is_system=True, campaign_events__offset=-1, is_active=True)
-            .order_by("id")
-            .first()
-        )
-
-        # make sure the base language is set to 'und', not 'eng'
-        self.assertEqual(message_flow.base_language, "und")
 
         # let's rename a flow and import our export again
         flow = Flow.objects.get(name="Confirm Appointment")

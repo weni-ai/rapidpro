@@ -36,14 +36,14 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
         # just a placeholder view for frontend components
         self.assertRequestDisallowed(list_url, [None])
         self.assertListFetch(
-            list_url, [self.user, self.editor, self.admin, self.agent, self.agent2, self.agent3], context_objects=[]
+            list_url, [self.editor, self.admin, self.agent, self.agent2, self.agent3], context_objects=[]
         )
 
         # link to our ticket within the All folder
         deep_link = f"{list_url}all/open/{ticket.uuid}/"
 
         response = self.assertListFetch(
-            deep_link, [self.user, self.editor, self.admin, self.agent, self.agent3], context_objects=[]
+            deep_link, [self.editor, self.admin, self.agent, self.agent3], context_objects=[]
         )
         self.assertEqual("All", response.context["title"])
         self.assertEqual("all", response.context["folder"])
@@ -53,9 +53,9 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual(str(ticket.uuid), response.context["nextUUID"])
 
         # we have a specific ticket so we should show context menu for it
-        self.assertContentMenu(deep_link, self.admin, ["Edit", "Add Note", "Start Flow"])
+        self.assertContentMenu(deep_link, self.admin, ["Add Note", "Start Flow"])
 
-        with self.assertNumQueries(11):
+        with self.assertNumQueries(10):
             self.client.get(deep_link)
 
         # try same request but for agent that can't see this ticket
@@ -71,7 +71,7 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertRequestDisallowed(deep_link, [self.agent2])  # doesn't have access to that topic
 
         response = self.assertListFetch(
-            deep_link, [self.user, self.editor, self.admin, self.agent, self.agent3], context_objects=[]
+            deep_link, [self.editor, self.admin, self.agent, self.agent3], context_objects=[]
         )
         self.assertEqual("Support", response.context["title"])
         self.assertEqual(str(self.support.uuid), response.context["folder"])
@@ -96,7 +96,7 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertEqual(str(ticket.uuid), response.context["uuid"])
 
         # and again we have a specific ticket so we should show context menu for it
-        self.assertContentMenu(deep_link, self.admin, ["Edit", "Add Note", "Start Flow"])
+        self.assertContentMenu(deep_link, self.admin, ["Add Note", "Start Flow"])
 
         # non-existent topic should give a 404
         bad_topic_link = f"{list_url}{uuid4()}/open/{ticket.uuid}/"
@@ -115,7 +115,7 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
         self.contact.current_flow = flow
         self.contact.save()
         deep_link = f"{list_url}all/open/{str(ticket.uuid)}/"
-        self.assertContentMenu(deep_link, self.admin, ["Edit", "Add Note"])
+        self.assertContentMenu(deep_link, self.admin, ["Add Note"])
 
         # closed our tickets don't get extra menu options
         ticket.status = Ticket.STATUS_CLOSED
@@ -128,7 +128,7 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
 
         update_url = reverse("tickets.ticket_update", args=[ticket.uuid])
 
-        self.assertRequestDisallowed(update_url, [None, self.user, self.admin2])
+        self.assertRequestDisallowed(update_url, [None, self.admin2])
         self.assertUpdateFetch(update_url, [self.agent, self.editor, self.admin], form_fields=["topic"])
 
         user_topic = Topic.objects.create(org=self.org, name="Hot Topic", created_by=self.admin, modified_by=self.admin)
@@ -138,6 +138,21 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
 
         ticket.refresh_from_db()
         self.assertEqual(user_topic, ticket.topic)
+
+    def test_analytics(self):
+        analytics_url = reverse("tickets.ticket_analytics")
+
+        self.assertRequestDisallowed(analytics_url, [None, self.agent])
+
+        # should be able to fetch analytics
+        response = self.assertReadFetch(analytics_url, [self.editor, self.admin])
+        self.assertEqual(200, response.status_code)
+        self.assertContains(response, "Analytics")
+        self.assertContains(response, "Tickets Opened")
+
+        # should not be able to post to it
+        response = self.client.post(analytics_url)
+        self.assertEqual(405, response.status_code)
 
     def test_menu(self):
         menu_url = reverse("tickets.ticket_menu")
@@ -156,6 +171,7 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
                 "Unassigned (1)",
                 "All (3)",
                 "Shortcuts (0)",
+                "Analytics",
                 "Export",
                 "New Topic",
                 "General (2)",
@@ -229,7 +245,7 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
         self.create_outgoing_msg(contact3, "Yes", created_by=self.agent)
 
         # fetching open folder returns all open tickets
-        with self.assertNumQueries(12):
+        with self.assertNumQueries(11):
             response = self.client.get(open_url)
 
         assert_tickets(response, [c2_t1, c1_t2, c1_t1])
@@ -241,12 +257,12 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
                 {
                     "uuid": str(contact2.uuid),
                     "name": "Frank",
-                    "last_seen_on": matchers.ISODate(),
+                    "last_seen_on": matchers.ISODatetime(),
                     "last_msg": {
                         "text": "Hello?",
                         "direction": "I",
                         "type": "T",
-                        "created_on": matchers.ISODate(),
+                        "created_on": matchers.ISODatetime(),
                         "sender": None,
                         "attachments": [],
                     },
@@ -254,19 +270,19 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
                         "uuid": str(contact2.tickets.filter(status="O").first().uuid),
                         "assignee": None,
                         "topic": {"uuid": matchers.UUID4String(), "name": "General"},
-                        "last_activity_on": matchers.ISODate(),
+                        "last_activity_on": matchers.ISODatetime(),
                         "closed_on": None,
                     },
                 },
                 {
                     "uuid": str(contact1.uuid),
                     "name": "Joe",
-                    "last_seen_on": matchers.ISODate(),
+                    "last_seen_on": matchers.ISODatetime(),
                     "last_msg": {
                         "text": "We can help",
                         "direction": "O",
                         "type": "T",
-                        "created_on": matchers.ISODate(),
+                        "created_on": matchers.ISODatetime(),
                         "sender": {"id": self.admin.id, "email": "admin@textit.com"},
                         "attachments": [],
                     },
@@ -274,19 +290,19 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
                         "uuid": str(joes_open_tickets[0].uuid),
                         "assignee": None,
                         "topic": {"uuid": matchers.UUID4String(), "name": "General"},
-                        "last_activity_on": matchers.ISODate(),
+                        "last_activity_on": matchers.ISODatetime(),
                         "closed_on": None,
                     },
                 },
                 {
                     "uuid": str(contact1.uuid),
                     "name": "Joe",
-                    "last_seen_on": matchers.ISODate(),
+                    "last_seen_on": matchers.ISODatetime(),
                     "last_msg": {
                         "text": "We can help",
                         "direction": "O",
                         "type": "T",
-                        "created_on": matchers.ISODate(),
+                        "created_on": matchers.ISODatetime(),
                         "sender": {"id": self.admin.id, "email": "admin@textit.com"},
                         "attachments": [],
                     },
@@ -299,7 +315,7 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
                             "email": "admin@textit.com",
                         },
                         "topic": {"uuid": matchers.UUID4String(), "name": "General"},
-                        "last_activity_on": matchers.ISODate(),
+                        "last_activity_on": matchers.ISODatetime(),
                         "closed_on": None,
                     },
                 },
@@ -337,12 +353,12 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
             {
                 "uuid": str(contact3.uuid),
                 "name": "Anne",
-                "last_seen_on": matchers.ISODate(),
+                "last_seen_on": matchers.ISODatetime(),
                 "last_msg": {
                     "text": "Yes",
                     "direction": "O",
                     "type": "T",
-                    "created_on": matchers.ISODate(),
+                    "created_on": matchers.ISODatetime(),
                     "sender": {"id": self.agent.id, "email": "agent@textit.com"},
                     "attachments": [],
                 },
@@ -350,8 +366,8 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
                     "uuid": str(c3_t2.uuid),
                     "assignee": None,
                     "topic": {"uuid": matchers.UUID4String(), "name": "General"},
-                    "last_activity_on": matchers.ISODate(),
-                    "closed_on": matchers.ISODate(),
+                    "last_activity_on": matchers.ISODatetime(),
+                    "closed_on": matchers.ISODatetime(),
                 },
             },
             response.json()["results"][0],
@@ -379,7 +395,7 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
 
         update_url = reverse("tickets.ticket_note", args=[ticket.uuid])
 
-        self.assertRequestDisallowed(update_url, [None, self.user, self.admin2])
+        self.assertRequestDisallowed(update_url, [None, self.admin2])
         self.assertUpdateFetch(update_url, [self.agent, self.editor, self.admin], form_fields=["note"])
 
         self.assertUpdateSubmit(
@@ -395,6 +411,92 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
         )
 
         self.assertEqual(1, ticket.events.filter(event_type=TicketEvent.TYPE_NOTE_ADDED).count())
+
+    def test_opened_chart(self):
+        opened_url = reverse("tickets.ticket_chart", args=["opened"])
+
+        cats = Topic.create(self.org, self.admin, "Cats")
+        dogs = Topic.create(self.org, self.admin, "Dogs")
+
+        self.login(self.admin)
+
+        response = self.client.get(opened_url + "?since=2024-03-01&until=2024-05-01")
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            {
+                "period": ["2024-03-01", "2024-05-01"],
+                "data": {"datasets": [], "labels": []},
+            },
+            response.json(),
+        )
+
+        self.org.daily_counts.create(day=date(2024, 4, 25), scope="tickets:opened:0", count=1)
+        self.org.daily_counts.create(day=date(2024, 4, 25), scope=f"tickets:opened:{cats.id}", count=3)
+        self.org.daily_counts.create(day=date(2024, 4, 25), scope=f"tickets:opened:{dogs.id}", count=2)
+        self.org.daily_counts.create(day=date(2024, 4, 26), scope=f"tickets:opened:{cats.id}", count=5)
+        self.org.daily_counts.create(day=date(2024, 4, 26), scope=f"tickets:opened:{dogs.id}", count=4)
+        self.org.daily_counts.create(day=date(2024, 5, 3), scope="tickets:opened:0", count=2)  # out of period
+
+        response = self.client.get(opened_url + "?since=2024-03-01&until=2024-05-01")
+        self.assertEqual(
+            {
+                "period": ["2024-03-01", "2024-05-01"],
+                "data": {
+                    "labels": ["2024-04-25", "2024-04-26"],
+                    "datasets": [
+                        {"label": "<Unknown>", "data": [1, 0]},
+                        {"label": "Cats", "data": [3, 5]},
+                        {"label": "Dogs", "data": [2, 4]},
+                    ],
+                },
+            },
+            response.json(),
+        )
+
+        # if date param not given or invalid, period defaults to last 90 days
+        response = self.client.get(opened_url + "?since=xyz")
+        self.assertEqual(
+            {
+                "period": [matchers.ISODate(), matchers.ISODate()],
+                "data": {"datasets": [], "labels": []},
+            },
+            response.json(),
+        )
+
+    def test_resptime_chart(self):
+        opened_url = reverse("tickets.ticket_chart", args=["resptime"])
+
+        self.login(self.admin)
+
+        response = self.client.get(opened_url + "?since=2024-03-01&until=2024-05-01")
+        self.assertEqual(200, response.status_code)
+
+        self.assertEqual(
+            {
+                "period": ["2024-03-01", "2024-05-01"],
+                "data": {"labels": [], "datasets": [{"label": "Response Time", "data": []}]},
+            },
+            response.json(),
+        )
+
+        self.org.daily_counts.create(day=date(2024, 4, 25), scope="ticketresptime:total", count=1000)
+        self.org.daily_counts.create(day=date(2024, 4, 25), scope="ticketresptime:count", count=5)
+        self.org.daily_counts.create(day=date(2024, 4, 26), scope="ticketresptime:total", count=500)
+        self.org.daily_counts.create(day=date(2024, 4, 26), scope="ticketresptime:count", count=2)
+        self.org.daily_counts.create(day=date(2024, 5, 3), scope="ticketresptime:total", count=100)  # out of period
+        self.org.daily_counts.create(day=date(2024, 5, 3), scope="ticketresptime:count", count=3)
+
+        response = self.client.get(opened_url + "?since=2024-03-01&until=2024-05-01")
+        self.assertEqual(
+            {
+                "period": ["2024-03-01", "2024-05-01"],
+                "data": {
+                    "labels": ["2024-04-25", "2024-04-26"],
+                    "datasets": [{"label": "Response Time", "data": [200, 250]}],
+                },
+            },
+            response.json(),
+        )
 
     def test_export_stats(self):
         export_url = reverse("tickets.ticket_export_stats")
@@ -416,7 +518,7 @@ class TicketCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertRequestDisallowed(export_url, [None, self.agent])
         response = self.assertUpdateFetch(
             export_url,
-            [self.user, self.editor, self.admin],
+            [self.editor, self.admin],
             form_fields=("start_date", "end_date", "with_fields", "with_groups"),
         )
         self.assertNotContains(response, "already an export in progress")

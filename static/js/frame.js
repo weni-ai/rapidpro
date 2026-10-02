@@ -274,6 +274,7 @@ function fetchAjax(url, options, fullPage = false) {
   var controller = new AbortController();
   pendingRequests.push(controller);
   options['signal'] = controller.signal;
+  options['redirect'] = 'follow';
   var toFetch = url;
 
   return fetch(toFetch, options)
@@ -478,7 +479,7 @@ function showModax(header, endpoint, modaxOptions) {
 }
 
 function handleWorkspaceChanged(orgId) {
-  spaPost('/org/choose/', { queryString: 'organization=' + orgId });
+  posterize(`/org/choose/?organization=${orgId}`);
 }
 
 document.addEventListener('temba-redirected', function (event) {

@@ -8,13 +8,13 @@ from django.urls import reverse
 from django.utils import timezone
 
 from temba.airtime.models import AirtimeTransfer
-from temba.campaigns.models import EventFire
 from temba.channels.models import Channel, ChannelEvent
 from temba.flows.models import FlowExit, FlowRun
 from temba.ivr.models import Call
 from temba.msgs.models import Msg, OptIn
-from temba.orgs.models import Org, User
+from temba.orgs.models import Org
 from temba.tickets.models import Ticket, TicketEvent, Topic
+from temba.users.models import User
 
 
 class Event:
@@ -85,7 +85,11 @@ class Event:
         logs_url = None
         if obj.channel and obj_age < settings.RETENTION_PERIODS["channellog"]:
             logs_url = _url_for_user(
-                org, user, "channels.channellog_msg", args=[obj.channel.uuid, obj.id], perm="channels.channellog_read"
+                org,
+                user,
+                "channels.channel_logs_read",
+                args=[obj.channel.uuid, "msg", obj.id],
+                perm="channels.channel_logs",
             )
 
         if obj.direction == Msg.DIRECTION_IN:
@@ -150,8 +154,9 @@ class Event:
 
     @classmethod
     def from_flow_run(cls, org: Org, user: User, obj: FlowRun) -> dict:
-        session = obj.session
-        logs_url = _url_for_user(org, user, "flows.flowsession_json", args=[session.uuid]) if session else None
+        logs_url = (
+            _url_for_user(org, user, "flows.flowsession_json", args=[obj.session_uuid]) if obj.session_uuid else None
+        )
 
         return {
             "type": cls.TYPE_FLOW_ENTERED,
@@ -177,7 +182,11 @@ class Event:
         logs_url = None
         if obj_age < settings.RETENTION_PERIODS["channellog"]:
             logs_url = _url_for_user(
-                org, user, "channels.channellog_call", args=[obj.channel.uuid, obj.id], perm="channels.channellog_read"
+                org,
+                user,
+                "channels.channel_logs_read",
+                args=[obj.channel.uuid, "call", obj.id],
+                perm="channels.channel_logs",
             )
 
         return {
@@ -224,24 +233,6 @@ class Event:
         }
 
     @classmethod
-    def from_event_fire(cls, org: Org, user: User, obj: EventFire) -> dict:
-        return {
-            "type": cls.TYPE_CAMPAIGN_FIRED,
-            "created_on": get_event_time(obj).isoformat(),
-            "campaign": {
-                "uuid": obj.event.campaign.uuid,
-                "id": obj.event.campaign.id,
-                "name": obj.event.campaign.name,
-            },
-            "campaign_event": {
-                "id": obj.event.id,
-                "offset_display": obj.event.offset_display,
-                "relative_to": {"key": obj.event.relative_to.key, "name": obj.event.relative_to.name},
-            },
-            "fired_result": obj.fired_result,
-        }
-
-    @classmethod
     def from_channel_event(cls, org: Org, user: User, obj: ChannelEvent) -> dict:
         extra = obj.extra or {}
         ch_event = {"type": obj.event_type, "channel": _channel(obj.channel)}
@@ -276,12 +267,10 @@ def _msg_in(obj) -> dict:
 
 
 def _msg_out(obj) -> dict:
-    metadata = obj.metadata or {}
-    quick_replies = metadata.get("quick_replies", [])
     d = _base_msg(obj)
 
-    if quick_replies:
-        d["quick_replies"] = quick_replies
+    if obj.quick_replies:
+        d["quick_replies"] = obj.quick_replies
 
     return d
 
@@ -321,7 +310,6 @@ def _optin(optin: OptIn) -> dict:
 event_renderers = {
     AirtimeTransfer: Event.from_airtime_transfer,
     ChannelEvent: Event.from_channel_event,
-    EventFire: Event.from_event_fire,
     FlowExit: Event.from_flow_exit,
     FlowRun: Event.from_flow_run,
     Call: Event.from_ivr_call,
@@ -334,7 +322,6 @@ event_time = defaultdict(lambda: lambda i: i.created_on)
 event_time.update(
     {
         dict: lambda e: iso8601.parse_date(e["created_on"]),
-        EventFire: lambda e: e.fired,
         FlowExit: lambda e: e.run.exited_on,
         Ticket: lambda e: e.closed_on,
     },

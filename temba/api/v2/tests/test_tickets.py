@@ -34,7 +34,7 @@ class TicketsEndpointTest(APITest):
         # no filtering
         self.assertGet(
             endpoint_url,
-            [self.user, self.editor, self.admin, self.agent],
+            [self.editor, self.admin, self.agent],
             results=[
                 {
                     "uuid": str(ticket3.uuid),

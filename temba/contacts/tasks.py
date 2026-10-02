@@ -3,7 +3,7 @@ import logging
 
 from celery import shared_task
 
-from temba.orgs.models import User
+from temba.users.models import User
 from temba.utils.crons import cron_task
 
 from .models import Contact, ContactGroup, ContactGroupCount, ContactImport

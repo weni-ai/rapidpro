@@ -18,7 +18,7 @@ class TeamCRUDLTest(TembaTest, CRUDLTestMixin):
         self.org.features = [Org.FEATURE_TEAMS]
         self.org.save(update_fields=("features",))
 
-        self.assertRequestDisallowed(create_url, [None, self.agent, self.user, self.editor])
+        self.assertRequestDisallowed(create_url, [None, self.agent, self.editor])
 
         self.assertCreateFetch(create_url, [self.admin], form_fields=("name", "topics"))
 
@@ -38,7 +38,7 @@ class TeamCRUDLTest(TembaTest, CRUDLTestMixin):
             create_url,
             self.admin,
             {"name": "all topics", "topics": []},
-            form_errors={"name": "Team with this name already exists."},
+            form_errors={"name": "Must be unique."},
         )
 
         # try to create with name that has invalid characters
@@ -76,15 +76,9 @@ class TeamCRUDLTest(TembaTest, CRUDLTestMixin):
         team = Team.objects.get(name="Sales")
         self.assertEqual({sales}, set(team.topics.all()))
 
-        # try to create another now that we've reached the limit
-        self.assertCreateSubmit(
-            create_url,
-            self.admin,
-            {"name": "Training", "topics": [sales.id]},
-            form_errors={
-                "__all__": "This workspace has reached its limit of 1 teams. You must delete existing ones before you can create new ones."
-            },
-        )
+        # check we get the limit warning when we've reached the limit
+        response = self.requestView(create_url, self.admin)
+        self.assertContains(response, "You have reached the per-workspace limit")
 
     def test_update(self):
         sales = Topic.create(self.org, self.admin, "Sales")
@@ -93,7 +87,7 @@ class TeamCRUDLTest(TembaTest, CRUDLTestMixin):
 
         update_url = reverse("tickets.team_update", args=[team.id])
 
-        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.editor, self.admin2])
+        self.assertRequestDisallowed(update_url, [None, self.agent, self.editor, self.admin2])
 
         self.assertUpdateFetch(update_url, [self.admin], form_fields=["name", "topics"])
 
@@ -102,7 +96,7 @@ class TeamCRUDLTest(TembaTest, CRUDLTestMixin):
             update_url,
             self.admin,
             {"name": "all topics"},
-            form_errors={"name": "Team with this name already exists."},
+            form_errors={"name": "Must be unique."},
             object_unchanged=team,
         )
 
@@ -128,7 +122,7 @@ class TeamCRUDLTest(TembaTest, CRUDLTestMixin):
 
         delete_url = reverse("tickets.team_delete", args=[team1.id])
 
-        self.assertRequestDisallowed(delete_url, [None, self.user, self.agent, self.editor, self.admin2])
+        self.assertRequestDisallowed(delete_url, [None, self.agent, self.editor, self.admin2])
 
         # deleting blocked for team with agents
         response = self.assertDeleteFetch(delete_url, [self.admin])
@@ -175,3 +169,9 @@ class TeamCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertRequestDisallowed(list_url, [None, self.agent, self.editor])
 
         self.assertListFetch(list_url, [self.admin], context_objects=[self.org.default_ticket_team, team2, team1])
+        self.assertContentMenu(list_url, self.admin, ["New"])
+
+        with override_settings(ORG_LIMIT_DEFAULTS={"teams": 2}):
+            response = self.assertListFetch(list_url, [self.admin], context_object_count=3)
+            self.assertContains(response, "You have reached the per-workspace limit")
+            self.assertContentMenu(list_url, self.admin, [])

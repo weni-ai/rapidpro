@@ -12,7 +12,7 @@ class OptInEndpointTest(APITest):
         endpoint_url = reverse("api.v2.optins") + ".json"
 
         self.assertGetNotPermitted(endpoint_url, [None, self.agent])
-        self.assertPostNotPermitted(endpoint_url, [None, self.agent, self.user])
+        self.assertPostNotPermitted(endpoint_url, [None, self.agent])
         self.assertDeleteNotAllowed(endpoint_url)
 
         # create some optins
@@ -23,7 +23,7 @@ class OptInEndpointTest(APITest):
         # no filtering
         self.assertGet(
             endpoint_url,
-            [self.user, self.editor],
+            [self.editor, self.admin],
             results=[
                 {
                     "uuid": str(offers.uuid),
@@ -51,7 +51,7 @@ class OptInEndpointTest(APITest):
             {
                 "uuid": str(alerts.uuid),
                 "name": "Alerts",
-                "created_on": matchers.ISODate(),
+                "created_on": matchers.ISODatetime(),
             },
         )
 

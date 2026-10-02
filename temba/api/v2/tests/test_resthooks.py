@@ -12,15 +12,15 @@ class ResthooksEndpointTest(APITest):
         subs_url = reverse("api.v2.resthook_subscribers") + ".json"
         events_url = reverse("api.v2.resthook_events") + ".json"
 
-        self.assertGetNotPermitted(hooks_url, [None, self.agent, self.user])
+        self.assertGetNotPermitted(hooks_url, [None, self.agent])
         self.assertPostNotAllowed(hooks_url)
         self.assertDeleteNotAllowed(hooks_url)
 
-        self.assertGetNotPermitted(subs_url, [None, self.agent, self.user])
-        self.assertPostNotPermitted(subs_url, [None, self.agent, self.user])
-        self.assertDeleteNotPermitted(subs_url, [None, self.agent, self.user])
+        self.assertGetNotPermitted(subs_url, [None, self.agent])
+        self.assertPostNotPermitted(subs_url, [None, self.agent])
+        self.assertDeleteNotPermitted(subs_url, [None, self.agent])
 
-        self.assertGetNotPermitted(events_url, [None, self.agent, self.user])
+        self.assertGetNotPermitted(events_url, [None, self.agent])
         self.assertPostNotAllowed(events_url)
         self.assertDeleteNotAllowed(events_url)
 

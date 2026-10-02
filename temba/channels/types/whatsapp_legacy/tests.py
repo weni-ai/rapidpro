@@ -86,9 +86,11 @@ class WhatsAppLegacyTypeTest(CRUDLTestMixin, TembaTest):
         #         self.assertContains(response, "check user id and access token")
 
         # then success
-        with patch("requests.post") as mock_post, patch("requests.get") as mock_get, patch(
-            "requests.patch"
-        ) as mock_patch:
+        with (
+            patch("requests.post") as mock_post,
+            patch("requests.get") as mock_get,
+            patch("requests.patch") as mock_patch,
+        ):
             mock_post.return_value = MockResponse(200, '{"users": [{"token": "abc123"}]}')
             mock_get.return_value = MockResponse(200, '{"data": []}')
             mock_patch.return_value = MockResponse(200, '{"data": []}')
@@ -208,9 +210,11 @@ class WhatsAppLegacyTypeTest(CRUDLTestMixin, TembaTest):
         # will fail with invalid phone number
         response = self.client.post(url, post_data)
 
-        with patch("requests.post") as mock_post, patch("requests.get") as mock_get, patch(
-            "requests.patch"
-        ) as mock_patch:
+        with (
+            patch("requests.post") as mock_post,
+            patch("requests.get") as mock_get,
+            patch("requests.patch") as mock_patch,
+        ):
             mock_post.return_value = MockResponse(200, '{"users": [{"token": "abc123"}]}')
             mock_get.return_value = MockResponse(200, '{"data": []}')
             mock_patch.return_value = MockResponse(200, '{"data": []}')
@@ -220,9 +224,11 @@ class WhatsAppLegacyTypeTest(CRUDLTestMixin, TembaTest):
 
         channel = Channel.objects.get()
 
-        with patch("requests.post") as mock_post, patch("requests.get") as mock_get, patch(
-            "requests.patch"
-        ) as mock_patch:
+        with (
+            patch("requests.post") as mock_post,
+            patch("requests.get") as mock_get,
+            patch("requests.patch") as mock_patch,
+        ):
             mock_post.return_value = MockResponse(200, '{"users": [{"token": "abc123"}]}')
             mock_get.return_value = MockResponse(200, '{"data": []}')
             mock_patch.return_value = MockResponse(200, '{"data": []}')
@@ -234,9 +240,11 @@ class WhatsAppLegacyTypeTest(CRUDLTestMixin, TembaTest):
         channel.org = self.org2
         channel.save()
 
-        with patch("requests.post") as mock_post, patch("requests.get") as mock_get, patch(
-            "requests.patch"
-        ) as mock_patch:
+        with (
+            patch("requests.post") as mock_post,
+            patch("requests.get") as mock_get,
+            patch("requests.patch") as mock_patch,
+        ):
             mock_post.return_value = MockResponse(200, '{"users": [{"token": "abc123"}]}')
             mock_get.return_value = MockResponse(200, '{"data": []}')
             mock_patch.return_value = MockResponse(200, '{"data": []}')
@@ -408,9 +416,11 @@ class WhatsAppLegacyTypeTest(CRUDLTestMixin, TembaTest):
             self.assertContains(response, "check user id and access token")
 
         # success claim
-        with patch("requests.post") as mock_post, patch("requests.get") as mock_get, patch(
-            "requests.patch"
-        ) as mock_patch:
+        with (
+            patch("requests.post") as mock_post,
+            patch("requests.get") as mock_get,
+            patch("requests.patch") as mock_patch,
+        ):
             mock_post.return_value = MockResponse(200, '{"users": [{"token": "abc123"}]}')
             mock_get.return_value = MockResponse(200, '{"data": []}')
             mock_patch.return_value = MockResponse(200, '{"data": []}')

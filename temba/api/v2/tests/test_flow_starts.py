@@ -14,7 +14,7 @@ class FlowStartsEndpointTest(APITest):
         endpoint_url = reverse("api.v2.flow_starts") + ".json"
 
         self.assertGetNotPermitted(endpoint_url, [None, self.agent])
-        self.assertPostNotPermitted(endpoint_url, [None, self.agent, self.user])
+        self.assertPostNotPermitted(endpoint_url, [None, self.agent])
         self.assertDeleteNotAllowed(endpoint_url)
 
         flow = self.create_flow("Test")
@@ -161,7 +161,7 @@ class FlowStartsEndpointTest(APITest):
             errors={"params": "Must be a valid JSON object"},
         )
 
-        # a list is valid JSON, but extra has to be a dict
+        # a list is valid JSON, but params has to be a dict
         self.assertPost(
             endpoint_url,
             self.admin,
@@ -174,6 +174,21 @@ class FlowStartsEndpointTest(APITest):
                 "params": [1],
             },
             errors={"params": "Must be a valid JSON object"},
+        )
+
+        # params can be at most 10K characters encoded
+        self.assertPost(
+            endpoint_url,
+            self.admin,
+            {
+                "urns": ["tel:+12067791212"],
+                "contacts": [joe.uuid],
+                "groups": [hans_group.uuid],
+                "flow": flow.uuid,
+                "restart_participants": False,
+                "params": {"foo": "a" * 10000},
+            },
+            errors={"params": "Cannot exceed 10,000 characters encoded."},
         )
 
         # invalid URN
@@ -226,7 +241,7 @@ class FlowStartsEndpointTest(APITest):
         # check fetching with no filtering
         response = self.assertGet(
             endpoint_url,
-            [self.user, self.editor],
+            [self.editor, self.admin],
             results=[start4, start3, start2, start1],
             num_queries=self.BASE_SESSION_QUERIES + 5,
         )
@@ -254,7 +269,9 @@ class FlowStartsEndpointTest(APITest):
         self.assertGet(endpoint_url + f"?uuid={start2.uuid}", [self.admin], results=[start2])
 
         # check filtering by in invalid UUID
-        self.assertGet(endpoint_url + "?uuid=xyz", [self.editor], errors={None: "Value for uuid must be a valid UUID"})
+        self.assertGet(
+            endpoint_url + "?uuid=xyz", [self.editor], errors={None: "Param 'uuid': xyz is not a valid UUID."}
+        )
 
         response = self.assertPost(
             endpoint_url,

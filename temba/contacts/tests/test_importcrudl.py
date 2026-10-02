@@ -11,7 +11,7 @@ class ContactImportCRUDLTest(TembaTest, CRUDLTestMixin):
     def test_create_and_preview(self):
         create_url = reverse("contacts.contactimport_create")
 
-        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
         self.assertCreateFetch(create_url, [self.editor, self.admin], form_fields=["file"])
 
         # try posting with nothing
@@ -84,7 +84,7 @@ class ContactImportCRUDLTest(TembaTest, CRUDLTestMixin):
             response = self.client.post(
                 preview_url, {"add_to_group": True, "group_mode": "N", "new_group_name": "Import"}
             )
-            self.assertFormError(response.context["form"], None, "This workspace has reached its limit of 2 groups.")
+            self.assertFormError(response.context["form"], None, "This workspace has reached its limit of groups.")
 
         # finally create new group...
         response = self.client.post(preview_url, {"add_to_group": True, "group_mode": "N", "new_group_name": "Import"})
@@ -142,7 +142,7 @@ class ContactImportCRUDLTest(TembaTest, CRUDLTestMixin):
         imp = self.create_contact_import("media/test_imports/extra_fields_and_group.xlsx")
         preview_url = reverse("contacts.contactimport_preview", args=[imp.id])
 
-        self.assertRequestDisallowed(preview_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(preview_url, [None, self.agent, self.admin2])
 
         # columns 4 and 5 are a non-existent field so will have controls to create a new one
         self.assertUpdateFetch(
@@ -270,4 +270,4 @@ class ContactImportCRUDLTest(TembaTest, CRUDLTestMixin):
         read_url = reverse("contacts.contactimport_read", args=[imp.id])
 
         self.assertRequestDisallowed(read_url, [None, self.agent, self.admin2])
-        self.assertReadFetch(read_url, [self.user, self.editor, self.admin], context_object=imp)
+        self.assertReadFetch(read_url, [self.editor, self.admin], context_object=imp)

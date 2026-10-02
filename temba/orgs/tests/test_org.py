@@ -8,13 +8,15 @@ from django.test.utils import override_settings
 from django.urls import reverse
 from django.utils import timezone
 
+from temba.ai.models import LLM
+from temba.ai.types.openai.type import OpenAIType
 from temba.api.models import Resthook, WebHookEvent
 from temba.archives.models import Archive
-from temba.campaigns.models import Campaign, CampaignEvent, EventFire
-from temba.channels.models import ChannelLog, SyncEvent
+from temba.campaigns.models import Campaign, CampaignEvent
+from temba.channels.models import SyncEvent
 from temba.classifiers.models import Classifier
 from temba.classifiers.types.wit import WitType
-from temba.contacts.models import ContactExport, ContactField, ContactImport, ContactImportBatch
+from temba.contacts.models import ContactExport, ContactField, ContactFire, ContactImport, ContactImportBatch
 from temba.flows.models import FlowLabel, FlowRun, FlowSession, FlowStart, FlowStartCount, ResultsExport
 from temba.globals.models import Global
 from temba.locations.models import AdminBoundary
@@ -61,25 +63,16 @@ class OrgTest(TembaTest):
             [self.admin, self.editor, admin3],
             list(self.org.get_users(roles=[OrgRole.ADMINISTRATOR, OrgRole.EDITOR]).order_by("id")),
         )
-        self.assertEqual([self.user], list(self.org.get_users(roles=[OrgRole.VIEWER]).order_by("id")))
         self.assertEqual(
             [self.admin, self.admin2],
             list(self.org2.get_users(roles=[OrgRole.ADMINISTRATOR, OrgRole.EDITOR]).order_by("id")),
-        )
-
-        self.assertEqual(
-            [self.admin, self.editor, self.agent, admin3],
-            list(self.org.get_users(with_perm="tickets.ticket_assignee").order_by("id")),
-        )
-        self.assertEqual(
-            [self.admin, self.admin2], list(self.org2.get_users(with_perm="tickets.ticket_assignee").order_by("id"))
         )
 
         self.assertEqual([self.admin, admin3], list(self.org.get_admins().order_by("id")))
         self.assertEqual([self.admin, self.admin2], list(self.org2.get_admins().order_by("id")))
 
     def test_get_owner(self):
-        self.org.created_by = self.user
+        self.org.created_by = self.agent
         self.org.save(update_fields=("created_by",))
 
         # admins take priority
@@ -91,11 +84,22 @@ class OrgTest(TembaTest):
         self.assertEqual(self.editor, self.org.get_owner())
 
         OrgMembership.objects.filter(org=self.org, role_code=OrgRole.EDITOR.code).delete()
-        OrgMembership.objects.filter(org=self.org, role_code=OrgRole.VIEWER.code).delete()
         OrgMembership.objects.filter(org=self.org, role_code=OrgRole.AGENT.code).delete()
 
         # finally defaulting to org creator
-        self.assertEqual(self.user, self.org.get_owner())
+        self.assertEqual(self.agent, self.org.get_owner())
+
+    def test_format_datetime(self):
+        self.org.timezone = ZoneInfo("America/Mexico_City")
+        self.org.save()
+
+        date1 = datetime(2000, 1, 1, tzinfo=tzone.utc)
+
+        self.assertEqual(self.org.format_datetime(date1), "31-12-1999 18:00")
+
+        invalid_date = datetime(1, 1, 1, 0, 0, tzinfo=tzone(timedelta(days=-1, seconds=62640), "-06:36"))
+
+        self.assertEqual(self.org.format_datetime(invalid_date), "")
 
     def test_get_unique_slug(self):
         self.org.slug = "allo"
@@ -309,46 +313,6 @@ class OrgTest(TembaTest):
 
         mock_async_start.assert_called_once()
 
-    def test_prometheus(self):
-        # visit as viewer, no prometheus section
-        self.login(self.user)
-        settings_url = reverse("orgs.org_workspace")
-        response = self.client.get(settings_url)
-
-        self.assertNotContains(response, "Prometheus")
-
-        # admin can see it though
-        self.login(self.admin)
-
-        response = self.client.get(settings_url)
-        self.assertContains(response, "Prometheus")
-        self.assertContains(response, "Enable")
-
-        # enable it
-        prometheus_url = reverse("orgs.org_prometheus")
-        response = self.client.post(prometheus_url, {}, follow=True)
-        self.assertContains(response, "Disable")
-
-        # make sure our token is set
-        self.org.refresh_from_db()
-        self.assertIsNotNone(self.org.prometheus_token)
-
-        # other admin sees it enabled too
-        self.other_admin = self.create_user("other_admin@textit.com")
-        self.org.add_user(self.other_admin, OrgRole.ADMINISTRATOR)
-        self.login(self.other_admin)
-
-        response = self.client.get(settings_url)
-        self.assertContains(response, "Prometheus")
-        self.assertContains(response, "Disable")
-
-        # now disable it
-        response = self.client.post(prometheus_url, {}, follow=True)
-        self.assertContains(response, "Enable")
-
-        self.org.refresh_from_db()
-        self.assertIsNone(self.org.prometheus_token)
-
     def test_resthooks(self):
         resthook_url = reverse("orgs.org_resthooks")
 
@@ -530,7 +494,6 @@ class OrgDeleteTest(TembaTest):
             )
         )
         add(ChannelDisconnectedIncidentType.get_or_create(channel2))
-        add(ChannelLog.objects.create(channel=channel1, log_type=ChannelLog.LOG_TYPE_MSG_SEND))
         add(
             HTTPLog.objects.create(
                 org=org, channel=channel2, log_type=HTTPLog.WHATSAPP_TEMPLATES_SYNCED, request_time=10, is_error=False
@@ -570,14 +533,10 @@ class OrgDeleteTest(TembaTest):
         session1 = add(
             FlowSession.objects.create(
                 uuid=uuid4(),
-                org=org,
                 contact=contacts[0],
                 current_flow=flow1,
                 status=FlowSession.STATUS_WAITING,
                 output_url="http://sessions.com/123.json",
-                wait_started_on=datetime(2022, 1, 1, 0, 0, 0, 0, tzone.utc),
-                wait_expires_on=datetime(2022, 1, 2, 0, 0, 0, 0, tzone.utc),
-                wait_resume_on_expire=False,
             )
         )
         add(
@@ -585,7 +544,7 @@ class OrgDeleteTest(TembaTest):
                 org=org,
                 flow=flow1,
                 contact=contacts[0],
-                session=session1,
+                session_uuid=session1.uuid,
                 status=FlowRun.STATUS_COMPLETED,
                 exited_on=timezone.now(),
             )
@@ -602,24 +561,27 @@ class OrgDeleteTest(TembaTest):
         flow1.global_dependencies.add(global1)
 
         classifier1 = add(Classifier.create(org, user, WitType.slug, "Booker", {}, sync=False))
-        add(
-            HTTPLog.objects.create(
-                classifier=classifier1,
-                url="http://org2.bar/zap",
-                request="GET /zap",
-                response=" OK 200",
-                is_error=False,
-                log_type=HTTPLog.CLASSIFIER_CALLED,
-                request_time=10,
-                org=org,
-            )
-        )
         flow1.classifier_dependencies.add(classifier1)
+
+        llm1 = add(LLM.create(org, user, OpenAIType(), "gpt-4o", "GPT-4", {}))
+        flow1.llm_dependencies.add(llm1)
 
         resthook = add(Resthook.get_or_create(org, "registration", user))
         resthook.subscribers.create(target_url="http://foo.bar", created_by=user, modified_by=user)
 
         add(WebHookEvent.objects.create(org=org, resthook=resthook, data={}))
+        add(
+            HTTPLog.objects.create(
+                flow=flow1,
+                url="http://org2.bar/zap",
+                request="GET /zap",
+                response=" OK 200",
+                is_error=False,
+                log_type=HTTPLog.WEBHOOK_CALLED,
+                request_time=10,
+                org=org,
+            )
+        )
 
         template = add(
             self.create_template(
@@ -697,9 +659,11 @@ class OrgDeleteTest(TembaTest):
                 org, user, campaign, fields[1], offset=1, unit="W", flow=flows[0], delivery_hour="13"
             )
         )
-        add(EventFire.objects.create(event=event1, contact=contacts[0], scheduled=timezone.now()))
-        start1 = add(FlowStart.objects.create(org=org, flow=flows[0], campaign_event=event1))
-        add(FlowStartCount.objects.create(start=start1, count=1))
+        add(
+            ContactFire.objects.create(
+                org=org, contact=contacts[0], fire_type="C", scope=str(event1.id), fire_on=timezone.now()
+            )
+        )
 
     def _create_ticket_content(self, org, user, contacts, flows, add):
         topic = add(Topic.create(org, user, "Spam"))
@@ -824,7 +788,6 @@ class OrgDeleteTest(TembaTest):
 
         self.assertUserReleased(self.admin)
         self.assertUserActive(self.editor)  # because they're also in org #2
-        self.assertUserReleased(self.user)
         self.assertUserReleased(self.agent)
         self.assertUserReleased(self.admin)
         self.assertUserActive(self.admin2)

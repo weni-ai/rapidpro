@@ -9,7 +9,7 @@ class APITokenCRUDLTest(CRUDLTestMixin, TembaTest):
     def test_list(self):
         tokens_url = reverse("api.apitoken_list")
 
-        self.assertRequestDisallowed(tokens_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(tokens_url, [None, self.agent])
         self.assertListFetch(tokens_url, [self.admin], context_objects=[])
 
         # add user to other org and create API tokens for both

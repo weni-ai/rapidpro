@@ -11,7 +11,6 @@ from temba.campaigns.models import Campaign, CampaignEvent
 from temba.contacts.models import ContactGroup
 from temba.flows.models import Flow
 from temba.triggers.models import Trigger
-from temba.utils import analytics
 from temba.utils.dates import datetime_to_str
 from temba.utils.text import unsnakify
 
@@ -139,5 +138,6 @@ def format_datetime(context, dt, seconds: bool = False):
 
 
 @register.simple_tag(takes_context=True)
-def analytics_hook(context, name: str):
-    return mark_safe(analytics.get_hook_html(name, context))
+def absolute_url(context, url_pattern):
+    request = context["request"]
+    return request.build_absolute_uri(reverse(url_pattern))

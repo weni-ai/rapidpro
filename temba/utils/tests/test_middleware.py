@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.test import override_settings
 from django.urls import reverse
 
@@ -18,11 +19,17 @@ class MiddlewareTest(TembaTest):
         response = self.client.get(index_url)
         self.assertEqual(str(self.org.id), response["X-Temba-Org"])
 
-        # if not, org isn't set
+        # add them to another org
         self.org2.add_user(self.admin, OrgRole.ADMINISTRATOR)
 
+        # we'll still have the original org
         response = self.client.get(index_url)
-        self.assertFalse(response.has_header("X-Temba-Org"))
+        self.assertEqual(str(self.org.id), response["X-Temba-Org"])
+
+        # but when we login again, it'll select the newest org
+        self.login(self.admin)
+        response = self.client.get(index_url)
+        self.assertEqual(str(self.org2.id), response["X-Temba-Org"])
 
         # org will be read from session if set
         s = self.client.session
@@ -70,19 +77,19 @@ class MiddlewareTest(TembaTest):
 
     def test_language(self):
         def assert_text(text: str):
-            self.assertContains(self.client.get(reverse("orgs.login")), text)
+            self.assertContains(self.client.get(settings.LOGIN_URL, follow=True), text)
 
         # default is English
-        assert_text("Sign In")
+        assert_text("continue?")
 
         # can be overridden in Django settings
         with override_settings(DEFAULT_LANGUAGE="es"):
-            assert_text("Ingresar")
+            assert_text("continuar?")
 
         # if we have an authenticated user, their setting takes priority
         self.login(self.admin)
 
-        self.admin.settings.language = "fr"
-        self.admin.settings.save(update_fields=("language",))
+        self.admin.language = "fr"
+        self.admin.save(update_fields=("language",))
 
-        assert_text("Se connecter")
+        assert_text("continuer?")

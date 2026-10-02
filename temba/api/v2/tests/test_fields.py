@@ -13,7 +13,7 @@ class FieldsEndpointTest(APITest):
         endpoint_url = reverse("api.v2.fields") + ".json"
 
         self.assertGetNotPermitted(endpoint_url, [None])
-        self.assertPostNotPermitted(endpoint_url, [None, self.user])
+        self.assertPostNotPermitted(endpoint_url, [None, self.agent])
         self.assertDeleteNotAllowed(endpoint_url)
 
         nick_name = self.create_field("nick_name", "Nick Name", agent_access=ContactField.ACCESS_EDIT)
@@ -43,7 +43,7 @@ class FieldsEndpointTest(APITest):
         # no filtering
         self.assertGet(
             endpoint_url,
-            [self.user, self.editor],
+            [self.editor, self.admin],
             results=[
                 {
                     "key": "registered",
@@ -154,6 +154,6 @@ class FieldsEndpointTest(APITest):
             endpoint_url,
             self.admin,
             {"label": "Age", "value_type": "numeric"},
-            errors={None: "Cannot create object because workspace has reached limit of 10."},
+            errors={None: "Cannot create object because workspace has reached limit."},
             status=409,
         )

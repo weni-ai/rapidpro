@@ -18,7 +18,7 @@ class RunsEndpointTest(APITest):
         self.assertDeleteNotAllowed(endpoint_url)
 
         flow1 = self.get_flow("color_v13")
-        flow2 = flow1.clone(self.user)
+        flow2 = flow1.clone(self.editor)
 
         flow1_nodes = flow1.get_definition()["nodes"]
         color_prompt = flow1_nodes[0]
@@ -41,7 +41,7 @@ class RunsEndpointTest(APITest):
             .visit(blue_reply)
             .complete()
             .save()
-        ).session.runs.get()
+        )[0]
 
         frank_run1 = (
             MockSessionWriter(frank, flow1)
@@ -52,16 +52,12 @@ class RunsEndpointTest(APITest):
             .set_result("Color", "Indigo", "Other", "Indigo")
             .wait()
             .save()
-        ).session.runs.get()
+        )[0]
 
-        joe_run2 = (
-            MockSessionWriter(joe, flow1).visit(color_prompt).visit(color_split).wait().save()
-        ).session.runs.get()
-        frank_run2 = (
-            MockSessionWriter(frank, flow1).visit(color_prompt).visit(color_split).wait().save()
-        ).session.runs.get()
+        joe_run2 = (MockSessionWriter(joe, flow1).visit(color_prompt).visit(color_split).wait().save())[0]
+        frank_run2 = (MockSessionWriter(frank, flow1).visit(color_prompt).visit(color_split).wait().save())[0]
 
-        joe_run3 = MockSessionWriter(joe, flow2).wait().save().session.runs.get()
+        joe_run3 = MockSessionWriter(joe, flow2).wait().save()[0]
 
         # add a run for another org
         flow3 = self.create_flow("Test", org=self.org2)
@@ -77,7 +73,7 @@ class RunsEndpointTest(APITest):
         # no filtering
         response = self.assertGet(
             endpoint_url,
-            [self.user, self.editor],
+            [self.editor, self.admin],
             results=[joe_run3, joe_run2, frank_run2, frank_run1, joe_run1],
             num_queries=self.BASE_SESSION_QUERIES + 6,
         )
