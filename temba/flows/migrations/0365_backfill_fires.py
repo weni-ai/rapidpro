@@ -84,6 +84,7 @@ def apply_manual():  # pragma: no cover
 class Migration(migrations.Migration):
 
     dependencies = [
+        ("contacts", "0200_contactfire_session_uuid_contactfire_sprint_uuid_and_more"),
         ("flows", "0364_flowsession_last_sprint_uuid"),
     ]
 
