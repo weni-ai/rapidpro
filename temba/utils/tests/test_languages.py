@@ -21,6 +21,7 @@ class LanguagesTest(TembaTest):
             self.assertEqual("Haitian", languages.get_name("hat"))
 
         languages.reload()
+        self.assertEqual("Hinglish", languages.get_name("und"))
 
     def test_search_by_name(self):
         # check that search returns results and in the proper order
@@ -59,6 +60,8 @@ class LanguagesTest(TembaTest):
             )
 
         languages.reload()
+        self.assertEqual([{"value": "und", "name": "Hinglish"}], languages.search_by_name("Hinglish"))
+        self.assertEqual([{"value": "und", "name": "Hinglish"}], languages.search_by_name("hing"))
 
     def alpha2_to_alpha3(self):
         self.assertEqual("eng", languages.alpha2_to_alpha3("en"))

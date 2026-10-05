@@ -21,6 +21,7 @@ NAME_OVERRIDES = {
     "swa": "Swahili",  # sw in ISO-639-1
     "swc": "Swahili (Congo, ISO-639-3)",
     "swh": "Swahili (Indiv. lang., ISO-639-3)",
+    "und": "Hinglish",
     "zho": "Chinese",  # zh in ISO-639-1
     "zsm": "Malay (Standard, ISO-639-3)",
 }

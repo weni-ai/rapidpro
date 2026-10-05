@@ -439,6 +439,7 @@ class BroadcastCRUDLTest(TembaTest, CRUDLTestMixin):
         # we only have a base language and don't have values for org languages, it should be first
         languages = get_languages(response)
         self.assertEqual("und", languages[0]["iso"])
+        self.assertEqual("Hinglish", languages[0]["name"])
 
         # add a value for the primary language
         response = self.process_wizard(

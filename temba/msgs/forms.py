@@ -95,7 +95,7 @@ class ComposeForm(Form):
                 isos.remove(base_language)
                 isos.insert(0, base_language)
 
-        langs = [{"iso": iso, "name": str(_("Default")) if iso == "und" else languages.get_name(iso)} for iso in isos]
+        langs = [{"iso": iso, "name": languages.get_name(iso)} for iso in isos]
         compose_attrs = self.fields["compose"].widget.attrs
         compose_attrs["languages"] = json.dumps(langs)
 
