@@ -10,10 +10,10 @@ from django.utils import timezone
 from temba.airtime.models import AirtimeTransfer
 from temba.campaigns.models import EventFire
 from temba.channels.models import Channel, ChannelEvent
+from temba.contacts.models import ContactURN
 from temba.flows.models import FlowExit, FlowRun
 from temba.ivr.models import Call
 from temba.msgs.models import Msg, OptIn
-from temba.contacts.models import ContactURN
 from temba.orgs.models import Org, User
 from temba.tickets.models import Ticket, TicketEvent, Topic
 
