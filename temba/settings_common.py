@@ -815,7 +815,6 @@ CHANNEL_TYPES = [
     "temba.channels.types.android.AndroidType",
     "temba.channels.types.weniwebchat.WeniWebChatType",
     "temba.channels.types.teams.TeamsType",
-    "temba.channels.types.test.TestType",
 ]
 
 LLM_TYPES = {
