@@ -405,9 +405,7 @@ class ContactCRUDL(SmartCRUDL):
 
             # render as events
             events = [
-                Event.redact_for_org(
-                    contact.org, Event.from_history_item(contact.org, self.request.user, i)
-                )
+                Event.redact_for_org(contact.org, Event.from_history_item(contact.org, self.request.user, i))
                 for i in history
             ]
 
