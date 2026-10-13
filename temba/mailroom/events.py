@@ -13,6 +13,7 @@ from temba.channels.models import Channel, ChannelEvent
 from temba.flows.models import FlowExit, FlowRun
 from temba.ivr.models import Call
 from temba.msgs.models import Msg, OptIn
+from temba.contacts.models import ContactURN
 from temba.orgs.models import Org, User
 from temba.tickets.models import Ticket, TicketEvent, Topic
 
@@ -72,6 +73,15 @@ class Event:
         assert renderer is not None, f"unsupported history item of type {type(item)}"
 
         return renderer(org, user, item)
+
+    @classmethod
+    def redact_for_org(cls, org: Org, event: dict) -> dict:
+        if not org.is_anon or not isinstance(event, dict):
+            return event
+        if event.get("type") == cls.TYPE_CONTACT_URNS_CHANGED:
+            urns = event.get("urns") or []
+            return {**event, "urns": [ContactURN.ANON_MASK] * len(urns)}
+        return event
 
     @classmethod
     def from_msg(cls, org: Org, user: User, obj: Msg) -> dict:
