@@ -10,6 +10,7 @@ from django.utils import timezone
 from temba.airtime.models import AirtimeTransfer
 from temba.campaigns.models import EventFire
 from temba.channels.models import Channel, ChannelEvent
+from temba.contacts.models import ContactURN
 from temba.flows.models import FlowExit, FlowRun
 from temba.ivr.models import Call
 from temba.msgs.models import Msg, OptIn
@@ -72,6 +73,15 @@ class Event:
         assert renderer is not None, f"unsupported history item of type {type(item)}"
 
         return renderer(org, user, item)
+
+    @classmethod
+    def redact_for_org(cls, org: Org, event: dict) -> dict:
+        if not org.is_anon or not isinstance(event, dict):
+            return event
+        if event.get("type") == cls.TYPE_CONTACT_URNS_CHANGED:
+            urns = event.get("urns") or []
+            return {**event, "urns": [ContactURN.ANON_MASK] * len(urns)}
+        return event
 
     @classmethod
     def from_msg(cls, org: Org, user: User, obj: Msg) -> dict:

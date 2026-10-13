@@ -857,6 +857,27 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
             [e["type"] for e in resp_json["events"]],
         )
 
+    def test_history_session_events_anon_masks_urns(self):
+        from temba.contacts.models import ContactURN
+
+        joe = self.create_contact(name="Joe Blow", urns=["twitter:blow80", "tel:+250781111111"])
+        history_url = reverse("contacts.contact_history", args=[joe.uuid])
+
+        flow = self.get_flow("color_v13")
+        nodes = flow.get_definition()["nodes"]
+        (MockSessionWriter(joe, flow).visit(nodes[0]).add_contact_urn("twitter", "joey").complete().save())
+
+        self.login(self.user)
+
+        with self.anonymous(self.org):
+            response = self.client.get(history_url)
+
+        self.assertEqual(200, response.status_code)
+        urn_events = [e for e in response.json()["events"] if e["type"] == "contact_urns_changed"]
+        self.assertEqual(1, len(urn_events))
+        self.assertGreater(len(urn_events[0]["urns"]), 0)
+        self.assertTrue(all(u == ContactURN.ANON_MASK for u in urn_events[0]["urns"]))
+
     @mock_mailroom
     def test_update(self, mr_mocks):
         self.org.flow_languages = ["eng", "spa"]

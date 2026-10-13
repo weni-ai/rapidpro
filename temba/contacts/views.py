@@ -404,7 +404,10 @@ class ContactCRUDL(SmartCRUDL):
                     after = max(after - timedelta(days=90), contact_creation)
 
             # render as events
-            events = [Event.from_history_item(contact.org, self.request.user, i) for i in history]
+            events = [
+                Event.redact_for_org(contact.org, Event.from_history_item(contact.org, self.request.user, i))
+                for i in history
+            ]
 
             if len(events) >= limit:
                 after = iso8601.parse_date(events[-1]["created_on"])
