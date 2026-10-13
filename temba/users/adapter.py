@@ -86,7 +86,6 @@ class TembaAccountAdapter(InviteAdapterMixin, DefaultAccountAdapter):
 
 
 class TembaSocialAccountAdapter(InviteAdapterMixin, DefaultSocialAccountAdapter):
-
     @staticmethod
     def extract_email(sociallogin):
         for address in getattr(sociallogin, "email_addresses", []) or []:
