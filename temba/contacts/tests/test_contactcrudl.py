@@ -865,13 +865,7 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
 
         flow = self.get_flow("color_v13")
         nodes = flow.get_definition()["nodes"]
-        (
-            MockSessionWriter(joe, flow)
-            .visit(nodes[0])
-            .add_contact_urn("twitter", "joey")
-            .complete()
-            .save()
-        )
+        (MockSessionWriter(joe, flow).visit(nodes[0]).add_contact_urn("twitter", "joey").complete().save())
 
         self.login(self.user)
 
