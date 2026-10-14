@@ -1,21 +1,20 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.12-trixie AS build-poetry
+FROM python:3.14-trixie AS build-uv
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-COPY ./pyproject.toml .
-COPY ./poetry.lock .
+COPY ./pyproject.toml ./uv.lock ./
 COPY ./docker/pip-requires.txt .
 
-RUN python -m pip install -U "poetry>=2.1,<3" \
- && poetry self add "poetry-plugin-export>=1.10,<2" \
- && poetry cache clear -n --all pypi \
- && poetry add -n --lock $(cat pip-requires.txt) \
- && poetry export --without-hashes --with dev --output requirements.txt
+# Convert poetry-style markers (@^) so extras can be installed with pip.
+RUN sed -e 's/@^/>=/g' -e 's/@~=/~=/g' pip-requires.txt > extras.txt \
+ && uv export --frozen --no-hashes --all-groups --no-emit-project --output-file requirements.txt
 
 
-FROM python:3.12-trixie AS base
+FROM python:3.14-trixie AS base
 
 ARG PROJECT_USER=rapidpro
 ARG PROJECT_GROUP=rapidpro
@@ -71,14 +70,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
  && apt-get install --no-install-recommends --no-install-suggests -y \
     nodejs
 
-COPY --from=build-poetry /app/requirements.txt /tmp/dep/requirements.txt
+COPY --from=build-uv /app/requirements.txt /tmp/dep/requirements.txt
+COPY --from=build-uv /app/extras.txt /tmp/dep/extras.txt
 COPY ./docker/pip-freeze.txt /tmp/dep/pip-freeze.txt
 
 RUN --mount=type=cache,mode=0755,target=/pip_cache,id=pip \
     pip install \
     --cache-dir /pip_cache \
     --prefix=/install \
-    -r /tmp/dep/requirements.txt
+    -r /tmp/dep/requirements.txt \
+ && pip install \
+    --cache-dir /pip_cache \
+    --prefix=/install \
+    -r /tmp/dep/extras.txt \
+    "django==5.2.14"
 
 COPY ./package.json ./yarn.lock ./
 
