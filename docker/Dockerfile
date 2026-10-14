@@ -82,7 +82,8 @@ RUN --mount=type=cache,mode=0755,target=/pip_cache,id=pip \
  && pip install \
     --cache-dir /pip_cache \
     --prefix=/install \
-    -r /tmp/dep/extras.txt
+    -r /tmp/dep/extras.txt \
+    "django==5.2.14"
 
 COPY ./package.json ./yarn.lock ./
 
