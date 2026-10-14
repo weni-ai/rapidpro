@@ -11,7 +11,7 @@ COPY ./docker/pip-requires.txt .
 
 # Convert poetry-style markers (@^) so extras can be installed with pip.
 RUN sed -e 's/@^/>=/g' -e 's/@~=/~=/g' pip-requires.txt > extras.txt \
- && uv export --frozen --no-hashes --all-groups --output-file requirements.txt
+ && uv export --frozen --no-hashes --all-groups --no-emit-project --output-file requirements.txt
 
 
 FROM python:3.14-trixie AS base
