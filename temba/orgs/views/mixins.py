@@ -31,10 +31,7 @@ class OrgPermsMixin:
         user = self.request.user
 
         # can't have an org perm without an org
-        if not org:
-            return False
-
-        if user.is_anonymous:
+        if not org or user.is_anonymous:
             return False
 
         return user.is_staff or user.has_org_perm(org, permission)
@@ -107,8 +104,9 @@ class OrgObjPermsMixin(OrgPermsMixin):
                     f"{reverse('staff.org_service')}?next={quote_plus(request.path)}&other_org={org.id}"
                 )
             else:
-                # TODO implement view to let regular users switch orgs as well
-                return HttpResponseRedirect(reverse("orgs.org_choose"))
+                return HttpResponseRedirect(
+                    f"{reverse('orgs.org_switch')}?next={quote_plus(request.path)}&other_org={org.id}"
+                )
 
         return super().pre_process(request, *args, **kwargs)
 
@@ -125,6 +123,8 @@ class RequireFeatureMixin:
 
         if set(request.org.features).isdisjoint(require_any):
             return HttpResponseRedirect(reverse("orgs.org_workspace"))
+
+        return super().pre_process(request, *args, **kwargs)
 
 
 class InferOrgMixin:
@@ -215,7 +215,7 @@ class BulkActionMixin:
             # check we have the required permission for this action
             permission = self.get_bulk_action_permission(action)
             if not user.has_perm(permission) and not user.has_org_perm(org, permission):
-                return HttpResponseForbidden()
+                return HttpResponseForbidden()  # pragma: no cover
 
             try:
                 self.apply_bulk_action(user, action, objects, label)
@@ -285,3 +285,22 @@ class DependencyMixin:
 
                 dependents[type_key] = type_qs
         return dependents
+
+
+class UniqueNameMixin:
+    """
+    Model form mixin that ensures the name field is unique within the org.
+    """
+
+    def clean_name(self):
+        name = self.cleaned_data["name"]
+
+        # make sure the name isn't already taken
+        conflicts = self.Meta.model.objects.filter(org=self.org, is_active=True, name__iexact=name)
+        if self.instance:
+            conflicts = conflicts.exclude(id=self.instance.id)
+
+        if conflicts.exists():
+            raise forms.ValidationError(_("Must be unique."))
+
+        return name

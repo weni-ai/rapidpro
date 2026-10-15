@@ -1,8 +1,6 @@
-from django.contrib.gis.geos import GEOSGeometry
 from django.urls import reverse
 
 from temba.locations.models import BoundaryAlias
-from temba.tests import matchers
 
 from . import APITest
 
@@ -21,13 +19,12 @@ class BoundariesEndpointTest(APITest):
         BoundaryAlias.create(self.org, self.admin, self.state2, "East Prov")
         BoundaryAlias.create(self.org2, self.admin2, self.state1, "Other Org")  # shouldn't be returned
 
-        self.state1.simplified_geometry = GEOSGeometry("MULTIPOLYGON(((1 1, 1 -1, -1 -1, -1 1, 1 1)))")
+        self.state1.geometry = {"type": "MultiPolygon", "coordinates": [[[[1, 1], [1, -1], [-1, -1], [-1, 1], [1, 1]]]]}
         self.state1.save()
 
-        # test without geometry
         self.assertGet(
             endpoint_url,
-            [self.user, self.editor, self.admin],
+            [self.editor, self.admin],
             results=[
                 {
                     "osm_id": "1708283",
@@ -35,7 +32,10 @@ class BoundariesEndpointTest(APITest):
                     "parent": {"osm_id": "171496", "name": "Rwanda"},
                     "level": 1,
                     "aliases": ["Kigali", "Kigari"],
-                    "geometry": None,
+                    "geometry": {
+                        "type": "MultiPolygon",
+                        "coordinates": [[[[1.0, 1.0], [1.0, -1.0], [-1.0, -1.0], [-1.0, 1.0], [1.0, 1.0]]]],
+                    },
                 },
                 {
                     "osm_id": "171113181",
@@ -102,35 +102,6 @@ class BoundariesEndpointTest(APITest):
                     "aliases": [],
                     "geometry": None,
                 },
-            ],
-            num_queries=self.BASE_SESSION_QUERIES + 3,
-        )
-
-        # test with geometry
-        self.assertGet(
-            endpoint_url + "?geometry=true",
-            [self.admin],
-            results=[
-                {
-                    "osm_id": "1708283",
-                    "name": "Kigali City",
-                    "parent": {"osm_id": "171496", "name": "Rwanda"},
-                    "level": 1,
-                    "aliases": ["Kigali", "Kigari"],
-                    "geometry": {
-                        "type": "MultiPolygon",
-                        "coordinates": [[[[1.0, 1.0], [1.0, -1.0], [-1.0, -1.0], [-1.0, 1.0], [1.0, 1.0]]]],
-                    },
-                },
-                matchers.Dict(),
-                matchers.Dict(),
-                matchers.Dict(),
-                matchers.Dict(),
-                matchers.Dict(),
-                matchers.Dict(),
-                matchers.Dict(),
-                matchers.Dict(),
-                matchers.Dict(),
             ],
             num_queries=self.BASE_SESSION_QUERIES + 3,
         )

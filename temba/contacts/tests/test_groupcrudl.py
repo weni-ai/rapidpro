@@ -28,8 +28,8 @@ class ContactGroupCRUDLTest(TembaTest, CRUDLTestMixin):
     def test_create(self, mr_mocks):
         url = reverse("contacts.contactgroup_create")
 
-        # can't create group as viewer
-        self.login(self.user)
+        # can't create group as agent
+        self.login(self.agent)
         response = self.client.post(url, {"name": "Spammers"})
         self.assertLoginRedirect(response)
 
@@ -51,7 +51,7 @@ class ContactGroupCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # try to create with name that's already taken
         response = self.client.post(url, {"name": "Customers"})
-        self.assertFormError(response.context["form"], "name", "Already used by another group.")
+        self.assertFormError(response.context["form"], "name", "Must be unique.")
 
         # create with valid name (that will be trimmed)
         response = self.client.post(url, {"name": "first  "})
@@ -85,12 +85,10 @@ class ContactGroupCRUDLTest(TembaTest, CRUDLTestMixin):
             ContactGroup.create_manual(self.org, self.admin, "group%d" % i)
 
         self.assertEqual(10, ContactGroup.objects.filter(is_active=True, is_system=False).count())
-        response = self.client.post(url, {"name": "People"})
-        self.assertFormError(
-            response.context["form"],
-            "name",
-            "This workspace has reached its limit of 10 groups. You must delete existing ones before you can create new ones.",
-        )
+
+        # check we get the limit warning when we've reached the limit
+        response = self.requestView(url, self.admin)
+        self.assertContains(response, "You have reached the per-workspace limit")
 
     def test_create_disallow_duplicates(self):
         self.login(self.admin)
@@ -104,13 +102,13 @@ class ContactGroupCRUDLTest(TembaTest, CRUDLTestMixin):
         response = self.client.post(
             reverse("contacts.contactgroup_create"), dict(name="First Group", group_query="firsts")
         )
-        self.assertFormError(response.context["form"], "name", "Already used by another group.")
+        self.assertFormError(response.context["form"], "name", "Must be unique.")
 
         # try to create another group with same name, not dynamic, same thing
         response = self.client.post(
             reverse("contacts.contactgroup_create"), dict(name="First Group", group_query="firsts")
         )
-        self.assertFormError(response.context["form"], "name", "Already used by another group.")
+        self.assertFormError(response.context["form"], "name", "Must be unique.")
 
     @mock_mailroom
     def test_update(self, mr_mocks):
@@ -120,7 +118,7 @@ class ContactGroupCRUDLTest(TembaTest, CRUDLTestMixin):
 
         update_url = reverse("contacts.contactgroup_update", args=[manual.id])
 
-        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(update_url, [None, self.agent, self.admin2])
 
         self.assertUpdateFetch(update_url, [self.editor, self.admin], form_fields=("name",))
 
@@ -239,7 +237,7 @@ class ContactGroupCRUDLTest(TembaTest, CRUDLTestMixin):
         usages_url = reverse("contacts.contactgroup_usages", args=[group.uuid])
 
         self.assertRequestDisallowed(usages_url, [None, self.agent, self.admin2])
-        response = self.assertReadFetch(usages_url, [self.user, self.editor, self.admin], context_object=group)
+        response = self.assertReadFetch(usages_url, [self.editor, self.admin], context_object=group)
 
         self.assertEqual(
             {"flow": [flow], "campaign": [campaign1], "trigger": [trigger1, trigger2]},
@@ -293,7 +291,7 @@ class ContactGroupCRUDLTest(TembaTest, CRUDLTestMixin):
         delete_group3_url = reverse("contacts.contactgroup_delete", args=[group3.uuid])
         delete_group4_url = reverse("contacts.contactgroup_delete", args=[group4.uuid])
 
-        self.assertRequestDisallowed(delete_group1_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(delete_group1_url, [None, self.agent, self.admin2])
 
         # a group with no dependents can be deleted
         response = self.assertDeleteFetch(delete_group1_url, [self.editor, self.admin])

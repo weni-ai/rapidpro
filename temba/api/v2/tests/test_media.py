@@ -15,7 +15,7 @@ class MediaEndpointTest(APITest):
         endpoint_url = reverse("api.v2.media") + ".json"
 
         self.assertGetNotAllowed(endpoint_url)
-        self.assertPostNotPermitted(endpoint_url, [None, self.user])
+        self.assertPostNotPermitted(endpoint_url, [None])
         self.assertDeleteNotAllowed(endpoint_url)
 
         def upload(user, filename: str):

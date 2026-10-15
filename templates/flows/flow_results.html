@@ -1,74 +1,17 @@
 {% extends "smartmin/read.html" %}
-{% load smartmin sms compress temba contacts i18n %}
+{% load smartmin sms temba contacts i18n %}
 
 {% block extra-style %}
   {{ block.super }}
   <style type="text/css">
-    .chart .chart-name {
-      padding-left: 50px;
-      padding-right: 50px;
-      font-size: 16px;
-      text-align: center;
-      position: relative;
-      top: 90px;
-      height: 50px;
-      z-index: 1;
-      text-shadow: -1px 0 white, 0 1px white, 1px 0 white, 0 -1px white;
-    }
-
-    .chart {
-      flex-basis: 400px;
-    }
-
     .modal .modal-body {
       max-height: 450px;
-    }
-
-    #category-charts {
-      justify-content: center;
-    }
-
-    #engagement-charts {
-      justify-content: center;
-      padding-top: 2em;
-    }
-
-    #engagement-charts>div {
-      margin-bottom: 6em;
-      align-self: flex-start;
-      flex-basis: 400px;
-    }
-
-    h4 {
-      font-weight: 300;
-      text-align: center;
     }
   </style>
 {% endblock extra-style %}
 {% block extra-script %}
   {{ block.super }}
   <script type="text/javascript">
-    Highcharts.setOptions({
-      global: {
-        timezoneOffset: -1 * parseInt('{{utcoffset}}')
-      },
-      lang: {
-        thousandsSep: ','
-      }
-    })
-
-    Highcharts.setOptions({
-      colors: ['#2387CA', '#8FC93A', '#E18335', '#483C46', '#E4CC37', '#723D46', '#606C38', '#7DCFB6']
-    });
-
-    var colors = Highcharts.getOptions().colors;
-
-    function getColor(index) {
-      return colors[index % colors.length];
-    }
-
-    var charts = {}
-
     function handleFlowRefreshed(evt) {
       var flow = evt.detail.data;
       if (flow.runs) {
@@ -90,252 +33,6 @@
       document.querySelector("temba-flow-details").refresh();
     }
 
-    function deleteRun(id) {
-      var dialog = document.getElementById("confirm-run-delete");
-      dialog.runId = id;
-      dialog.open = true;
-    }
-
-    function performDelete(evt) {
-      var dialog = document.getElementById("confirm-run-delete");
-      dialog.open = false;
-
-      if (evt.detail.button.destructive) {
-        fetchAjax('/flowrun/delete/' + dialog.runId + '/', {
-          method: 'POST',
-        }).then(function(response) {
-          var runList = document.querySelector("temba-run-list");
-          if (runList) {
-            runList.removeRun(dialog.runId);
-            var details = document.querySelector("temba-flow-details");
-            details.refresh();
-          }
-        });
-      }
-    }
-
-    function getChart(key, name) {
-      var chart = charts[key];
-      if (!chart) {
-
-        // add our chart container
-        var ele = document.querySelector(".chart-template").cloneNode(true);
-        ele.classList = "chart";
-        ele.querySelector(".chart-container").id = key + "-chart";
-        ele.querySelector(".chart-name").innerText = name;
-        document.querySelector("#category-charts").append(ele);
-
-        // init with highcharts
-        chart = Highcharts.chart(key + '-chart', {
-          chart: {
-            type: 'column',
-            margin: [25, 25, 90, 25]
-          },
-          title: {
-            text: null
-          },
-          credits: {
-            enabled: false
-          },
-          yAxis: {
-            min: 0,
-            max: 100,
-            lineWidth: 0,
-            minorGridLineWidth: 0,
-            lineColor: 'transparent',
-            minorTickLength: 0,
-            tickLength: 0,
-            gridLineColor: '#f2f2f2',
-            labels: {
-              enabled: false
-            },
-            title: {
-              text: null
-            }
-          },
-          xAxis: {
-            categories: [],
-
-            title: {
-              text: null
-            },
-            labels: {
-              enabled: true
-            },
-          },
-          tooltip: {
-            formatter: function() {
-              return "<b>" + this.x + "</b>: " + this.point.count;
-            }
-          },
-          series: []
-        });
-      }
-
-      charts[key] = chart;
-      return chart;
-    }
-
-    function updateChart(chartData) {
-      var key = chartData.key;
-      var chart = getChart(key, chartData.name);
-      var seriesData = [];
-      var labels = [];
-      var totalPct = 0;
-      for (var category of chartData.categories) {
-        pointLabels = {}
-        pointLabels.enabled = true;
-        pointLabels.color = "#fff";
-        pointLabels.x = 0;
-        pointLabels.y = 0;
-        pointLabels.format = "{point.y}%";
-
-        pct = parseInt(category.pct * 100);
-
-        if (pct > 15) {
-          pointLabels.y = 25;
-        }
-
-        seriesData.push({
-          name: category.name,
-          count: category.count,
-          y: pct,
-          dataLabels: pointLabels
-        });
-      }
-
-      seriesData.sort(function(a, b) {
-        if (a.name == 'Other') {
-          return 1;
-        } else if (b.name == 'Other') {
-          return -1;
-        }
-        return b.count - a.count;
-      });
-
-      for (var idx in seriesData) {
-        labels.push(seriesData[idx].name);
-        var color = getColor(idx);
-        if (seriesData[idx].name == 'Other') {
-          color = '#999';
-        }
-        seriesData[idx].color = color;
-      }
-
-      var series = {
-        name: chartData.name,
-        showInLegend: false,
-        data: seriesData
-      };
-
-      if (chart.series.length == 0) {
-        chart.addSeries(series);
-      } else {
-        chart.series[0].setData(seriesData, true);
-      }
-
-      chart.xAxis[0].update({
-        categories: labels
-      });
-
-      // on larger series make sure we are wide
-      var size = chartData['size'];
-      if (size) {
-        var ele = document.querySelector("#" + key + "-chart");
-        if (ele) {
-          ele.classList.add(size);
-        }
-        chart.reflow();
-        window.dispatchEvent(new Event('resize'));
-      }
-    }
-
-    function chartLayoutChanged(counts) {
-      var keys = Object.keys(charts);
-      if (counts.length != keys.length) {
-        return true;
-      }
-
-      // check if order changed
-      for (var i = 0; i < counts.length; i++) {
-        if (counts[i]['key'] != keys[i]) {
-          return true;
-        }
-      }
-      return false;
-    }
-
-    function resetCharts() {
-
-      var cats = document.querySelector("#category-charts");
-      while (cats.firstChild) {
-        cats.removeChild(cats.firstChild);
-      }
-
-      for (var key in charts) {
-        charts[key].destroy();
-      }
-      charts = {};
-    }
-
-    function updatePreviousCharts(from, to, counts) {
-      var chartCount = to - from;
-      if (chartCount % 3 == 0) {
-        for (var j = from; j < to; j++) {
-          counts[j]['size'] = 'small';
-        }
-      } else if (chartCount == 1) {
-        counts[to - 1]['size'] = 'large';
-      }
-    }
-
-    function updateEngagement() {
-      fetchAjax("{% url 'flows.flow_engagement' object.id %}", {
-        container: "#engagement-charts"
-      });
-    }
-
-    function updateCharts() {
-
-      var store = document.querySelector("temba-store");
-      var tabs = document.querySelector("temba-tabs");
-
-      if (!tabs || tabs.index != 1) {
-        return;
-      }
-
-      store.getUrl("/flow/category_counts/{{object.id}}/", {
-        force: true
-      }).then(function(response) {
-        var data = response.json;
-
-        if (data.counts) {
-          // determine chart sizes
-          var lastBigChart = -1;
-          for (var i = 0; i < data.counts.length; i++) {
-            data.counts[i]['size'] = 'medium';
-            if (data.counts[i].categories.length > 5) {
-              data.counts[i]['size'] = 'large';
-              updatePreviousCharts(lastBigChart + 1, i, data.counts);
-              lastBigChart = i;
-            }
-          }
-
-          if (lastBigChart != data.counts.length - 1) {
-            updatePreviousCharts(lastBigChart + 1, i, data.counts);
-          }
-
-          if (chartLayoutChanged(data.counts)) {
-            resetCharts();
-          }
-
-          for (var chartData of data.counts) {
-            updateChart(chartData);
-          }
-        }
-      });
-    }
-
     function handleTabChanged() {
       var tabs = document.querySelector("temba-tabs");
       if (!tabs) {
@@ -347,22 +44,10 @@
       if (runs) {
         runs.paused = tabs.index != 2;
       }
-
-      if (tabs.index == 1) {
-        updateCharts();
-      }
     }
-
-    onSpload(function() {
-      updateEngagement();
-    });
   </script>
 {% endblock extra-script %}
 {% block content %}
-  <div class="chart-template">
-    <div class="chart-name"></div>
-    <div class="chart-container"></div>
-  </div>
   <temba-flow-details flow="{{ object.uuid }}" -temba-refreshed="handleFlowRefreshed">
   </temba-flow-details>
   <temba-tabs -temba-context-changed="handleTabChanged"
@@ -370,24 +55,89 @@
               class="flex-grow"
               index="{{ request.GET.tab }}">
     <temba-tab name="{{ _("Engagement") |escapejs }}" icon="overview">
-      <div class="flex flex-wrap overflow-y-scroll overflow-x-hidden" id="engagement-charts"></div>
+      <div class="flex flex-wrap overflow-y-scroll overflow-x-hidden p-4 gap-2">
+        <temba-chart class="m-1"
+                     header="{% trans 'Responses' %}"
+                     url="{% url 'flows.flow_engagement_timeline' flow.uuid %}"
+                     dataname="Responses"
+                     xtype="time"
+                     single
+                     style="flex: 1 1 300px;
+                            overflow: hidden;
+                            border-radius: 10px;
+                            background: #fbfbfb;
+                            padding: 2em">
+        </temba-chart>
+        <temba-chart class="m-1"
+                     header='{% trans "Progress" %}'
+                     url="{% url 'flows.flow_engagement_progress' flow.uuid %}"
+                     dataname="Runs"
+                     single
+                     percent
+                     colorIndex="1"
+                     style="flex: 1 1 300px;
+                            overflow: hidden;
+                            border: 0px solid #e5e7eb;
+                            border-radius: 10px;
+                            background: #fbfbfb;
+                            padding: 2em">
+        </temba-chart>
+        <temba-chart class="m-1"
+                     header='{% trans "Day of Week" %}'
+                     url="{% url 'flows.flow_engagement_dow' flow.uuid %}"
+                     dataname="Responses"
+                     single
+                     colorIndex="2"
+                     xtype="time"
+                     xformat="EEE"
+                     percent
+                     style="flex: 1 1 300px;
+                            overflow: hidden;
+                            border: 0px solid #e5e7eb;
+                            border-radius: 10px;
+                            background: #fbfbfb;
+                            padding: 2em">
+        </temba-chart>
+        <temba-chart class="m-1"
+                     header='{% trans "Time of Day" %} ({{ user_org.timezone }})'
+                     url="{% url 'flows.flow_engagement_hod' flow.uuid %}"
+                     dataname="Responses"
+                     colorIndex="3"
+                     single
+                     style="flex: 1 1 300px;
+                            overflow: hidden;
+                            border: 0px solid #e5e7eb;
+                            border-radius: 10px;
+                            background: #fbfbfb;
+                            padding: 2em">
+        </temba-chart>
+      </div>
     </temba-tab>
     <temba-tab name="{{ _("Analytics") |escapejs }}" icon="analytics">
-      <div class="flex flex-wrap overflow-y-scroll overflow-x-hidden" id="category-charts"></div>
+      <div class="flex flex-wrap overflow-y-scroll overflow-x-hidden p-4 gap-2">
+        {% for result in results %}
+          <temba-chart class="m-1"
+                       colorIndex="{{ forloop.counter0 }}"
+                       header="{{ result.name }}"
+                       single
+                       percent
+                       dataname="Responses"
+                       url="{% url 'flows.flow_result_chart' object.uuid result.key %}"
+                       style="flex: 1 1 400px;
+                              overflow: hidden;
+                              border: 0px solid #e5e7eb;
+                              border-radius: 10px;
+                              background: #fbfbfb;
+                              padding: 2em">
+          </temba-chart>
+        {% endfor %}
+      </div>
     </temba-tab>
     <temba-tab name="{{ _("Runs") |escapejs }}" icon="runs">
       <temba-run-list flow="{{ object.uuid }}"
-                      {% if org_perms.flows.flowrun_delete %}allowDelete{% endif %}
                       -temba-refreshed="handleRunsRefreshed"
                       class="p-4 flex flex-col flex-grow overflow-hidden">
       </temba-run-list>
     </temba-tab>
   </temba-tabs>
-  <temba-dialog header="{{ _("Delete Run") |escapejs }}"
-                primaryButtonName="{{ _("Delete") |escapejs }}"
-                destructive="true"
-                -temba-button-clicked="performDelete"
-                id="confirm-run-delete">
-    <div class="p-6">{% trans "Deleting this run will remove it from your flow's results. While the messages for the contact will remain, any record of this flow run will be gone forever." %}</div>
-  </temba-dialog>
 {% endblock content %}

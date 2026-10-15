@@ -9,7 +9,7 @@ class LabelCRUDLTest(TembaTest, CRUDLTestMixin):
     def test_create(self):
         create_url = reverse("msgs.label_create")
 
-        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
         self.assertCreateFetch(create_url, [self.editor, self.admin], form_fields=("name", "messages"))
 
         # try to create label with invalid name
@@ -36,16 +36,11 @@ class LabelCRUDLTest(TembaTest, CRUDLTestMixin):
             new_obj_query=Label.objects.filter(name="Spam 2"),
         )
 
-        # try creating a new label after reaching the limit on labels
+        # check we get the limit warning when we've reached the limit
         current_count = Label.get_active_for_org(self.org).count()
         with override_settings(ORG_LIMIT_DEFAULTS={"labels": current_count}):
-            response = self.client.post(create_url, {"name": "CoolStuff"})
-            self.assertFormError(
-                response.context["form"],
-                "name",
-                "This workspace has reached its limit of 2 labels. "
-                "You must delete existing ones before you can create new ones.",
-            )
+            response = self.requestView(create_url, self.admin)
+            self.assertContains(response, "You have reached the per-workspace limit")
 
     def test_update(self):
         label1 = self.create_label("Spam")
@@ -54,7 +49,7 @@ class LabelCRUDLTest(TembaTest, CRUDLTestMixin):
         label1_url = reverse("msgs.label_update", args=[label1.id])
         label2_url = reverse("msgs.label_update", args=[label2.id])
 
-        self.assertRequestDisallowed(label2_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(label2_url, [None, self.agent, self.admin2])
         self.assertUpdateFetch(label2_url, [self.editor, self.admin], form_fields={"name": "Sales", "messages": None})
 
         # try to update to invalid name
@@ -77,7 +72,7 @@ class LabelCRUDLTest(TembaTest, CRUDLTestMixin):
 
         delete_url = reverse("msgs.label_delete", args=[label.uuid])
 
-        self.assertRequestDisallowed(delete_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(delete_url, [None, self.agent, self.admin2])
 
         # fetch delete modal
         response = self.assertDeleteFetch(delete_url, [self.editor, self.admin], as_modal=True)

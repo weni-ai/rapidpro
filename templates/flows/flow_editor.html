@@ -1,5 +1,5 @@
 {% extends "smartmin/base.html" %}
-{% load compress temba i18n %}
+{% load temba i18n %}
 
 {% block title %}
   <div class="flex">
@@ -179,7 +179,7 @@
       mutable: JSON.parse("{{mutable|js_bool}}"),
       filters: JSON.parse("{{feature_filters|escapejs}}"),
       brand: '{{branding.name|escapejs}}',
-
+      defaultTopic: JSON.parse("{{default_topic|escapejs}}"),
       help: {
         legacy_extra: 'https://help.textit.com/',
         missing_dependency: 'https://help.textit.com/en/article/fixing-missing-dependencies-1toe127/',
@@ -199,6 +199,7 @@
         globals: api + 'globals.json',
         users: api + 'users.json',
         topics: api + 'topics.json',
+        llms: '/api/internal/llms.json',
         editor: '/flow/editor',
         revisions: '/flow/revisions/{{object.uuid}}/',
         recents: '/flow/recent_contacts/{{object.uuid}}/',

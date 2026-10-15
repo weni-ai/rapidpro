@@ -6,7 +6,7 @@ from temba.tests import TembaTest
 
 
 class APITest(APITestMixin, TembaTest):
-    BASE_SESSION_QUERIES = 4  # number of queries required for any request using session auth
+    BASE_SESSION_QUERIES = 3  # number of queries required for any request using session auth
     BASE_TOKEN_QUERIES = 2  # number of queries required for any request using token auth
 
     def upload_media(self, user, filename: str):
