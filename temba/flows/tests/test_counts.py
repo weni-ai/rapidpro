@@ -1,10 +1,10 @@
-from datetime import date, timedelta, timezone as tzone
+from datetime import date, timezone as tzone
 
 from django.db import connection
 from django.utils import timezone
 
 from temba.flows.models import FlowActivityCount, FlowRun, FlowSession
-from temba.flows.tasks import squash_activity_counts
+from temba.flows.tasks import squash_flow_counts
 from temba.tests import TembaTest
 from temba.utils.uuid import uuid4
 
@@ -13,26 +13,15 @@ class FlowActivityCountTest(TembaTest):
     def test_node_counts(self):
         flow = self.create_flow("Test 1")
         contact = self.create_contact("Bob", phone="+1234567890")
-        session = FlowSession.objects.create(
-            uuid=uuid4(),
-            org=self.org,
-            contact=contact,
-            status=FlowSession.STATUS_WAITING,
-            output_url="http://sessions.com/123.json",
-            created_on=timezone.now(),
-            wait_started_on=timezone.now(),
-            wait_expires_on=timezone.now() + timedelta(days=7),
-            wait_resume_on_expire=False,
-        )
 
         def create_run(status, node_uuid):
             return FlowRun.objects.create(
                 uuid=uuid4(),
                 org=self.org,
-                session=session,
                 flow=flow,
                 contact=contact,
                 status=status,
+                session_uuid="082cb7a8-a8fc-468d-b0a4-06f5a5179e2b",
                 created_on=timezone.now(),
                 modified_on=timezone.now(),
                 exited_on=timezone.now() if status not in ("A", "W") else None,
@@ -40,7 +29,7 @@ class FlowActivityCountTest(TembaTest):
             )
 
         run1 = create_run(FlowRun.STATUS_ACTIVE, "ebb534e1-e2e0-40e9-8652-d195e87d832b")
-        run2 = create_run(FlowRun.STATUS_WAITING, "ebb534e1-e2e0-40e9-8652-d195e87d832b")
+        create_run(FlowRun.STATUS_WAITING, "ebb534e1-e2e0-40e9-8652-d195e87d832b")
         run3 = create_run(FlowRun.STATUS_WAITING, "bbb71aab-e026-442e-9971-6bc4f48941fb")
         create_run(FlowRun.STATUS_INTERRUPTED, "bbb71aab-e026-442e-9971-6bc4f48941fb")
 
@@ -65,29 +54,14 @@ class FlowActivityCountTest(TembaTest):
             flow.counts.prefix("node:").scope_totals(),
         )
 
-        run2.delete()
-
-        self.assertEqual(
-            {
-                "node:ebb534e1-e2e0-40e9-8652-d195e87d832b": 0,
-                "node:bbb71aab-e026-442e-9971-6bc4f48941fb": 0,
-                "node:85b0c928-4bd9-4a2e-84b2-164802c32486": 1,
-            },
-            flow.counts.prefix("node:").scope_totals(),
-        )
-
     def test_status_counts(self):
         contact = self.create_contact("Bob", phone="+1234567890")
         session = FlowSession.objects.create(
             uuid=uuid4(),
-            org=self.org,
             contact=contact,
             status=FlowSession.STATUS_WAITING,
             output_url="http://sessions.com/123.json",
             created_on=timezone.now(),
-            wait_started_on=timezone.now(),
-            wait_expires_on=timezone.now() + timedelta(days=7),
-            wait_resume_on_expire=False,
         )
 
         def create_runs(flow_status_pairs: tuple) -> list:
@@ -97,10 +71,10 @@ class FlowActivityCountTest(TembaTest):
                     FlowRun(
                         uuid=uuid4(),
                         org=self.org,
-                        session=session,
                         flow=flow,
                         contact=contact,
                         status=status,
+                        session_uuid=session.uuid,
                         created_on=timezone.now(),
                         modified_on=timezone.now(),
                         exited_on=timezone.now() if status not in ("A", "W") else None,
@@ -130,7 +104,7 @@ class FlowActivityCountTest(TembaTest):
         self.assertEqual({"status:W": 2}, flow2.counts.scope_totals())
 
         # no difference after squashing
-        squash_activity_counts()
+        squash_flow_counts()
 
         self.assertEqual({"status:A": 2, "status:W": 1, "status:C": 1}, flow1.counts.scope_totals())
         self.assertEqual({"status:W": 2}, flow2.counts.scope_totals())
@@ -155,24 +129,17 @@ class FlowActivityCountTest(TembaTest):
         self.assertEqual({"status:W": 0, "status:X": 1, "status:I": 2}, flow2.counts.scope_totals())
 
         # no difference after squashing except zeros gone
-        squash_activity_counts()
+        squash_flow_counts()
 
         self.assertEqual({"status:A": 2, "status:I": 4}, flow1.counts.scope_totals())
         self.assertEqual({"status:X": 1, "status:I": 2}, flow2.counts.scope_totals())
 
-        # do manual deletion of some runs
-        FlowRun.objects.filter(id__in=[r.id for r in runs2]).update(delete_from_results=True)
+        # delete some runs
         FlowRun.objects.filter(id__in=[r.id for r in runs2]).delete()
 
-        self.assertEqual({"status:A": 0, "status:I": 4}, flow1.counts.scope_totals())
-        self.assertEqual({"status:X": 0, "status:I": 2}, flow2.counts.scope_totals())
-
-        # do archival deletion of the rest
-        FlowRun.objects.filter(id__in=[r.id for r in runs1]).delete()
-
         # status counts are unchanged
-        self.assertEqual({"status:A": 0, "status:I": 4}, flow1.counts.scope_totals())
-        self.assertEqual({"status:X": 0, "status:I": 2}, flow2.counts.scope_totals())
+        self.assertEqual({"status:A": 2, "status:I": 4}, flow1.counts.scope_totals())
+        self.assertEqual({"status:X": 1, "status:I": 2}, flow2.counts.scope_totals())
 
     def test_msgsin_counts(self):
         flow1 = self.create_flow("Test 1")
@@ -242,7 +209,7 @@ class FlowActivityCountTest(TembaTest):
         self.assertEqual(0, flow2.counts.filter(scope="foo:2").sum())
         self.assertEqual(5, flow2.counts.filter(scope="foo:3").sum())
 
-        squash_activity_counts()
+        squash_flow_counts()
 
         self.assertEqual({"foo:1", "foo:2", "foo:3"}, set(flow1.counts.values_list("scope", flat=True)))
 
@@ -258,7 +225,7 @@ class FlowActivityCountTest(TembaTest):
 
         flow2.counts.create(scope="foo:3", count=-5)  # unsquashed zero + squashed zero
 
-        squash_activity_counts()
+        squash_flow_counts()
 
         # flow2/foo:3 should be gone because it squashed to zero
         self.assertEqual({"foo:1"}, set(flow2.counts.values_list("scope", flat=True)))

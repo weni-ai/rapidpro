@@ -1,11 +1,10 @@
 from unittest.mock import patch
 
-from django_redis import get_redis_connection
+from django_valkey import get_valkey_connection
 
-from temba.flows.models import FlowRun, FlowStart
+from temba.flows.models import FlowStart
 from temba.mailroom.queue import queue_interrupt
 from temba.tests import TembaTest, matchers
-from temba.tests.engine import MockSessionWriter
 from temba.utils import json
 
 
@@ -44,7 +43,7 @@ class MailroomQueueTest(TembaTest):
                     "exclusions": {},
                     "params": {"foo": "bar"},
                 },
-                "queued_on": matchers.ISODate(),
+                "queued_on": matchers.ISODatetime(),
             },
         )
 
@@ -58,7 +57,7 @@ class MailroomQueueTest(TembaTest):
             {
                 "type": "import_contact_batch",
                 "task": {"contact_import_batch_id": imp.batches.get().id},
-                "queued_on": matchers.ISODate(),
+                "queued_on": matchers.ISODatetime(),
             },
         )
 
@@ -72,7 +71,7 @@ class MailroomQueueTest(TembaTest):
             {
                 "type": "interrupt_channel",
                 "task": {"channel_id": self.channel.id},
-                "queued_on": matchers.ISODate(),
+                "queued_on": matchers.ISODatetime(),
             },
         )
 
@@ -88,7 +87,7 @@ class MailroomQueueTest(TembaTest):
             {
                 "type": "interrupt_sessions",
                 "task": {"contact_ids": [jim.id, bob.id]},
-                "queued_on": matchers.ISODate(),
+                "queued_on": matchers.ISODatetime(),
             },
         )
 
@@ -99,38 +98,11 @@ class MailroomQueueTest(TembaTest):
         self.assert_org_queued(self.org)
         self.assert_queued_batch_task(
             self.org,
-            {"type": "interrupt_sessions", "task": {"flow_ids": [flow.id]}, "queued_on": matchers.ISODate()},
-        )
-
-    def test_queue_interrupt_by_session(self):
-        jim = self.create_contact("Jim", phone="+12065551212")
-
-        flow = self.get_flow("favorites")
-        flow_nodes = flow.get_definition()["nodes"]
-        color_prompt = flow_nodes[0]
-        color_split = flow_nodes[2]
-
-        (
-            MockSessionWriter(jim, flow)
-            .visit(color_prompt)
-            .send_msg("What is your favorite color?", self.channel)
-            .visit(color_split)
-            .wait()
-            .save()
-        )
-
-        run = FlowRun.objects.get(contact=jim)
-        session = run.session
-        run.delete()
-
-        self.assert_org_queued(self.org)
-        self.assert_queued_batch_task(
-            self.org,
-            {"type": "interrupt_sessions", "task": {"session_ids": [session.id]}, "queued_on": matchers.ISODate()},
+            {"type": "interrupt_sessions", "task": {"flow_ids": [flow.id]}, "queued_on": matchers.ISODatetime()},
         )
 
     def assert_org_queued(self, org):
-        r = get_redis_connection()
+        r = get_valkey_connection()
 
         # check we have one org with active tasks
         self.assertEqual(r.zcard("tasks:batch:active"), 1)
@@ -140,7 +112,7 @@ class MailroomQueueTest(TembaTest):
         self.assertEqual(queued_org, org.id)
 
     def assert_queued_batch_task(self, org, expected_task):
-        r = get_redis_connection()
+        r = get_valkey_connection()
 
         # check we have one task in the org's queue
         self.assertEqual(r.zcard(f"tasks:batch:{org.id}"), 1)

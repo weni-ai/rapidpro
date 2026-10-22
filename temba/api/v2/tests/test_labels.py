@@ -11,8 +11,8 @@ class LabelsEndpointTest(APITest):
         endpoint_url = reverse("api.v2.labels") + ".json"
 
         self.assertGetNotPermitted(endpoint_url, [None, self.agent])
-        self.assertPostNotPermitted(endpoint_url, [None, self.user, self.agent])
-        self.assertDeleteNotPermitted(endpoint_url + "?uuid=123", [None, self.user, self.agent])
+        self.assertPostNotPermitted(endpoint_url, [None, self.agent])
+        self.assertDeleteNotPermitted(endpoint_url + "?uuid=123", [None, self.agent])
 
         frank = self.create_contact("Frank", urns=["tel:123456"])
         important = self.create_label("Important")
@@ -31,7 +31,7 @@ class LabelsEndpointTest(APITest):
         # no filtering
         self.assertGet(
             endpoint_url,
-            [self.user, self.editor],
+            [self.editor, self.admin],
             results=[
                 {"uuid": str(feedback.uuid), "name": "Feedback", "count": 0},
                 {"uuid": str(important.uuid), "name": "Important", "count": 1},
@@ -107,6 +107,6 @@ class LabelsEndpointTest(APITest):
                 endpoint_url,
                 self.admin,
                 {"name": "Interesting"},
-                errors={None: "Cannot create object because workspace has reached limit of 3."},
+                errors={None: "Cannot create object because workspace has reached limit."},
                 status=409,
             )

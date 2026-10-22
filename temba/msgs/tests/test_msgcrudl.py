@@ -52,33 +52,29 @@ class MsgCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # check query count
         self.login(self.admin)
-        with self.assertNumQueries(12):
+        with self.assertNumQueries(11):
             self.client.get(inbox_url)
 
         self.assertRequestDisallowed(inbox_url, [None, self.agent])
         response = self.assertListFetch(
-            inbox_url + "?refresh=10000", [self.user, self.editor, self.admin], context_objects=[msg4, msg3, msg2, msg1]
+            inbox_url + "?refresh=10000", [self.editor, self.admin], context_objects=[msg4, msg3, msg2, msg1]
         )
 
         # check that we have the appropriate bulk actions
         self.assertEqual(("archive", "label"), response.context["actions"])
 
         # test searching
-        response = self.client.get(inbox_url + "?search=joe")
-        self.assertEqual([msg2, msg1], list(response.context_data["object_list"]))
+        self.assertListFetch(inbox_url + "?search=joe", [self.editor, self.admin], context_objects=[msg2, msg1])
+
+        # error response if query too long
+        self.assertListFetch(inbox_url + "?search=" + "x" * 1001, [self.editor], status=413)
 
         # add some labels
         label1 = self.create_label("label1")
         self.create_label("label2")
         label3 = self.create_label("label3")
 
-        # viewers can't label messages
-        response = self.requestView(
-            inbox_url, self.user, post_data={"action": "label", "objects": [msg1.id], "label": label1.id, "add": True}
-        )
-        self.assertEqual(403, response.status_code)
-
-        # but editors can
+        # editors can label messages
         response = self.requestView(
             inbox_url,
             self.editor,
@@ -120,7 +116,7 @@ class MsgCRUDLTest(TembaTest, CRUDLTestMixin):
         msg1.refresh_from_db()
         self.assertEqual({label1, label3}, set(msg1.labels.all()))
 
-        self.assertContentMenu(inbox_url, self.user, ["Export"])
+        self.assertContentMenu(inbox_url, self.editor, ["Send", "New Label", "Export"])
         self.assertContentMenu(inbox_url, self.admin, ["Send", "New Label", "Export"])
 
     def test_flows(self):
@@ -135,11 +131,11 @@ class MsgCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # check query count
         self.login(self.admin)
-        with self.assertNumQueries(12):
+        with self.assertNumQueries(11):
             self.client.get(flows_url)
 
         self.assertRequestDisallowed(flows_url, [None, self.agent])
-        response = self.assertListFetch(flows_url, [self.user, self.editor, self.admin], context_objects=[msg2, msg1])
+        response = self.assertListFetch(flows_url, [self.editor, self.admin], context_objects=[msg2, msg1])
 
         self.assertEqual(("archive", "label"), response.context["actions"])
 
@@ -156,12 +152,12 @@ class MsgCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # check query count
         self.login(self.admin)
-        with self.assertNumQueries(12):
+        with self.assertNumQueries(11):
             self.client.get(archived_url)
 
         self.assertRequestDisallowed(archived_url, [None, self.agent])
         response = self.assertListFetch(
-            archived_url + "?refresh=10000", [self.user, self.editor, self.admin], context_objects=[msg3, msg2, msg1]
+            archived_url + "?refresh=10000", [self.editor, self.admin], context_objects=[msg3, msg2, msg1]
         )
         self.assertEqual(("restore", "label", "delete"), response.context["actions"])
 
@@ -169,11 +165,7 @@ class MsgCRUDLTest(TembaTest, CRUDLTestMixin):
         response = self.client.get(archived_url + "?search=joe")
         self.assertEqual([msg2, msg1], list(response.context_data["object_list"]))
 
-        # viewers can't restore messages
-        response = self.requestView(archived_url, self.user, post_data={"action": "restore", "objects": [msg1.id]})
-        self.assertEqual(403, response.status_code)
-
-        # but editors can
+        # editors can restore messages
         response = self.requestView(archived_url, self.editor, post_data={"action": "restore", "objects": [msg1.id]})
         self.assertEqual(200, response.status_code)
         self.assertEqual({msg2, msg3}, set(Msg.objects.filter(visibility=Msg.VISIBILITY_ARCHIVED)))
@@ -203,12 +195,12 @@ class MsgCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # check query count
         self.login(self.admin)
-        with self.assertNumQueries(11):
+        with self.assertNumQueries(10):
             self.client.get(outbox_url)
 
         # messages sorted by created_on
         self.assertRequestDisallowed(outbox_url, [None, self.agent])
-        response = self.assertListFetch(outbox_url, [self.user, self.editor, self.admin], context_objects=[msg1])
+        response = self.assertListFetch(outbox_url, [self.editor, self.admin], context_objects=[msg1])
         self.assertEqual((), response.context["actions"])
 
         # create another broadcast this time with 3 messages
@@ -251,16 +243,14 @@ class MsgCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # check query count
         self.login(self.admin)
-        with self.assertNumQueries(10):
+        with self.assertNumQueries(9):
             self.client.get(sent_url)
 
         # messages sorted by sent_on
         self.assertRequestDisallowed(sent_url, [None, self.agent])
-        response = self.assertListFetch(
-            sent_url, [self.user, self.editor, self.admin], context_objects=[msg1, msg3, msg2]
-        )
+        response = self.assertListFetch(sent_url, [self.editor, self.admin], context_objects=[msg1, msg3, msg2])
 
-        self.assertContains(response, reverse("channels.channellog_msg", args=[msg1.channel.uuid, msg1.id]))
+        self.assertContains(response, reverse("channels.channel_logs_read", args=[msg1.channel.uuid, "msg", msg1.id]))
 
         response = self.client.get(sent_url + "?search=joe")
         self.assertEqual([msg1, msg2], list(response.context_data["object_list"]))
@@ -282,16 +272,14 @@ class MsgCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # check query count
         self.login(self.admin)
-        with self.assertNumQueries(10):
+        with self.assertNumQueries(9):
             self.client.get(failed_url)
 
         self.assertRequestDisallowed(failed_url, [None, self.agent])
-        response = self.assertListFetch(
-            failed_url, [self.user, self.editor, self.admin], context_objects=[msg3, msg2, msg1]
-        )
+        response = self.assertListFetch(failed_url, [self.editor, self.admin], context_objects=[msg3, msg2, msg1])
 
         self.assertEqual(("resend",), response.context["actions"])
-        self.assertContains(response, reverse("channels.channellog_msg", args=[msg1.channel.uuid, msg1.id]))
+        self.assertContains(response, reverse("channels.channel_logs_read", args=[msg1.channel.uuid, "msg", msg1.id]))
 
         # resend some messages
         self.client.post(failed_url, {"action": "resend", "objects": [msg2.id]})
@@ -335,11 +323,10 @@ class MsgCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertRedirect(response, reverse("orgs.org_choose"))
 
         # can as org viewer user
-        response = self.requestView(label3_url, self.user, HTTP_X_TEMBA_SPA=1)
+        response = self.requestView(label3_url, self.editor, HTTP_X_TEMBA_SPA=1)
         self.assertEqual(f"/msg/labels/{label3.uuid}", response.headers[TEMBA_MENU_SELECTION])
         self.assertEqual(200, response.status_code)
         self.assertEqual(("label",), response.context["actions"])
-        self.assertContentMenu(label3_url, self.user, ["Export", "Usages"])  # no update or delete
 
         # check that non-visible messages are excluded, and messages and ordered newest to oldest
         self.assertEqual([msg6, msg3, msg2, msg1], list(response.context["object_list"]))
@@ -348,7 +335,7 @@ class MsgCRUDLTest(TembaTest, CRUDLTestMixin):
         response = self.client.get(f"{label3_url}?search=joe")
         self.assertEqual({msg1, msg6}, set(response.context_data["object_list"]))
 
-        # check admin users see edit and delete options for labels
+        self.assertContentMenu(label3_url, self.editor, ["Edit", "Delete", "-", "Export", "Usages"])
         self.assertContentMenu(label1_url, self.admin, ["Edit", "Delete", "-", "Export", "Usages"])
 
     def test_export(self):
@@ -361,7 +348,7 @@ class MsgCRUDLTest(TembaTest, CRUDLTestMixin):
         self.assertRequestDisallowed(export_url, [None, self.agent])
         response = self.assertUpdateFetch(
             export_url + "?l=I",
-            [self.user, self.editor, self.admin],
+            [self.editor, self.admin],
             form_fields=(
                 "start_date",
                 "end_date",

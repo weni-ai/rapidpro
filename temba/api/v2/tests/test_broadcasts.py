@@ -17,7 +17,7 @@ class BroadcastsEndpointTest(APITest):
         endpoint_url = reverse("api.v2.broadcasts") + ".json"
 
         self.assertGetNotPermitted(endpoint_url, [None, self.agent])
-        self.assertPostNotPermitted(endpoint_url, [None, self.user, self.agent])
+        self.assertPostNotPermitted(endpoint_url, [None, self.agent])
         self.assertDeleteNotAllowed(endpoint_url)
 
         self.create_channel("FBA", "Facebook Channel", "billy_bob")
@@ -56,7 +56,7 @@ class BroadcastsEndpointTest(APITest):
         # no filtering
         response = self.assertGet(
             endpoint_url,
-            [self.user, self.editor, self.admin],
+            [self.editor, self.admin],
             results=[bcast4, bcast3, bcast2, bcast1],
             num_queries=self.BASE_SESSION_QUERIES + 4,
         )
@@ -72,6 +72,7 @@ class BroadcastsEndpointTest(APITest):
                 "groups": [],
                 "text": {"eng": "Hello 2"},
                 "attachments": {"eng": []},
+                "quick_replies": {"eng": []},
                 "base_language": "eng",
                 "created_on": format_datetime(bcast2.created_on),
             },
@@ -87,6 +88,7 @@ class BroadcastsEndpointTest(APITest):
                 "groups": [{"uuid": reporters.uuid, "name": reporters.name}],
                 "text": {"eng": "Hello 4"},
                 "attachments": {"eng": []},
+                "quick_replies": {"eng": []},
                 "base_language": "eng",
                 "created_on": format_datetime(bcast4.created_on),
             },
@@ -155,6 +157,19 @@ class BroadcastsEndpointTest(APITest):
             errors={"non_field_errors": "No attachment translations provided in base language."},
         )
 
+        # try to create new broadcast with quick replies translations that don't include base language
+        self.assertPost(
+            endpoint_url,
+            self.admin,
+            {
+                "text": {"eng": "Hello"},
+                "quick_replies": {"spa": [{"text": "Si"}, {"text": "No"}]},
+                "base_language": "eng",
+                "contacts": [joe.uuid],
+            },
+            errors={"non_field_errors": "No quick_replies translations provided in base language."},
+        )
+
         # create new broadcast with all fields
         response = self.assertPost(
             endpoint_url,
@@ -164,6 +179,10 @@ class BroadcastsEndpointTest(APITest):
                 "attachments": {
                     "eng": [str(media1.uuid), f"video/mp4:http://example.com/{media2.uuid}.mp4"],
                     "kin": [str(media2.uuid)],
+                },
+                "quick_replies": {
+                    "eng": [{"text": "Red"}, {"text": "Green", "extra": "Like grass"}, {"text": "Blue"}],
+                    "fra": [{"text": "Rouge"}, {"text": "Vert"}, {"text": "Bleu"}],
                 },
                 "base_language": "eng",
                 "urns": ["facebook:12345"],
@@ -179,9 +198,11 @@ class BroadcastsEndpointTest(APITest):
                 "eng": {
                     "text": "Hello @contact.name",
                     "attachments": [f"image/jpeg:{media1.url}", f"video/mp4:{media2.url}"],
+                    "quick_replies": [{"text": "Red"}, {"text": "Green", "extra": "Like grass"}, {"text": "Blue"}],
                 },
                 "spa": {"text": "Hola @contact.name"},
                 "kin": {"attachments": [f"video/mp4:{media2.url}"]},
+                "fra": {"quick_replies": [{"text": "Rouge"}, {"text": "Vert"}, {"text": "Bleu"}]},
             },
             broadcast.translations,
         )
