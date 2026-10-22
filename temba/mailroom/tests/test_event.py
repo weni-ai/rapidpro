@@ -427,3 +427,20 @@ class EventTest(TembaTest):
             },
             Event.from_ivr_call(self.org, self.admin, call2),
         )
+
+    def test_redact_for_org(self):
+        from temba.contacts.models import ContactURN
+
+        event = {
+            "type": Event.TYPE_CONTACT_URNS_CHANGED,
+            "urns": ["tel:+123456789", "whatsapp:BR.abc123"],
+        }
+
+        with self.anonymous(self.org):
+            redacted = Event.redact_for_org(self.org, event)
+            self.assertEqual([ContactURN.ANON_MASK, ContactURN.ANON_MASK], redacted["urns"])
+
+        self.assertEqual(
+            ["tel:+123456789", "whatsapp:BR.abc123"],
+            Event.redact_for_org(self.org, event)["urns"],
+        )
