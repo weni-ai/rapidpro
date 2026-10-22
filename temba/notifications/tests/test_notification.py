@@ -308,12 +308,11 @@ class NotificationTest(TembaTest):
         send_notification_emails()
 
         self.assertEqual(2, len(mail.outbox))
-
-        self.assertEqual(2, len(mail.outbox))
         self.assertEqual("[Nyaruka] Incident: WhatsApp Templates Sync Failed", mail.outbox[0].subject)
-        self.assertEqual(["admin@textit.com"], mail.outbox[0].recipients())
         self.assertEqual("[Nyaruka] Incident: WhatsApp Templates Sync Failed", mail.outbox[1].subject)
-        self.assertEqual(["editor@textit.com"], mail.outbox[1].recipients())
+
+        recipients = set(mail.outbox[0].recipients()).union(mail.outbox[1].recipients())
+        self.assertEqual({self.admin.email, self.editor.email}, recipients)
 
     def test_incident_started(self):
         self.org.add_user(self.editor, OrgRole.ADMINISTRATOR)  # upgrade editor to administrator

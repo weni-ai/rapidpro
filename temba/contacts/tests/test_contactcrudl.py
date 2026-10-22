@@ -832,7 +832,7 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         nodes = flow.get_definition()["nodes"]
         (MockSessionWriter(joe, flow).visit(nodes[0]).add_contact_urn("twitter", "joey").complete().save())
 
-        self.login(self.user)
+        self.login(self.editor)
 
         with self.anonymous(self.org):
             response = self.client.get(history_url)
