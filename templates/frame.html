@@ -25,8 +25,6 @@
     <script src="{% url 'django.views.i18n.javascript_catalog' %}"></script>
     {% compress js %}
       <script src="{{ STATIC_URL }}rest_framework/js/prettify-min.js"></script>
-      <script src="{{ STATIC_URL }}highcharts/highstock.js?v=9.3.0"></script>
-      <script src="{{ STATIC_URL }}highcharts/modules/drilldown.js"></script>
       <script src="{{ STATIC_URL }}qrious/dist/qrious.min.js"></script>
       <script src="{{ STATIC_URL }}rest_framework/js/prettify-min.js"></script>
       <script src="{{ STATIC_URL }}croppie/croppie.js"></script>
@@ -68,8 +66,14 @@
       }
 
       function handleMenuListSelection(evt) {
-        document.activeElement.blur()
-        spaGet(evt.detail.selected.target_url);
+        document.activeElement.blur();
+
+        const selected = evt.detail.selected;
+        if (selected.url) {
+          spaGet(selected.url);
+        } else if (selected.type == "workspace") {
+          handleWorkspaceChanged(selected.id);
+        }
       }
 
       // set our initial title
@@ -91,11 +95,6 @@
         window.addEventListener('resize', function(event) {
           updateFrameForMobile();
         });
-      });
-
-      document.addEventListener("temba-workspace-choosen", function(event) {
-        const item = event.detail;
-        handleWorkspaceChanged(item.id);
       });
 
       document.addEventListener("temba-workspace-settings", function(event) {
@@ -196,7 +195,7 @@
           <div class="ajax-scripts"></div>
           <div class="flex-col">
             <div style="height:100vh;width:100%" class="flex flex-col">
-              {% include "includes/servicing.html" %}
+              {% include "includes/staff_header.html" %}
               <div style="height:100vh;width:100%;overflow:hidden" class="flex widget-container">
                 <div class="folders">
                   <temba-menu style="height:100%"
@@ -205,7 +204,6 @@
                               -temba-button-clicked="handleMenuClicked(event)"
                               -temba-ready="handleMenuReady"
                               -temba-selection="handleMenuListSelection"
-                              class="{% if servicing %}{% endif %}"
                               id="nav">
                     {% block menu-header %}
                     {% endblock menu-header %}
@@ -264,7 +262,7 @@
                       <!--
                   License requires that the copyright attribution remain, please do not modify.
                 -->
-                      Copyright © 2012-2023 TextIt. All rights reserved.
+                      Copyright © 2012-2025 TextIt. All rights reserved.
                     </div>
                   {% endblock footer %}
                 </div>

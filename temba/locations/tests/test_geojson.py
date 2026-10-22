@@ -9,7 +9,7 @@ from django.core.management import call_command
 from django.test.utils import captured_stdout
 
 from temba.locations.models import AdminBoundary, BoundaryAlias
-from temba.tests import TembaTest
+from temba.tests import TembaTest, matchers
 from temba.utils import json
 
 
@@ -389,6 +389,18 @@ class ImportGeoJSONtest(TembaTest):
         )
 
         self.assertOSMIDs({"R1000"})
+
+    def test_import_geojson(self):
+        self.assertEqual(0, AdminBoundary.objects.all().count())
+        call_command("import_geojson", "test-data/rwanda.zip")
+        self.assertEqual(9, AdminBoundary.objects.all().count())
+        self.assertEqual(1, AdminBoundary.objects.filter(level=0).count())
+        self.assertEqual(5, AdminBoundary.objects.filter(level=1).count())
+        self.assertEqual(3, AdminBoundary.objects.filter(level=2).count())
+        self.assertEqual(0, AdminBoundary.objects.filter(level=3).count())
+
+        self.country = AdminBoundary.objects.get(level=0)
+        self.assertEqual(self.country.geometry, matchers.Dict())
 
     def assertOSMIDs(self, ids):
         self.assertEqual(set(ids), set(AdminBoundary.objects.values_list("osm_id", flat=True)))

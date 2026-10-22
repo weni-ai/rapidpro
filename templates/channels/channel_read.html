@@ -74,6 +74,11 @@
 {% block fields %}
 {% endblock fields %}
 {% block content %}
+  <div class="flex px-4 rounded-lg mb-6 bg-white">
+    <div class="flex-grow"></div>
+    <temba-range-picker min="{{ object.created_on|date:"Y-m-d" }}">
+    </temba-range-picker>
+  </div>
   {% block charts-zone %}
     {% if object.is_android %}
       {% if last_sync %}
@@ -120,37 +125,49 @@
         </div>
       {% endif %}
     {% endif %}
-    <div class="card pt-8 flex-shrink-0">
-      <div id="channel-chart"></div>
-    </div>
-    {% if ivr_count %}
-      <div class="minutes-disclaimer">
-        {% blocktrans trimmed %}
-          In many cases operators round up to the nearest minute for billing. Minutes shown here are only a usage guideline.
-        {% endblocktrans %}
-      </div>
-    {% endif %}
+    <temba-chart class="mb-6"
+                 url="{% url 'channels.channel_chart' object.uuid %}"
+                 dataname="Messages"
+                 legend
+                 showall
+                 requireWindow
+                 xtype="time"
+                 palette="qualitative-paired"
+                 colorIndex="0">
+    </temba-chart>
     <table class="list lined">
       <thead>
         <tr>
           <th>{% trans "Month" %}</th>
-          <th>{% trans "Incoming Text Messages" %}</th>
-          <th>{% trans "Outgoing Text Messages" %}</th>
+          <th>
+            {% if ivr_count %}
+              {% trans "Incoming Text" %}
+            {% else %}
+              {% trans "Incoming" %}
+            {% endif %}
+          </th>
+          <th>
+            {% if ivr_count %}
+              {% trans "Outgoing Text" %}
+            {% else %}
+              {% trans "Outgoing" %}
+            {% endif %}
+          </th>
           {% if ivr_count %}
-            <th>{% trans "Incoming IVR Messages" %}</th>
-            <th>{% trans "Outgoing IVR Messages" %}</th>
+            <th>{% trans "Incoming Voice" %}</th>
+            <th>{% trans "Outgoing Voice" %}</th>
           {% endif %}
         </tr>
       </thead>
       <tbody>
-        {% for month_data in message_stats_table %}
+        {% for month_data in monthly_counts %}
           <tr>
-            <td>{{ month_data.month_start|utc|date:"F Y" }}</td>
-            <td>{{ month_data.incoming_messages_count|intcomma }}</td>
-            <td>{{ month_data.outgoing_messages_count|intcomma }}</td>
+            <td>{{ month_data.month_start|date:"F Y" }}</td>
+            <td>{{ month_data.text_in|intcomma }}</td>
+            <td>{{ month_data.text_out|intcomma }}</td>
             {% if ivr_count %}
-              <td>{{ month_data.incoming_ivr_count|intcomma }}</td>
-              <td>{{ month_data.outgoing_ivr_count|intcomma }}</td>
+              <td>{{ month_data.voice_in|intcomma }}</td>
+              <td>{{ month_data.voice_out|intcomma }}</td>
             {% endif %}
           </tr>
         {% endfor %}
@@ -213,85 +230,38 @@
 {% block extra-script %}
   {{ block.super }}
   <script type="text/javascript">
-    var chartUrl = "{% url 'channels.channel_chart' object.uuid %}";
-    var chart;
     onSpload(function() {
+      const rangePicker = document.querySelector("temba-range-picker");
 
-      var store = document.querySelector('temba-store');
-      store.getUrl(chartUrl, {
-        force: true
-      }).then(function(response) {
-        var chartData = response.json;
-        if (chartData.start_date) {
-          window.setTimeout(function() {
-            chart = new Highcharts.Chart({
-              credits: {
-                enabled: false
-              },
-              colors: ['#80b9fb',
-                '#2980b9',
-                '#CD76F0',
-                '#8e44ad',
-                '#633077'
-              ],
-              chart: {
-                renderTo: 'channel-chart',
-                zoomType: 'x',
-                type: 'column'
-              },
-              title: {
-                text: null
-              },
-              xAxis: {
-                type: 'datetime',
-                min: chartData.start_date,
-                max: chartData.end_date,
-                dateTimeLabelFormats: {
-                  millisecond: '%H:%M:%S.%L',
-                  second: '%H:%M:%S',
-                  minute: '%H:%M',
-                  hour: '%H:%M',
-                  day: '%b %e',
-                  week: '%e. %b',
-                  month: '%b \'%y',
-                  year: '%Y'
-                },
+      document.querySelectorAll("temba-chart").forEach(function(chart) {
+        chart.setAttribute("start", rangePicker.startDate);
+        chart.setAttribute("end", rangePicker.endDate);
+      });
 
-              },
-              yAxis: [{
-                title: {
-                  text: ''
-                },
-                opposite: false,
-                min: 0,
-                allowDecimals: false,
-              }, {
-                title: {
-                  text: '{{ _("Messages")|escapejs }}'
-                },
-                opposite: true,
-                min: 0,
-                allowDecimals: false,
-              }],
-              plotOptions: {
-                series: {
-                  pointPadding: .1,
-                  groupPadding: .1,
-                  stacking: 'normal'
-                }
-              },
-              tooltip: {
-                formatter: function() {
-                  return '<b>' + this.series.name + '</b>: ' + this.y + '<br />' +
-                    Highcharts.dateFormat('%b %e, %Y', this.x);
-                }
-              },
-              series: chartData.series
-            });
-
-          }, 500);
-        }
+      rangePicker.addEventListener("temba-date-range-changed", function(e) {
+        const {
+          start,
+          end
+        } = e.detail;
+        document.querySelectorAll("temba-chart").forEach(function(chart) {
+          chart.setAttribute("start", start);
+          chart.setAttribute("end", end);
+        });
       });
     });
   </script>
 {% endblock extra-script %}
+{% block extra-style %}
+  {{ block.super }}
+  <style>
+    temba-range-picker {
+      padding: 0.5em;
+    }
+
+    temba-chart {
+      background: #fff;
+      padding: 2em;
+      border-radius: var(--curvature);
+    }
+  </style>
+{% endblock extra-style %}

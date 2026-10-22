@@ -35,6 +35,16 @@
   dependencies:
     purgecss "^3.1.3"
 
+"@jsplumb/browser-ui@^6.2.10":
+  version "6.2.10"
+  resolved "https://registry.yarnpkg.com/@jsplumb/browser-ui/-/browser-ui-6.2.10.tgz#86b85ed42110563d2816e3712677cdbbbf33366f"
+  integrity sha512-trk++mK5q6hceJL79teemzcilJ+8DrZT/lMK0+B80AtHqZHr0YwMCf+so2JBb2Z/MDZ0fUEU9MbELY6OPhhs5g==
+
+"@kurkle/color@^0.3.0":
+  version "0.3.4"
+  resolved "https://registry.yarnpkg.com/@kurkle/color/-/color-0.3.4.tgz#4d4ff677e1609214fc71c580125ddddd86abcabf"
+  integrity sha512-M5UknZPHRu3DEDWoipU6sE8PdkZ6Z/S+v4dD+Ke8IaNlpdSQah50lz1KtcFBa2vsdOnwbbnxJwVM4wty6udA5w==
+
 "@lit-labs/ssr-dom-shim@^1.2.0":
   version "1.2.0"
   resolved "https://registry.yarnpkg.com/@lit-labs/ssr-dom-shim/-/ssr-dom-shim-1.2.0.tgz#353ce4a76c83fadec272ea5674ede767650762fd"
@@ -75,44 +85,29 @@
     "@nodelib/fs.scandir" "2.1.5"
     fastq "^1.6.0"
 
-"@nyaruka/flow-editor@1.37.1":
-  version "1.37.1"
-  resolved "https://registry.yarnpkg.com/@nyaruka/flow-editor/-/flow-editor-1.37.1.tgz#cea0d853c5a83540254a694329cf896445ddbbb7"
-  integrity sha512-aaxish/VL+sGv5XMU8kHAxgccVPUCrgNqaDBMmmvVsSH9RdDjUFar0ZuOfLkNma30JvdcB8KkH8VSx1GXeFm4g==
+"@nyaruka/flow-editor@1.44.7":
+  version "1.44.7"
+  resolved "https://registry.yarnpkg.com/@nyaruka/flow-editor/-/flow-editor-1.44.7.tgz#7aa31b77c545d6714e057a46475c1ea34f5eac58"
+  integrity sha512-jVNP8SgEW2ZBuMIoPrkGVWZyvMPx4i05C2iyzxY80x73EP6RFKQEj8IzU7eJOlloTKstF8z3m7/w07qiBE3jUg==
   dependencies:
-    "@nyaruka/temba-components" "0.101.0"
+    "@nyaruka/temba-components" "0.124.2"
     react "^16.8.6"
     react-dom "^16.8.6"
 
-"@nyaruka/temba-components@0.101.0":
-  version "0.101.0"
-  resolved "https://registry.yarnpkg.com/@nyaruka/temba-components/-/temba-components-0.101.0.tgz#dc6cfd2bd154b94045b84f2c9352fb2810c0cefa"
-  integrity sha512-+1Gehj4XqyXr+xajlOykOv8ZIiANPobvztS6Z+uMTFgzcmQbGqM6lkoOG+IMaOyIUDogLnAd0vjxhozjdF0HSg==
+"@nyaruka/temba-components@0.124.2":
+  version "0.124.2"
+  resolved "https://registry.yarnpkg.com/@nyaruka/temba-components/-/temba-components-0.124.2.tgz#019a4a5df18b502a53d16338b2e328c2e6436701"
+  integrity sha512-VF6C2LWTXbJ3PBPy6NkOqD9vhs44ohTNvs9PHISOrmsC8i0JF1oj+msDBGm1ig/f6LTouzBNLs08YjWg9O1eyg==
   dependencies:
+    "@jsplumb/browser-ui" "^6.2.10"
     "@lit/localize" "^0.12.1"
+    chart.js "^4.4.8"
+    chartjs-adapter-luxon "^1.3.1"
     color-hash "^2.0.2"
     croppie "^2.6.5"
     geojson "^0.5.0"
     image-size "^1.1.1"
-    leaflet "1.5.1"
-    lit "3.1.2"
-    lit-element "^4.0.4"
-    lit-html "^3.1.2"
-    luxon "^2.4.0"
-    remarkable "^2.0.1"
-    serialize-javascript "^6.0.2"
-    tiny-lru "^11.2.5"
-
-"@nyaruka/temba-components@0.113.0":
-  version "0.113.0"
-  resolved "https://registry.yarnpkg.com/@nyaruka/temba-components/-/temba-components-0.113.0.tgz#e37db43737d39b5b72745f75cca8c2caad6dcc57"
-  integrity sha512-nCMMuMuaDM6w/H2EvezYVdMFEOMye6Iujd+1Yt5oVQO3BMdkA1w1xqwdduGYRyA8xRG1TgdLomRxbhcKFuAuew==
-  dependencies:
-    "@lit/localize" "^0.12.1"
-    color-hash "^2.0.2"
-    croppie "^2.6.5"
-    geojson "^0.5.0"
-    image-size "^1.1.1"
+    immer "10"
     leaflet "1.5.1"
     lit "3.1.2"
     lit-element "^4.0.4"
@@ -121,6 +116,32 @@
     remarkable "^2.0.1"
     serialize-javascript "^6.0.2"
     tiny-lru "^11.2.5"
+    zustand "^5.0.3"
+
+"@nyaruka/temba-components@0.129.2":
+  version "0.129.2"
+  resolved "https://registry.yarnpkg.com/@nyaruka/temba-components/-/temba-components-0.129.2.tgz#400fda01ca4c3c27fd1634f85589c6f9e5a3b6a5"
+  integrity sha512-E0H2I14YhLs/ZQFys0rFHovyDJt5hOwXPH0B2dcy7lT5D86ddmO6t0R45dwBLSMlBHizx2wC4JEZTBwgcHBExA==
+  dependencies:
+    "@jsplumb/browser-ui" "^6.2.10"
+    "@lit/localize" "^0.12.1"
+    chart.js "^4.4.8"
+    chartjs-adapter-luxon "^1.3.1"
+    chartjs-plugin-datalabels "^2.2.0"
+    color-hash "^2.0.2"
+    croppie "^2.6.5"
+    geojson "^0.5.0"
+    image-size "^1.1.1"
+    immer "10"
+    leaflet "1.5.1"
+    lit "3.1.2"
+    lit-element "^4.0.4"
+    lit-html "^3.1.2"
+    luxon "3.5"
+    remarkable "^2.0.1"
+    serialize-javascript "^6.0.2"
+    tiny-lru "^11.2.5"
+    zustand "^5.0.3"
 
 "@sindresorhus/merge-streams@^2.1.0":
   version "2.3.0"
@@ -296,6 +317,23 @@ chalk@^4.1.0:
     ansi-styles "^4.1.0"
     supports-color "^7.1.0"
 
+chart.js@^4.4.8:
+  version "4.4.9"
+  resolved "https://registry.yarnpkg.com/chart.js/-/chart.js-4.4.9.tgz#602e2fc2462f0f7bb7b255eaa1b51f56a43a1362"
+  integrity sha512-EyZ9wWKgpAU0fLJ43YAEIF8sr5F2W3LqbS40ZJyHIner2lY14ufqv2VMp69MAiZ2rpwxEUxEhIH/0U3xyRynxg==
+  dependencies:
+    "@kurkle/color" "^0.3.0"
+
+chartjs-adapter-luxon@^1.3.1:
+  version "1.3.1"
+  resolved "https://registry.yarnpkg.com/chartjs-adapter-luxon/-/chartjs-adapter-luxon-1.3.1.tgz#8ad8be7cc1521bacd6cd2ff4b013669d4dd49364"
+  integrity sha512-yxHov3X8y+reIibl1o+j18xzrcdddCLqsXhriV2+aQ4hCR66IYFchlRXUvrJVoxglJ380pgytU7YWtoqdIgqhg==
+
+chartjs-plugin-datalabels@^2.2.0:
+  version "2.2.0"
+  resolved "https://registry.yarnpkg.com/chartjs-plugin-datalabels/-/chartjs-plugin-datalabels-2.2.0.tgz#369578e131d743c2e34b5fbe2d3f9335f6639b8f"
+  integrity sha512-14ZU30lH7n89oq+A4bWaJPnAG8a7ZTk7dKf48YAzMvJjQtjrgg5Dpk9f+LbjCF6bpx3RAGTeL13IXpKQYyRvlw==
+
 chokidar@^3.3.0:
   version "3.6.0"
   resolved "https://registry.yarnpkg.com/chokidar/-/chokidar-3.6.0.tgz#197c6cc669ef2a8dc5e7b4d97ee4e092c3eb0d5b"
@@ -320,10 +358,10 @@ cliui@^8.0.1:
     strip-ansi "^6.0.1"
     wrap-ansi "^7.0.0"
 
-codemirror@5.18.2:
-  version "5.18.2"
-  resolved "https://registry.npmjs.org/codemirror/-/codemirror-5.18.2.tgz#55b42d0190f72ec86c13f25d945f347cabc16a8e"
-  integrity sha512-xjBalLC1Yj8HqBN0x0NXlkynl7JYLz+Q0e0bbVNUwCKIw2Rr097j8QB0VvQoAHFOOCRge3nQyfoLRMx97TGccQ==
+codemirror@5.58.2:
+  version "5.58.2"
+  resolved "https://registry.yarnpkg.com/codemirror/-/codemirror-5.58.2.tgz#ed54a1796de1498688bea1cdd4e9eeb187565d1b"
+  integrity sha512-K/hOh24cCwRutd1Mk3uLtjWzNISOkm4fvXiMO7LucCrqbh6aJDdtqUziim3MZUI6wOY0rvY1SlL1Ork01uMy6w==
 
 color-convert@^1.9.0, color-convert@^1.9.3:
   version "1.9.3"
@@ -614,11 +652,6 @@ has@^1.0.3:
   dependencies:
     function-bind "^1.1.1"
 
-highcharts@9.3.0:
-  version "9.3.0"
-  resolved "https://registry.npmjs.org/highcharts/-/highcharts-9.3.0.tgz#999496c8af677d5f08e41e2e708d3eb7baf56640"
-  integrity sha512-nQ7yW5ni7wFiPgDN2IWrS6o6NjL1gK/OhZjrdpyB3FQuefMkTQngygP+JqZFMx7PDrP3YAvfejx0M5IgkC01ow==
-
 html-tags@^3.1.0:
   version "3.3.1"
   resolved "https://registry.npmjs.org/html-tags/-/html-tags-3.3.1.tgz#a04026a18c882e4bba8a01a3d39cfe465d40b5ce"
@@ -640,6 +673,11 @@ image-size@~0.5.0:
   version "0.5.5"
   resolved "https://registry.npmjs.org/image-size/-/image-size-0.5.5.tgz#09dfd4ab9d20e29eb1c3e80b8990378df9e3cb9c"
   integrity sha512-6TDAlDPZxUFCv+fuOkIoXT/V/f3Qbq8e37p+YOiYrUv3v9cc3/6x78VdfPgFVaB9dZYeLUfKgHRebpkm/oP2VQ==
+
+immer@10:
+  version "10.1.1"
+  resolved "https://registry.yarnpkg.com/immer/-/immer-10.1.1.tgz#206f344ea372d8ea176891545ee53ccc062db7bc"
+  integrity sha512-s2MPrmjovJcoMaHtx6K11Ra7oD05NT97w1IC5zpMkT6Atjr7H8LjaDd81iIxUYpMKSRRNMJE703M1Fhr/TctHw==
 
 import-fresh@^3.2.1:
   version "3.3.0"
@@ -837,11 +875,6 @@ luxon@3.5:
   version "3.5.0"
   resolved "https://registry.yarnpkg.com/luxon/-/luxon-3.5.0.tgz#6b6f65c5cd1d61d1fd19dbf07ee87a50bf4b8e20"
   integrity sha512-rh+Zjr6DNfUYR3bPwJEnuwDdqMbxZW7LOQfUN4B54+Cl+0o5zaU9RJ6bcidfDtC1cWCZXQ+nvX8bf6bAji37QQ==
-
-luxon@^2.4.0:
-  version "2.5.2"
-  resolved "https://registry.npmjs.org/luxon/-/luxon-2.5.2.tgz#17ed497f0277e72d58a4756d6a9abee4681457b6"
-  integrity sha512-Yg7/RDp4nedqmLgyH0LwgGRvMEKVzKbUdkBYyCosbHgJ+kaOUx0qzSiSatVc3DFygnirTPYnMM2P5dg2uH1WvA==
 
 merge2@^1.3.0:
   version "1.4.1"
@@ -1522,3 +1555,8 @@ yargs@^17.0.0:
     string-width "^4.2.3"
     y18n "^5.0.5"
     yargs-parser "^21.1.1"
+
+zustand@^5.0.3:
+  version "5.0.4"
+  resolved "https://registry.yarnpkg.com/zustand/-/zustand-5.0.4.tgz#33af161f1e337854ccd8b711ef9e92545d6ae53f"
+  integrity sha512-39VFTN5InDtMd28ZhjLyuTnlytDr9HfwO512Ai4I8ZABCoyAj4F1+sr7sD1jP/+p7k77Iko0Pb5NhgBFDCX0kQ==

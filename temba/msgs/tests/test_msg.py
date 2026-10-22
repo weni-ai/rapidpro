@@ -3,9 +3,8 @@ from unittest.mock import patch
 
 from django.utils import timezone
 
-from temba.channels.models import ChannelLog
 from temba.flows.models import Flow
-from temba.msgs.models import Msg, SystemLabel
+from temba.msgs.models import Msg, MsgFolder
 from temba.msgs.tasks import fail_old_android_messages
 from temba.tests import CRUDLTestMixin, TembaTest
 from temba.tickets.models import Ticket
@@ -175,7 +174,7 @@ class MsgTest(TembaTest, CRUDLTestMixin):
     def test_release_counts(self):
         flow = self.create_flow("Test")
 
-        def assertReleaseCount(direction, status, visibility, flow, label):
+        def assertReleaseCount(direction, status, visibility, flow, folder):
             if direction == Msg.DIRECTION_OUT:
                 msg = self.create_outgoing_msg(self.joe, "Whattup Joe", flow=flow, status=status)
             else:
@@ -184,23 +183,22 @@ class MsgTest(TembaTest, CRUDLTestMixin):
             Msg.objects.filter(id=msg.id).update(visibility=visibility)
 
             # assert our folder count is right
-            counts = SystemLabel.get_counts(self.org)
-            self.assertEqual(counts[label], 1)
+            self.assertEqual(folder.get_count(self.org), 1)
 
             # delete the msg, count should now be 0
             msg.delete()
-            counts = SystemLabel.get_counts(self.org)
-            self.assertEqual(counts[label], 0)
+
+            self.assertEqual(folder.get_count(self.org), 0)
 
         # outgoing labels
-        assertReleaseCount("O", Msg.STATUS_SENT, Msg.VISIBILITY_VISIBLE, None, SystemLabel.TYPE_SENT)
-        assertReleaseCount("O", Msg.STATUS_QUEUED, Msg.VISIBILITY_VISIBLE, None, SystemLabel.TYPE_OUTBOX)
-        assertReleaseCount("O", Msg.STATUS_FAILED, Msg.VISIBILITY_VISIBLE, flow, SystemLabel.TYPE_FAILED)
+        assertReleaseCount("O", Msg.STATUS_SENT, Msg.VISIBILITY_VISIBLE, None, MsgFolder.SENT)
+        assertReleaseCount("O", Msg.STATUS_QUEUED, Msg.VISIBILITY_VISIBLE, None, MsgFolder.OUTBOX)
+        assertReleaseCount("O", Msg.STATUS_FAILED, Msg.VISIBILITY_VISIBLE, flow, MsgFolder.FAILED)
 
         # incoming labels
-        assertReleaseCount("I", Msg.STATUS_HANDLED, Msg.VISIBILITY_VISIBLE, None, SystemLabel.TYPE_INBOX)
-        assertReleaseCount("I", Msg.STATUS_HANDLED, Msg.VISIBILITY_ARCHIVED, None, SystemLabel.TYPE_ARCHIVED)
-        assertReleaseCount("I", Msg.STATUS_HANDLED, Msg.VISIBILITY_VISIBLE, flow, SystemLabel.TYPE_FLOWS)
+        assertReleaseCount("I", Msg.STATUS_HANDLED, Msg.VISIBILITY_VISIBLE, None, MsgFolder.INBOX)
+        assertReleaseCount("I", Msg.STATUS_HANDLED, Msg.VISIBILITY_ARCHIVED, None, MsgFolder.ARCHIVED)
+        assertReleaseCount("I", Msg.STATUS_HANDLED, Msg.VISIBILITY_VISIBLE, flow, MsgFolder.HANDLED)
 
     def test_fail_old_android_messages(self):
         msg1 = self.create_outgoing_msg(self.joe, "Hello", status=Msg.STATUS_QUEUED)
@@ -227,9 +225,6 @@ class MsgTest(TembaTest, CRUDLTestMixin):
 
     def test_big_ids(self):
         # create an incoming message with big id
-        log = ChannelLog.objects.create(
-            id=3_000_000_000, channel=self.channel, is_error=True, log_type=ChannelLog.LOG_TYPE_MSG_RECEIVE
-        )
         msg = Msg.objects.create(
             id=3_000_000_000,
             org=self.org,
@@ -240,8 +235,9 @@ class MsgTest(TembaTest, CRUDLTestMixin):
             channel=self.channel,
             status="H",
             msg_type="T",
+            is_android=False,
             visibility="V",
-            log_uuids=[log.uuid],
+            log_uuids=[],
             created_on=timezone.now(),
             modified_on=timezone.now(),
         )

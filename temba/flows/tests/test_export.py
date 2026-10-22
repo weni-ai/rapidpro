@@ -72,7 +72,7 @@ class ResultsExportTest(TembaTest):
         color_other = flow_nodes[3]
         orange_reply = flow_nodes[1]
 
-        flow.metadata["results"] = [
+        flow.info["results"] = [
             {
                 "key": "color",
                 "name": "Color",
@@ -86,7 +86,7 @@ class ResultsExportTest(TembaTest):
                 "node_uuids": ["773698ef-d512-477b-a404-437a2aa5b1c9"],
             },
         ]
-        flow.save(update_fields=("metadata",))
+        flow.save(update_fields=("info",))
 
         age = self.create_field("age", "Age")
         devs = self.create_group("Devs", [self.contact])
@@ -106,7 +106,7 @@ class ResultsExportTest(TembaTest):
             .visit(color_split)
             .wait()
             .save()
-        ).session.runs.get()
+        )[0]
 
         contact1_in1 = self.create_incoming_msg(self.contact, "light beige")
         contact1_in2 = self.create_incoming_msg(self.contact, "orange")
@@ -132,7 +132,7 @@ class ResultsExportTest(TembaTest):
             )
             .complete()
             .save()
-        ).session.runs.get()
+        )[0]
 
         contact2_in1 = self.create_incoming_msg(self.contact2, "green")
         contact2_run1 = (
@@ -148,7 +148,7 @@ class ResultsExportTest(TembaTest):
             .visit(color_split)
             .wait()
             .save()
-        ).session.runs.get()
+        )[0]
 
         contact2_run2 = (
             MockSessionWriter(self.contact2, flow)
@@ -157,7 +157,7 @@ class ResultsExportTest(TembaTest):
             .visit(color_split)
             .wait()
             .save()
-        ).session.runs.get()
+        )[0]
 
         contact1_in3 = self.create_incoming_msg(self.contact, " blue ")
         contact1_run2 = (
@@ -172,12 +172,12 @@ class ResultsExportTest(TembaTest):
             .send_msg("Blue is sad. :(", self.channel)
             .complete()
             .save()
-        ).session.runs.get()
+        )[0]
 
         for run in (contact1_run1, contact2_run1, contact3_run1, contact1_run2, contact2_run2):
             run.refresh_from_db()
 
-        with self.assertNumQueries(23):
+        with self.assertNumQueries(24):
             workbook = self._export(
                 flow,
                 start_date=today - timedelta(days=7),
@@ -317,7 +317,7 @@ class ResultsExportTest(TembaTest):
         )
 
         # test without unresponded
-        with self.assertNumQueries(21):
+        with self.assertNumQueries(22):
             workbook = self._export(
                 flow,
                 start_date=today - timedelta(days=7),
@@ -392,7 +392,7 @@ class ResultsExportTest(TembaTest):
         )
 
         # test export with a contact field
-        with self.assertNumQueries(25):
+        with self.assertNumQueries(26):
             workbook = self._export(
                 flow,
                 start_date=today - timedelta(days=7),
@@ -497,7 +497,7 @@ class ResultsExportTest(TembaTest):
                 .send_msg("I love orange too!", self.channel)
                 .complete()
                 .save()
-            ).session.runs.get()
+            )[0]
 
             workbook = self._export(flow, start_date=today - timedelta(days=7), end_date=today)
             self.assertEqual(1, len(workbook.worksheets))
@@ -557,7 +557,7 @@ class ResultsExportTest(TembaTest):
 
         contact1_run1, contact2_run1 = flow.runs.order_by("id")
 
-        with self.assertNumQueries(17):
+        with self.assertNumQueries(18):
             workbook = self._export(flow, start_date=today - timedelta(days=7), end_date=today)
 
         tz = self.org.timezone
@@ -606,7 +606,7 @@ class ResultsExportTest(TembaTest):
         )
 
         # test without unresponded
-        with self.assertNumQueries(10):
+        with self.assertNumQueries(11):
             workbook = self._export(
                 flow,
                 start_date=today - timedelta(days=7),
@@ -645,7 +645,7 @@ class ResultsExportTest(TembaTest):
             .visit(color_split)
             .wait()
             .save()
-        ).session.runs.get()
+        )[0]
 
         contact1_in1 = self.create_incoming_msg(self.contact, "light beige")
         contact1_in2 = self.create_incoming_msg(self.contact, "red")
@@ -661,7 +661,6 @@ class ResultsExportTest(TembaTest):
             .send_msg("I don't know that color. Try again.", self.channel)
             .visit(color_split)
             .wait()
-            .save()
             .resume(msg=contact1_in2)
             .set_result("Color", "red", "Red", "red")
             .visit(beer_prompt)
@@ -669,7 +668,7 @@ class ResultsExportTest(TembaTest):
             .visit(beer_split)
             .complete()
             .save()
-        ).session.runs.get()
+        )[0]
 
         devs = self.create_group("Devs", [self.contact])
 
@@ -695,7 +694,7 @@ class ResultsExportTest(TembaTest):
             .visit(beer_split)
             .wait()
             .save()
-        ).session.runs.get()
+        )[0]
 
         contact2_run2 = (
             MockSessionWriter(self.contact2, favorites)
@@ -704,7 +703,7 @@ class ResultsExportTest(TembaTest):
             .visit(color_split)
             .wait()
             .save()
-        ).session.runs.get()
+        )[0]
 
         contact1_in3 = self.create_incoming_msg(self.contact, " blue ")
         contact1_run2 = (
@@ -720,7 +719,7 @@ class ResultsExportTest(TembaTest):
             .visit(beer_split)
             .wait()
             .save()
-        ).session.runs.get()
+        )[0]
 
         for run in (contact1_run1, contact2_run1, contact3_run1, contact1_run2, contact2_run2):
             run.refresh_from_db()
@@ -914,7 +913,7 @@ class ResultsExportTest(TembaTest):
             .visit(color_split)
             .wait()
             .save()
-        ).session.runs.get()
+        )[0]
 
         workbook = self._export(flow, start_date=today - timedelta(days=7), end_date=today)
         tz = self.org.timezone
@@ -963,7 +962,7 @@ class ResultsExportTest(TembaTest):
             .visit(color_split)
             .wait()
             .save()
-        ).session.runs.get()
+        )[0]
 
         contact2_in1 = self.create_incoming_msg(self.contact2, "blue")
         contact2_run = (
@@ -978,7 +977,7 @@ class ResultsExportTest(TembaTest):
             .send_msg("Blue is sad :(.", self.channel)
             .complete()
             .save()
-        ).session.runs.get()
+        )[0]
 
         # and a run for a different flow
         flow2 = self.get_flow("favorites_v13")
@@ -991,7 +990,7 @@ class ResultsExportTest(TembaTest):
             .visit(flow2_nodes[2])
             .wait()
             .save()
-        ).session.runs.get()
+        )[0]
 
         contact3_run = (
             MockSessionWriter(self.contact3, flow)
@@ -1000,7 +999,7 @@ class ResultsExportTest(TembaTest):
             .visit(color_split)
             .wait()
             .save()
-        ).session.runs.get()
+        )[0]
 
         # we now have 4 runs in this order of modified_on
         contact1_run.refresh_from_db()
@@ -1097,7 +1096,7 @@ class ResultsExportTest(TembaTest):
         today = timezone.now().astimezone(self.org.timezone).date()
         flow = self.create_flow("Test")
 
-        self.assertEqual(flow.get_run_stats()["total"], 0)
+        self.assertEqual(sum(flow.get_run_counts().values()), 0)
 
         workbook = self._export(flow, start_date=today - timedelta(days=7), end_date=today, has_results=False)
 

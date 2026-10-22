@@ -5,7 +5,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from temba import mailroom
-from temba.msgs.models import Broadcast, Media, OptIn, SystemLabel
+from temba.msgs.models import Broadcast, Media, OptIn
 from temba.msgs.views import ScheduleForm
 from temba.schedules.models import Schedule
 from temba.templates.models import TemplateTranslation
@@ -108,7 +108,7 @@ class BroadcastCRUDLTest(TembaTest, CRUDLTestMixin):
             process=False,
         )
 
-        self.assertRequestDisallowed(create_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(create_url, [None, self.agent])
         self.assertCreateFetch(create_url, [self.editor, self.admin], form_fields=("contact_search",))
 
         # initialize form based on a contact
@@ -144,9 +144,9 @@ class BroadcastCRUDLTest(TembaTest, CRUDLTestMixin):
         response = self.process_wizard(
             "create",
             create_url,
-            self._form_data(translations={"eng": {"text": "." * 641}}, contacts=[self.joe]),
+            self._form_data(translations={"eng": {"text": "." * 4097}}, contacts=[self.joe]),
         )
-        self.assertFormError(response.context["form"], "compose", ["Maximum allowed text is 640 characters."])
+        self.assertFormError(response.context["form"], "compose", ["Maximum allowed text is 4096 characters."])
 
         # too many attachments
         attachments = compose_deserialize_attachments([{"content_type": media.content_type, "url": media.url}])
@@ -296,7 +296,7 @@ class BroadcastCRUDLTest(TembaTest, CRUDLTestMixin):
 
         update_url = reverse("msgs.broadcast_update", args=[broadcast.id])
 
-        self.assertRequestDisallowed(update_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(update_url, [None, self.agent, self.admin2])
         self.assertUpdateFetch(update_url, [self.editor, self.admin], form_fields=("contact_search",))
         self.login(self.admin)
 
@@ -538,7 +538,7 @@ class BroadcastCRUDLTest(TembaTest, CRUDLTestMixin):
 
         # if we have too many messages in our outbox we should block
         mr_mocks.msg_broadcast_preview(query="age > 30", total=2)
-        self.org.counts.create(scope=f"msgs:folder:{SystemLabel.TYPE_OUTBOX}", count=1_000_001)
+        self.org.counts.create(scope="msgs:folder:O", count=1_000_001)
         response = self.client.post(preview_url, {"query": "age > 30"}, content_type="application/json")
         self.assertEqual(
             [
@@ -577,9 +577,9 @@ class BroadcastCRUDLTest(TembaTest, CRUDLTestMixin):
             .visit(color_split)
             .wait()
             .save()
-        ).session.runs.get()
+        )[0]
 
-        self.assertRequestDisallowed(to_node_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(to_node_url, [None, self.agent])
 
         # initialize form based on a flow node UUID
         self.assertCreateFetch(
@@ -612,8 +612,8 @@ class BroadcastCRUDLTest(TembaTest, CRUDLTestMixin):
         list_url = reverse("msgs.broadcast_list")
 
         self.assertRequestDisallowed(list_url, [None, self.agent])
-        self.assertListFetch(list_url, [self.user, self.editor, self.admin], context_objects=[])
-        self.assertContentMenu(list_url, self.user, [])
+        self.assertListFetch(list_url, [self.editor, self.admin], context_objects=[])
+        self.assertContentMenu(list_url, self.editor, ["Send"])
         self.assertContentMenu(list_url, self.admin, ["Send"])
 
         broadcast = self.create_broadcast(
@@ -628,8 +628,8 @@ class BroadcastCRUDLTest(TembaTest, CRUDLTestMixin):
         scheduled_url = reverse("msgs.broadcast_scheduled")
 
         self.assertRequestDisallowed(scheduled_url, [None, self.agent])
-        self.assertListFetch(scheduled_url, [self.user, self.editor, self.admin], context_objects=[])
-        self.assertContentMenu(scheduled_url, self.user, [])
+        self.assertListFetch(scheduled_url, [self.editor, self.admin], context_objects=[])
+        self.assertContentMenu(scheduled_url, self.editor, ["Send"])
         self.assertContentMenu(scheduled_url, self.admin, ["Send"])
 
         bc1 = self.create_broadcast(
@@ -672,7 +672,7 @@ class BroadcastCRUDLTest(TembaTest, CRUDLTestMixin):
 
         delete_url = reverse("msgs.broadcast_scheduled_delete", args=[broadcast.id])
 
-        self.assertRequestDisallowed(delete_url, [None, self.user, self.agent, self.admin2])
+        self.assertRequestDisallowed(delete_url, [None, self.agent, self.admin2])
 
         # fetch the delete modal
         response = self.assertDeleteFetch(delete_url, [self.editor, self.admin], as_modal=True)
@@ -698,7 +698,7 @@ class BroadcastCRUDLTest(TembaTest, CRUDLTestMixin):
 
         status_url = f"{reverse('msgs.broadcast_status')}?id={broadcast.id}&status=P"
         self.assertRequestDisallowed(status_url, [None, self.agent])
-        response = self.assertReadFetch(status_url, [self.user, self.editor, self.admin])
+        response = self.assertReadFetch(status_url, [self.editor, self.admin])
 
         # status returns json
         self.assertEqual("Pending", response.json()["results"][0]["status"])
@@ -712,7 +712,7 @@ class BroadcastCRUDLTest(TembaTest, CRUDLTestMixin):
         )
 
         interrupt_url = reverse("msgs.broadcast_interrupt", args=[broadcast.id])
-        self.assertRequestDisallowed(interrupt_url, [None, self.user, self.agent])
+        self.assertRequestDisallowed(interrupt_url, [None, self.agent])
         self.requestView(interrupt_url, self.admin, post_data={})
 
         broadcast.refresh_from_db()

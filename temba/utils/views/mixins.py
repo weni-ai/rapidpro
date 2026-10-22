@@ -1,4 +1,5 @@
 import logging
+from datetime import date, datetime, timedelta
 from urllib.parse import quote, urlencode
 
 import requests
@@ -10,7 +11,6 @@ from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
-from django.urls import reverse
 from django.utils import timezone
 from django.utils.functional import cached_property
 
@@ -49,24 +49,6 @@ class PostOnlyMixin:
 
     def get(self, *args, **kwargs):
         return HttpResponse("Method Not Allowed", status=405)
-
-
-class RequireRecentAuthMixin:
-    """
-    Mixin that redirects the user to a authentication page if they haven't authenticated recently.
-    """
-
-    recent_auth_seconds = 10 * 60
-    recent_auth_includes_formax = False
-
-    def pre_process(self, request, *args, **kwargs):
-        is_formax = "HTTP_X_FORMAX" in request.META
-        if not is_formax or self.recent_auth_includes_formax:
-            last_auth_on = request.user.settings.last_auth_on
-            if not last_auth_on or (timezone.now() - last_auth_on).total_seconds() > self.recent_auth_seconds:
-                return HttpResponseRedirect(reverse("orgs.confirm_access") + f"?next={quote(request.path)}")
-
-        return super().pre_process(request, *args, **kwargs)
 
 
 class StaffOnlyMixin:
@@ -372,3 +354,38 @@ class SpaMixin:
         response.headers[TEMBA_MENU_SELECTION] = context[TEMBA_MENU_SELECTION]
         response.headers[TEMBA_CONTENT_ONLY] = 1 if self.is_content_only() else 0
         return response
+
+
+class ChartViewMixin:
+    """
+    Mixin for views that return chart data.
+    """
+
+    default_chart_period = (-timedelta(days=90), timedelta(days=1))
+
+    def get_chart_period(self) -> tuple[date, date]:
+        def param(name: str, default: date):
+            if name in self.request.GET:
+                try:
+                    return datetime.strptime(self.request.GET[name], r"%Y-%m-%d").date()
+                except ValueError:
+                    pass
+            return default
+
+        since = param("since", timezone.now().date() + self.default_chart_period[0])
+        until = param("until", timezone.now().date() + self.default_chart_period[1])
+        return since, until
+
+    def get_chart_data(self, since: date, until: date) -> tuple[list, list]:  # pragma: no cover
+        pass
+
+    def render_to_response(self, context, **response_kwargs):
+        since, until = self.get_chart_period()
+        labels, datasets = self.get_chart_data(since, until)
+
+        return JsonResponse(
+            {
+                "period": [since, until],
+                "data": {"labels": labels, "datasets": datasets},
+            }
+        )

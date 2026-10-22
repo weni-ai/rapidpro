@@ -2,6 +2,7 @@ import logging
 from collections import defaultdict
 from datetime import timedelta
 from typing import Any
+from uuid import UUID
 
 import phonenumbers
 import requests
@@ -10,7 +11,6 @@ import vonage
 from smartmin.views import (
     SmartCRUDL,
     SmartFormView,
-    SmartListView,
     SmartModelActionView,
     SmartReadView,
     SmartTemplateView,
@@ -22,8 +22,7 @@ from django import forms
 from django.conf import settings
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db.models import Sum
-from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
+from django.http import HttpResponse, HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.template import Context, Engine, TemplateDoesNotExist
 from django.urls import reverse
@@ -34,14 +33,11 @@ from django.utils.translation import gettext_lazy as _
 from temba.contacts.models import URN
 from temba.ivr.models import Call
 from temba.msgs.models import Msg
-from temba.notifications.views import NotificationTargetMixin
 from temba.orgs.views.base import BaseDependencyDeleteModal, BaseReadView
 from temba.orgs.views.mixins import OrgObjPermsMixin, OrgPermsMixin
 from temba.utils import countries
 from temba.utils.fields import SelectWidget
-from temba.utils.json import EpochEncoder
-from temba.utils.models import patch_queryset_count
-from temba.utils.views.mixins import ComponentFormMixin, ContextMenuMixin, ModalFormMixin, SpaMixin
+from temba.utils.views.mixins import ChartViewMixin, ComponentFormMixin, ContextMenuMixin, ModalFormMixin, SpaMixin
 
 from .models import Channel, ChannelCount, ChannelLog
 
@@ -78,16 +74,6 @@ class ClaimViewMixin(ChannelTypeMixin, OrgPermsMixin, ComponentFormMixin):
             super().__init__(**kwargs)
 
         def clean(self):
-            count, limit = Channel.get_org_limit_progress(self.request.org)
-            if limit is not None and count >= limit:
-                raise forms.ValidationError(
-                    _(
-                        "This workspace has reached its limit of %(limit)d channels. "
-                        "You must delete existing ones before you can create new ones."
-                    ),
-                    params={"limit": limit},
-                )
-
             if self.channel_type.unique_addresses:
                 assert self.cleaned_data.get("address"), "channel type should specify an address in Form.clean method"
 
@@ -103,6 +89,12 @@ class ClaimViewMixin(ChannelTypeMixin, OrgPermsMixin, ComponentFormMixin):
                     raise forms.ValidationError(_("This channel is already connected in another workspace."))
 
             return super().clean()
+
+    def pre_process(self, request, *args, **kwargs):
+        if request.org and Channel.is_limit_reached(request.org):
+            return HttpResponseRedirect(reverse("orgs.org_workspace"))
+
+        return super().pre_process(request, *args, **kwargs)
 
     def get_template_names(self):
         return (
@@ -242,9 +234,6 @@ class AuthenticatedExternalCallbackClaimView(AuthenticatedExternalClaimView):
 
 
 class BaseClaimNumberMixin(ClaimViewMixin):
-    def pre_process(self, *args, **kwargs):  # pragma: needs cover
-        return None
-
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         org = self.request.org
@@ -449,15 +438,9 @@ class UpdateChannelForm(forms.ModelForm):
 
     class Meta:
         model = Channel
-        fields = ("name", "log_policy")
+        fields = ("name", "is_enabled", "log_policy")
         readonly = ()
-        labels = {}
-        helps = {}
-
-
-class UpdateTelChannelForm(UpdateChannelForm):
-    class Meta(UpdateChannelForm.Meta):
-        helps = {"address": _("Phone number of this channel")}
+        labels = {"is_enabled": _("Enabled")}
 
 
 class ChannelCRUDL(SmartCRUDL):
@@ -470,18 +453,17 @@ class ChannelCRUDL(SmartCRUDL):
         "read",
         "delete",
         "configuration",
+        "logs_list",
+        "logs_read",
         "facebook_whitelist",
     )
 
-    class Read(SpaMixin, ContextMenuMixin, NotificationTargetMixin, BaseReadView):
+    class Read(SpaMixin, ContextMenuMixin, BaseReadView):
         slug_url_kwarg = "uuid"
         exclude = ("id", "is_active", "created_by", "modified_by", "modified_on")
 
         def derive_menu_path(self):
             return f"/settings/channels/{self.object.uuid}"
-
-        def get_notification_scope(self) -> tuple:
-            return "incident:started", str(self.object.id)
 
         def build_context_menu(self, menu):
             obj = self.get_object()
@@ -492,7 +474,7 @@ class ChannelCRUDL(SmartCRUDL):
             if obj.type.config_ui:
                 menu.add_link(_("Configuration"), reverse("channels.channel_configuration", args=[obj.uuid]))
 
-            menu.add_link(_("Logs"), reverse("channels.channellog_list", args=[obj.uuid]))
+            menu.add_link(_("Logs"), reverse("channels.channel_logs_list", args=[obj.uuid]))
 
             if obj.type.template_type:
                 menu.add_link(_("Template Logs"), reverse("request_logs.httplog_channel", args=[obj.uuid]))
@@ -536,126 +518,111 @@ class ChannelCRUDL(SmartCRUDL):
                 if unsent_msgs:
                     context["unsent_msgs_count"] = unsent_msgs.count()
 
-            message_stats_table = []
-
-            # we'll show totals for every month since this channel was started
-            month_start = channel.created_on.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-            # get our totals grouped by month
-            monthly_totals = list(
-                ChannelCount.objects.filter(channel=channel, day__gte=month_start)
-                .filter(
-                    count_type__in=[
-                        ChannelCount.INCOMING_MSG_TYPE,
-                        ChannelCount.OUTGOING_MSG_TYPE,
-                        ChannelCount.INCOMING_IVR_TYPE,
-                        ChannelCount.OUTGOING_IVR_TYPE,
-                    ]
-                )
-                .extra({"month": "date_trunc('month', day)"})
-                .values("month", "count_type")
-                .order_by("month", "count_type")
-                .annotate(count_sum=Sum("count"))
-            )
-
-            now = timezone.now()
-            while month_start < now:
-                msg_in = 0
-                msg_out = 0
-                ivr_in = 0
-                ivr_out = 0
-
-                while monthly_totals and monthly_totals[0]["month"] == month_start:
-                    monthly_total = monthly_totals.pop(0)
-                    if monthly_total["count_type"] == ChannelCount.INCOMING_MSG_TYPE:
-                        msg_in = monthly_total["count_sum"]
-                    elif monthly_total["count_type"] == ChannelCount.OUTGOING_MSG_TYPE:
-                        msg_out = monthly_total["count_sum"]
-                    elif monthly_total["count_type"] == ChannelCount.INCOMING_IVR_TYPE:
-                        ivr_in = monthly_total["count_sum"]
-                    elif monthly_total["count_type"] == ChannelCount.OUTGOING_IVR_TYPE:
-                        ivr_out = monthly_total["count_sum"]
-
-                message_stats_table.append(
-                    dict(
-                        month_start=month_start,
-                        incoming_messages_count=msg_in,
-                        outgoing_messages_count=msg_out,
-                        incoming_ivr_count=ivr_in,
-                        outgoing_ivr_count=ivr_out,
-                    )
-                )
-
-                month_start = (month_start + timedelta(days=32)).replace(day=1)
-
-            # reverse our table so most recent is first
-            message_stats_table.reverse()
-            context["message_stats_table"] = message_stats_table
-
+            context["monthly_counts"] = self.get_monthly_counts()
             return context
 
-    class Chart(BaseReadView):
+        def get_monthly_counts(self) -> list:
+            # for every month since this channel was started
+            since = self.object.created_on.replace(day=1).date()
+            until = timezone.now().date() + timedelta(days=1)
+
+            # get our totals grouped by month+scope
+            counts = (
+                self.object.counts.period(since, until)
+                .filter(
+                    scope__in=[
+                        ChannelCount.SCOPE_TEXT_IN,
+                        ChannelCount.SCOPE_TEXT_OUT,
+                        ChannelCount.SCOPE_VOICE_IN,
+                        ChannelCount.SCOPE_VOICE_OUT,
+                    ]
+                )
+                .month_totals(scoped=True)
+            )
+
+            # covert into a table of totals by month
+            by_month = []
+            month = since
+            while month < until:
+                by_month.append(
+                    dict(
+                        month_start=month,
+                        text_in=counts.get((month, ChannelCount.SCOPE_TEXT_IN), 0),
+                        text_out=counts.get((month, ChannelCount.SCOPE_TEXT_OUT), 0),
+                        voice_in=counts.get((month, ChannelCount.SCOPE_VOICE_IN), 0),
+                        voice_out=counts.get((month, ChannelCount.SCOPE_VOICE_OUT), 0),
+                    )
+                )
+                month = (month + timedelta(days=32)).replace(day=1)
+
+            # reverse our table so most recent is first
+            by_month.reverse()
+            return by_month
+
+    class Chart(ChartViewMixin, BaseReadView):
         permission = "channels.channel_read"
         slug_url_kwarg = "uuid"
+        default_chart_period = (-timedelta(days=30), timedelta(days=1))
 
-        def render_to_response(self, context, **response_kwargs):
-            channel = self.object
-
-            end_date = (timezone.now() + timedelta(days=1)).date()
-            start_date = end_date - timedelta(days=30)
-
-            message_stats = []
-            msg_in = []
-            msg_out = []
-            ivr_in = []
-            ivr_out = []
-
-            message_stats.append(dict(name=_("Incoming Text"), data=msg_in, yAxis=1))
-            message_stats.append(dict(name=_("Outgoing Text"), data=msg_out, yAxis=1))
-
-            ivr_count = channel.get_ivr_count()
-            if ivr_count:
-                message_stats.append(dict(name=_("Incoming IVR"), data=ivr_in, yAxis=1))
-                message_stats.append(dict(name=_("Outgoing IVR"), data=ivr_out, yAxis=1))
-
-            # get all our counts for that period
-            daily_counts = list(
-                channel.counts.filter(
-                    day__gte=start_date,
-                    count_type__in=[
-                        ChannelCount.INCOMING_MSG_TYPE,
-                        ChannelCount.OUTGOING_MSG_TYPE,
-                        ChannelCount.INCOMING_IVR_TYPE,
-                        ChannelCount.OUTGOING_IVR_TYPE,
+        def get_chart_data(self, since, until) -> tuple[list, list]:
+            counts = (
+                self.object.counts.period(since, until)
+                .filter(
+                    scope__in=[
+                        ChannelCount.SCOPE_TEXT_IN,
+                        ChannelCount.SCOPE_TEXT_OUT,
+                        ChannelCount.SCOPE_VOICE_IN,
+                        ChannelCount.SCOPE_VOICE_OUT,
                     ],
                 )
-                .values("day", "count_type")
-                .order_by("day", "count_type")
-                .annotate(count_sum=Sum("count"))
+                .day_totals(scoped=True)
             )
 
-            current = start_date
-            while current <= end_date:
-                # for every date we care about
-                while daily_counts and daily_counts[0]["day"] == current:
-                    daily_count = daily_counts.pop(0)
+            # collect all dates and values by scope
+            dates_set = set()
+            values_by_scope = {
+                ChannelCount.SCOPE_TEXT_IN: {},
+                ChannelCount.SCOPE_TEXT_OUT: {},
+                ChannelCount.SCOPE_VOICE_IN: {},
+                ChannelCount.SCOPE_VOICE_OUT: {},
+            }
 
-                    point = [daily_count["day"], daily_count["count_sum"]]
-                    if daily_count["count_type"] == ChannelCount.INCOMING_MSG_TYPE:
-                        msg_in.append(point)
-                    elif daily_count["count_type"] == ChannelCount.OUTGOING_MSG_TYPE:
-                        msg_out.append(point)
-                    elif daily_count["count_type"] == ChannelCount.INCOMING_IVR_TYPE:
-                        ivr_in.append(point)
-                    elif daily_count["count_type"] == ChannelCount.OUTGOING_IVR_TYPE:
-                        ivr_out.append(point)
-                current = current + timedelta(days=1)
+            for (day, scope), count in counts.items():
+                dates_set.add(day)
+                values_by_scope[scope][day] = count
 
-            return JsonResponse(
-                {"start_date": start_date, "end_date": end_date, "series": message_stats},
-                json_dumps_params={"indent": 2},
-                encoder=EpochEncoder,
-            )
+            # create sorted list of dates
+            labels = sorted(list(dates_set))
+
+            ivr_count = self.object.get_ivr_count()
+
+            # create datasets with fixed splits for Msg In, Msg Out, Voice In, Voice Out
+            datasets = [
+                {
+                    "label": _("Incoming") if not ivr_count else _("Incoming Text"),
+                    "data": [values_by_scope[ChannelCount.SCOPE_TEXT_IN].get(date, 0) for date in labels],
+                },
+                {
+                    "label": _("Outgoing") if not ivr_count else _("Outgoing Text"),
+                    "data": [values_by_scope[ChannelCount.SCOPE_TEXT_OUT].get(date, 0) for date in labels],
+                },
+            ]
+
+            if ivr_count:
+                datasets.extend(
+                    [
+                        {
+                            "label": _("Incoming Voice"),
+                            "data": [values_by_scope[ChannelCount.SCOPE_VOICE_IN].get(date, 0) for date in labels],
+                        },
+                        {
+                            "label": _("Outgoing Voice"),
+                            "data": [values_by_scope[ChannelCount.SCOPE_VOICE_OUT].get(date, 0) for date in labels],
+                        },
+                    ]
+                )
+
+            return [d.strftime("%Y-%m-%d") for d in labels], datasets
 
     class FacebookWhitelist(ComponentFormMixin, ModalFormMixin, OrgObjPermsMixin, SmartModelActionView):
         class DomainForm(forms.Form):
@@ -728,6 +695,12 @@ class ChannelCRUDL(SmartCRUDL):
             return response
 
     class Update(ComponentFormMixin, ModalFormMixin, OrgObjPermsMixin, SmartUpdateView):
+        field_config = {
+            "is_enabled": {
+                "help": _("Makes channel available for sending. Incoming messages will be archived if not enabled.")
+            }
+        }
+
         def derive_title(self):
             return _("%s Channel") % self.object.type.name
 
@@ -778,10 +751,7 @@ class ChannelCRUDL(SmartCRUDL):
             org = self.request.org
 
             context["org_timezone"] = str(org.timezone)
-
-            channel_count, org_limit = Channel.get_org_limit_progress(org)
-            context["total_count"] = channel_count
-            context["total_limit"] = org_limit
+            context["limit_reached"] = Channel.is_limit_reached(org)
 
             # fetch channel types, sorted by category and name
             recommended_channels, types_by_category, only_regional_channels = self.channel_types_groups()
@@ -810,12 +780,12 @@ class ChannelCRUDL(SmartCRUDL):
     class Configuration(SpaMixin, BaseReadView):
         slug_url_kwarg = "uuid"
 
-        def pre_process(self, *args, **kwargs):
+        def pre_process(self, request, *args, **kwargs):
             channel = self.get_object()
             if not channel.type.config_ui:
                 return HttpResponseRedirect(reverse("channels.channel_read", args=[channel.uuid]))
 
-            return super().pre_process(*args, **kwargs)
+            return super().pre_process(request, *args, **kwargs)
 
         def derive_menu_path(self):
             return f"/settings/channels/{self.object.uuid}"
@@ -849,113 +819,74 @@ class ChannelCRUDL(SmartCRUDL):
 
             return context
 
-
-class ChannelLogCRUDL(SmartCRUDL):
-    model = ChannelLog
-    path = "logs"  # urls like /channels/logs/
-    actions = ("list", "read", "msg", "call")
-
-    class List(SpaMixin, OrgPermsMixin, SmartListView):
-        fields = ("channel", "description", "created_on")
-        link_fields = ("channel", "description", "created_on")
+    class LogsList(SpaMixin, OrgObjPermsMixin, SmartReadView):
+        permission = "channels.channel_logs"
+        slug_url_kwarg = "uuid"
         paginate_by = 50
-
-        def derive_menu_path(self):
-            return f"/settings/channels/{self.channel.uuid}"
+        title = _("Channel Logs")
 
         @classmethod
         def derive_url_pattern(cls, path, action):
-            return r"^%s/(?P<channel_uuid>[^/]+)/$" % path
-
-        @cached_property
-        def channel(self):
-            return get_object_or_404(Channel, uuid=self.kwargs["channel_uuid"])
-
-        def derive_org(self):
-            return self.channel.org
-
-        def derive_queryset(self, **kwargs):
-            qs = self.channel.logs.order_by("-created_on")
-
-            patch_queryset_count(qs, self.channel.get_log_count)
-
-            return qs
-
-        def get_context_data(self, **kwargs):
-            context = super().get_context_data(**kwargs)
-            context["channel"] = self.channel
-            return context
-
-    class Read(SpaMixin, OrgObjPermsMixin, SmartReadView):
-        """
-        Detail view for a single channel log (that is in the database rather than S3).
-        """
+            return r"^%s/logs/(?P<uuid>[0-9a-f-]{36})/$" % path
 
         def derive_menu_path(self):
-            return f"/settings/channels/{self.object.channel.uuid}"
-
-        def get_object_org(self):
-            return self.get_object().channel.org
+            return f"/settings/channels/{self.kwargs['uuid']}"
 
         def get_context_data(self, **kwargs):
+            this_after = self.request.GET.get("after")
+            if this_after:
+                this_after = UUID(this_after)
+
+            logs, prev_after, next_after = ChannelLog.get_by_channel(
+                self.object, limit=self.paginate_by, after_uuid=this_after
+            )
+
             context = super().get_context_data(**kwargs)
-
-            anonymize = self.request.org.is_anon and not (self.request.GET.get("break") and self.request.user.is_staff)
-
-            context["log"] = self.object.get_display(anonymize=anonymize, urn=None)
-            return context
-
-    class BaseOwned(SpaMixin, OrgObjPermsMixin, SmartListView):
-        permission = "channels.channellog_read"
-
-        @classmethod
-        def derive_url_pattern(cls, path, action):
-            return r"^(?P<channel_uuid>[0-9a-f-]+)/%s/%s/(?P<owner_id>\d+)/$" % (path, action)
-
-        def derive_menu_path(self):
-            return f"/settings/channels/{self.owner.channel.uuid}"
-
-        def get_object_org(self):
-            return self.owner.org
-
-        def derive_queryset(self, **kwargs):
-            return ChannelLog.objects.none()  # not used as logs may be in S3
-
-        def get_context_data(self, **kwargs):
-            context = super().get_context_data(**kwargs)
-
-            anonymize = self.request.org.is_anon and not (self.request.GET.get("break") and self.request.user.is_staff)
-            logs = []
-            for log in self.owner.get_logs():
-                logs.append(log.get_display(anonymize=anonymize, urn=self.owner.contact_urn))
-
             context["logs"] = logs
+            context["page_obj"] = {
+                "previous_page_after": prev_after,
+                "next_page_after": next_after,
+                "has_previous": bool(this_after),
+                "has_next": bool(next_after),
+            }
             return context
 
-    class Msg(BaseOwned):
-        """
-        All channel logs for a message
-        """
+    class LogsRead(SpaMixin, OrgObjPermsMixin, SmartReadView):
+        permission = "channels.channel_logs"
+        slug_url_kwarg = "uuid"
+        title = _("Channel Log")
+
+        @classmethod
+        def derive_url_pattern(cls, path, action):
+            return r"^%s/logs/(?P<uuid>[0-9a-f-]{36})/(?P<reftype>log|msg|call)/(?P<refid>[^/]{1,36})/$" % path
+
+        def derive_menu_path(self):
+            return f"/settings/channels/{self.kwargs['uuid']}"
 
         @cached_property
-        def owner(self):
-            return get_object_or_404(Msg, id=self.kwargs["owner_id"])
+        def owner(self) -> Msg | Call | None:
+            if self.kwargs["reftype"] == "msg":
+                return get_object_or_404(Msg, id=int(self.kwargs["refid"]), org=self.request.org)
+            elif self.kwargs["reftype"] == "call":
+                return get_object_or_404(Call, id=int(self.kwargs["refid"]), org=self.request.org)
+            return None
+
+        def get_logs_and_urn(self) -> tuple:
+            if self.owner:
+                return self.owner.get_logs(), self.owner.contact_urn
+
+            return ChannelLog.get_by_uuid(self.object, [UUID(self.kwargs["refid"])]), None
 
         def get_context_data(self, **kwargs):
+            anonymize = self.request.org.is_anon and not (self.request.GET.get("break") and self.request.user.is_staff)
+            raw_logs, owner_urn = self.get_logs_and_urn()
+
+            logs = []
+            for log in raw_logs:
+                logs.append(log.get_display(anonymize=anonymize, urn=owner_urn))
+
             context = super().get_context_data(**kwargs)
-            context["msg"] = self.owner
-            return context
-
-    class Call(BaseOwned):
-        """
-        All channel logs for a call
-        """
-
-        @cached_property
-        def owner(self):
-            return get_object_or_404(Call, id=self.kwargs["owner_id"])
-
-        def get_context_data(self, **kwargs):
-            context = super().get_context_data(**kwargs)
-            context["call"] = self.owner
+            context["msg"] = self.owner if isinstance(self.owner, Msg) else None
+            context["call"] = self.owner if isinstance(self.owner, Call) else None
+            context["logs"] = logs
             return context
