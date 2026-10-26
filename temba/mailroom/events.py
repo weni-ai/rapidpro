@@ -9,7 +9,7 @@ from django.utils import timezone
 
 from temba.airtime.models import AirtimeTransfer
 from temba.channels.models import Channel, ChannelEvent
-from temba.contacts.models import ContactURN
+from temba.contacts.models import URN, ContactURN
 from temba.flows.models import FlowExit, FlowRun
 from temba.ivr.models import Call
 from temba.msgs.models import Msg, OptIn
@@ -80,8 +80,22 @@ class Event:
             return event
         if event.get("type") == cls.TYPE_CONTACT_URNS_CHANGED:
             urns = event.get("urns") or []
-            return {**event, "urns": [ContactURN.ANON_MASK] * len(urns)}
+            return {**event, "urns": [cls._redact_urn(urn) for urn in urns]}
         return event
+
+    @classmethod
+    def _redact_urn(cls, urn) -> str:
+        """
+        Mask the path but keep `scheme:********` so temba-contact-chat can parse
+        contact_urns_changed events (`urn.split(':')[1]`).
+        """
+        if not isinstance(urn, str):
+            return URN.from_parts(URN.EXTERNAL_SCHEME, ContactURN.ANON_MASK)
+        try:
+            scheme, _path, _query, _display = URN.to_parts(urn)
+            return URN.from_parts(scheme, ContactURN.ANON_MASK)
+        except ValueError:
+            return URN.from_parts(URN.EXTERNAL_SCHEME, ContactURN.ANON_MASK)
 
     @classmethod
     def from_msg(cls, org: Org, user: User, obj: Msg) -> dict:

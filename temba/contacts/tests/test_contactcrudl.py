@@ -823,7 +823,7 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         )
 
     def test_history_session_events_anon_masks_urns(self):
-        from temba.contacts.models import ContactURN
+        from temba.contacts.models import URN, ContactURN
 
         joe = self.create_contact(name="Joe Blow", urns=["twitter:blow80", "tel:+250781111111"])
         history_url = reverse("contacts.contact_history", args=[joe.uuid])
@@ -841,7 +841,10 @@ class ContactCRUDLTest(CRUDLTestMixin, TembaTest):
         urn_events = [e for e in response.json()["events"] if e["type"] == "contact_urns_changed"]
         self.assertEqual(1, len(urn_events))
         self.assertGreater(len(urn_events[0]["urns"]), 0)
-        self.assertTrue(all(u == ContactURN.ANON_MASK for u in urn_events[0]["urns"]))
+        for urn in urn_events[0]["urns"]:
+            scheme, path, _query, _display = URN.to_parts(urn)
+            self.assertEqual(ContactURN.ANON_MASK, path)
+            self.assertIn(scheme, {URN.TWITTER_SCHEME, URN.TEL_SCHEME})
 
     @mock_mailroom
     def test_update(self, mr_mocks):
