@@ -138,9 +138,9 @@ class TembaSocialAccountAdapter(InviteAdapterMixin, DefaultSocialAccountAdapter)
         sociallogin.email_addresses = [EmailAddress(email=email, verified=True, primary=True)]
 
     def is_email_verified(self, provider, email):
-        # Microsoft Entra is a trusted IdP; treat social emails as verified so
+        # Microsoft Entra is a trusted IdP; treat OIDC emails as verified so
         # allauth lookup() can match existing accounts before auto-signup runs.
-        if email:
+        if provider.id == "openid_connect" and email:
             return True
         return super().is_email_verified(provider, email)
 
