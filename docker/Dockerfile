@@ -148,10 +148,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   && chown -R "${PROJECT_USER}:${PROJECT_GROUP}" "${NPM_CONFIG_PREFIX}"
 
 # Bookworm's npm package is Node 18. serialize-javascript@7 in yarn.lock requires Node >= 20.
+# Copy the real files, then recreate npm/npx. COPY follows those symlinks and drops them
+# at /usr/local/bin, where npm-cli.js can no longer resolve ../lib/cli.js.
 COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
-COPY --from=node:22-bookworm-slim /usr/local/bin/npm /usr/local/bin/npm
-COPY --from=node:22-bookworm-slim /usr/local/bin/npx /usr/local/bin/npx
 COPY --from=node:22-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+  && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+  && npm --version
 
 COPY --chown=${PROJECT_USER}:${PROJECT_GROUP} package.json yarn.lock ${PROJECT_PATH}/
 
