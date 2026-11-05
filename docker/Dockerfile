@@ -22,7 +22,7 @@ ARG RUNTIME_DEPS="\
   gosu \
   gdal-bin \
   libmagic1 \
-  npm \
+  libatomic1 \
   ca-certificates"
 
 FROM python:${PYTHON_VERSION}-slim-${DEBIAN_VERSION} AS build-uv
@@ -146,6 +146,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   && rm -rf /usr/share/man /usr/share/doc \
   && mkdir -p "${NPM_CONFIG_PREFIX}" \
   && chown -R "${PROJECT_USER}:${PROJECT_GROUP}" "${NPM_CONFIG_PREFIX}"
+
+# Bookworm's npm package is Node 18. serialize-javascript@7 in yarn.lock requires Node >= 20.
+COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=node:22-bookworm-slim /usr/local/bin/npm /usr/local/bin/npm
+COPY --from=node:22-bookworm-slim /usr/local/bin/npx /usr/local/bin/npx
+COPY --from=node:22-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
 
 COPY --chown=${PROJECT_USER}:${PROJECT_GROUP} package.json yarn.lock ${PROJECT_PATH}/
 
