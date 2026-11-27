@@ -1,4 +1,4 @@
-Unreleased
+1.8.15-rapidpro-10.2.0-mumbai (2026-11-27)
 ----------
 * Only load the Weni WebChat widget for authenticated users, hiding it from login, signup and password reset pages
 
