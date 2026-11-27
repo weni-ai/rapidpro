@@ -57,6 +57,23 @@ class UserAuthTest(TembaTest):
         self.assertEqual(200, response.status_code)
         self.assertContains(response, "At least 8 characters or more")
 
+    @override_settings(
+        WENI_WEBCHAT_SCRIPT_URL="https://webchat.example.com/script.js",
+        WENI_WEBCHAT_CDN_URL="https://webchat.example.com/cdn.js",
+    )
+    def test_weni_webchat_only_for_authenticated_users(self):
+        response = self.client.get(reverse("account_login"))
+        self.assertEqual(200, response.status_code)
+        self.assertNotContains(response, "isWeniWebChatAlreadyInserted")
+        self.assertNotContains(response, "https://webchat.example.com/script.js")
+
+        self.login(self.admin)
+
+        response = self.client.get(reverse("account_change_password"))
+        self.assertEqual(200, response.status_code)
+        self.assertContains(response, "isWeniWebChatAlreadyInserted")
+        self.assertContains(response, "https://webchat.example.com/script.js")
+
     def test_mfa(self):
         self.login(self.admin)
         mfa_url = reverse("mfa_activate_totp")

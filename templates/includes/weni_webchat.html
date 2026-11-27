@@ -1,4 +1,4 @@
-{% if weni_webchat_script_url %}
+{% if weni_webchat_script_url and user.is_authenticated %}
   <script>
     (function (d, s, u, w, v) {
       if (w[v]) { return; } else { w[v] = !0; }
