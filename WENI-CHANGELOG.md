@@ -1,3 +1,7 @@
+Unreleased
+----------
+* Only load the Weni WebChat widget for authenticated users, hiding it from login, signup and password reset pages
+
 1.8.6-rapidpro-8.2.0
 ----------
 * Add turn io channel type
